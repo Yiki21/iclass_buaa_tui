@@ -11,7 +11,16 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -31,15 +40,30 @@ jobs:
       - name: Build macOS package
         run: cargo packager --release
 
+      - name: Prepare macOS artifact
+        run: |
+          mkdir -p dist
+          package_path=$(find target/packager -maxdepth 1 -name '*.dmg' -print -quit)
+          cp "$package_path" "dist/iclass_buaa_tui-macos-${{ matrix.arch }}.dmg"
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
-          name: macos-${{ github.ref_name }}
-          path: target/packager
+          name: macos-${{ matrix.arch }}-${{ github.ref_name }}
+          path: dist/*.dmg
           if-no-files-found: error
 
   build-windows:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -56,15 +80,30 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Prepare exe artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/iclass_buaa_tui.exe "dist/iclass_buaa_tui-windows-${{ matrix.arch }}.exe"
+
       - name: Upload exe artifact
         uses: actions/upload-artifact@v7
         with:
-          name: windows-exe-${{ github.ref_name }}
-          path: target/release/iclass_buaa_tui.exe
+          name: windows-exe-${{ matrix.arch }}-${{ github.ref_name }}
+          path: dist/*.exe
           if-no-files-found: error
 
   build-deb:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -96,12 +135,21 @@ jobs:
       - name: Upload deb artifact
         uses: actions/upload-artifact@v7
         with:
-          name: deb-${{ github.ref_name }}
+          name: deb-${{ matrix.arch }}-${{ github.ref_name }}
           path: target/debian/*.deb
           if-no-files-found: error
 
   build-rpm:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+
+    runs-on: ${{ matrix.runner }}
     container:
       image: fedora:42
 
@@ -137,7 +185,7 @@ jobs:
       - name: Upload rpm artifact
         uses: actions/upload-artifact@v7
         with:
-          name: rpm-${{ github.ref_name }}
+          name: rpm-${{ matrix.arch }}-${{ github.ref_name }}
           path: target/generate-rpm/*.rpm
           if-no-files-found: error
 
