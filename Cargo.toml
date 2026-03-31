@@ -6,6 +6,25 @@ description = "BUAA class check TUI software"
 homepage = "https://github.com/Yiki21/iclass_buaa_tui"
 license = "MIT"
 
+[package.metadata.packager]
+product-name = "iClass BUAA TUI"
+identifier = "io.github.yiki21.iclass-buaa-tui"
+formats = ["dmg"]
+out-dir = "target/packager"
+binaries-dir = "target/release"
+before-packaging-command = "cargo build --release --locked"
+license-file = "LICENSE"
+homepage = "https://github.com/Yiki21/iclass_buaa_tui"
+description = "BUAA class check-in TUI tool"
+long-description = """\
+A terminal user interface tool for BUAA class check-in.
+
+Features:
+- QR code generation
+- Terminal-based UI
+- Async HTTP requests
+"""
+
 [package.metadata.generate-rpm]
 summary = "BUAA class check-in TUI tool"
 vendor = "Yiki21"

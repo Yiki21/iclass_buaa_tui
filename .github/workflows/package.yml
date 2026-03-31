@@ -10,6 +10,59 @@ permissions:
   contents: read
 
 jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: Build macOS package
+        run: cargo packager --release
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ github.ref_name }}
+          path: target/packager
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-exe-${{ github.ref_name }}
+          path: target/release/iclass_buaa_tui.exe
+          if-no-files-found: error
+
   build-deb:
     runs-on: ubuntu-latest
 
@@ -53,19 +106,21 @@ jobs:
       image: fedora:42
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Install system dependencies
         run: |
           dnf install -y \
-            cargo \
             gcc \
             git \
             rpm-build \
-            rust \
-            rustup \
           && dnf clean all
 
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -84,4 +139,58 @@ jobs:
         with:
           name: rpm-${{ github.ref_name }}
           path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  build-archlinux:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git \
+            rust
+
+      - name: Validate PKGBUILD version
+        shell: bash
+        run: |
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          pkgbuild_version="$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)"
+          test -n "$cargo_version"
+          test "$cargo_version" = "$pkgbuild_version"
+
+      - name: Prepare source tarball
+        shell: bash
+        run: |
+          pkgname="$(sed -n 's/^pkgname=//p' PKGBUILD | head -n1)"
+          pkgver="$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)"
+          git archive \
+            --format=tar.gz \
+            --prefix="${pkgname}-${pkgver}/" \
+            --output="${pkgname}-${pkgver}.tar.gz" \
+            HEAD
+
+      - name: Create build user
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build Arch Linux package
+        shell: bash
+        run: |
+          su builder -c "cd \"$GITHUB_WORKSPACE\" && makepkg --force --nodeps --cleanbuild"
+
+      - name: Upload Arch Linux artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: archlinux-${{ github.ref_name }}
+          path: |
+            *.pkg.tar.zst
+            *.tar.gz
+            PKGBUILD
           if-no-files-found: error
