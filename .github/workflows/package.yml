@@ -61,6 +61,7 @@ jobs:
             git \
             rpm-build \
             rust \
+            rustup \
           && dnf clean all
 
       - name: Checkout
