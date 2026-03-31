@@ -1,0 +1,84 @@
+name: Package
+
+on:
+  push:
+    tags:
+      - "Build*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install deb packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+      - name: Install deb packaging tool
+        run: |
+          cargo install cargo-deb --locked --no-default-features
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build deb package
+        run: cargo deb --no-build --no-strip
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ github.ref_name }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  build-rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:42
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            cargo \
+            gcc \
+            git \
+            rpm-build \
+            rust \
+          && dnf clean all
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install rpm packaging tool
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build rpm package
+        run: cargo generate-rpm
+
+      - name: Upload rpm artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpm-${{ github.ref_name }}
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
