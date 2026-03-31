@@ -1,0 +1,739 @@
+use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::api::IClassApi;
+use crate::model::{CourseDetailItem, LoginInput, Session, SignOutcome};
+
+#[derive(Clone, Debug)]
+pub enum AsyncEvent {
+    LoginFinished(Result<LoginSuccess, String>),
+    RefreshFinished(Result<Vec<CourseDetailItem>, String>),
+    SignFinished(Result<SignOutcome, String>),
+}
+
+#[derive(Clone, Debug)]
+pub struct LoginSuccess {
+    pub session: Session,
+    pub courses: Vec<CourseDetailItem>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QrDisplay {
+    pub course_sched_id: String,
+    pub qr_url: String,
+    pub timestamp: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct WeekGroup {
+    pub key: String,
+    pub label: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub course_indices: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Screen {
+    Login,
+    Courses,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoginFocus {
+    StudentId,
+    UseVpn,
+    VpnUsername,
+    VpnPassword,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LoginForm {
+    pub student_id: String,
+    pub use_vpn: bool,
+    pub vpn_username: String,
+    pub vpn_password: String,
+    pub focus: usize,
+}
+
+impl LoginForm {
+    pub fn visible_focuses(&self) -> Vec<LoginFocus> {
+        let mut fields = vec![LoginFocus::StudentId, LoginFocus::UseVpn];
+        if self.use_vpn {
+            fields.push(LoginFocus::VpnUsername);
+            fields.push(LoginFocus::VpnPassword);
+        }
+        fields
+    }
+
+    pub fn current_focus(&self) -> LoginFocus {
+        let visible = self.visible_focuses();
+        let idx = self.focus.min(visible.len().saturating_sub(1));
+        visible[idx]
+    }
+
+    pub fn next_focus(&mut self) {
+        let len = self.visible_focuses().len();
+        self.focus = (self.focus + 1) % len.max(1);
+    }
+
+    pub fn prev_focus(&mut self) {
+        let len = self.visible_focuses().len();
+        if len == 0 {
+            return;
+        }
+        self.focus = (self.focus + len - 1) % len;
+    }
+
+    pub fn reset_focus_bounds(&mut self) {
+        let len = self.visible_focuses().len();
+        if len == 0 {
+            self.focus = 0;
+        } else if self.focus >= len {
+            self.focus = len - 1;
+        }
+    }
+
+    pub fn to_input(&self) -> LoginInput {
+        LoginInput {
+            student_id: self.student_id.trim().to_string(),
+            use_vpn: self.use_vpn,
+            vpn_username: self.vpn_username.trim().to_string(),
+            vpn_password: self.vpn_password.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct App {
+    pub screen: Screen,
+    pub login: LoginForm,
+    pub session: Option<Session>,
+    pub courses: Vec<CourseDetailItem>,
+    pub week_groups: Vec<WeekGroup>,
+    pub selected_week: usize,
+    pub selected: usize,
+    pub status: String,
+    pub busy: bool,
+    pub should_quit: bool,
+    pub show_help: bool,
+    pub qr_display: Option<QrDisplay>,
+    pub qr_refreshing: bool,
+    next_qr_refresh_at: Option<Instant>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            screen: Screen::Login,
+            login: LoginForm::default(),
+            session: None,
+            courses: Vec::new(),
+            week_groups: Vec::new(),
+            selected_week: 0,
+            selected: 0,
+            status: "输入学号后按 enter 登录，tab 切换字段".to_string(),
+            busy: false,
+            should_quit: false,
+            show_help: false,
+            qr_display: None,
+            qr_refreshing: false,
+            next_qr_refresh_at: None,
+        }
+    }
+}
+
+impl App {
+    pub fn visible_course_indices(&self) -> &[usize] {
+        self.week_groups
+            .get(self.selected_week)
+            .map(|group| group.course_indices.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn selected_week_group(&self) -> Option<&WeekGroup> {
+        self.week_groups.get(self.selected_week)
+    }
+
+    pub fn visible_courses_len(&self) -> usize {
+        self.visible_course_indices().len()
+    }
+
+    pub fn selected_course_absolute_index(&self) -> Option<usize> {
+        self.visible_course_indices().get(self.selected).copied()
+    }
+
+    pub fn selected_course(&self) -> Option<&CourseDetailItem> {
+        let index = *self.visible_course_indices().get(self.selected)?;
+        self.courses.get(index)
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+
+        if self.show_help {
+            match key.code {
+                KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => {
+                    self.show_help = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if key.code == KeyCode::Char('?') {
+            self.show_help = true;
+            return;
+        }
+
+        match self.screen {
+            Screen::Login => self.handle_login_key(key, tx),
+            Screen::Courses => self.handle_courses_key(key, tx),
+        }
+    }
+
+    pub fn handle_tick(&mut self) {
+        if !self.qr_refreshing {
+            return;
+        }
+
+        let Some(next_at) = self.next_qr_refresh_at else {
+            self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
+            return;
+        };
+
+        if Instant::now() < next_at {
+            return;
+        }
+
+        if let Err(error) = self.refresh_qr_inline() {
+            self.status = format!("二维码刷新失败: {error}");
+            self.clear_qr();
+            return;
+        }
+
+        self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
+    }
+
+    pub fn handle_async(&mut self, event: AsyncEvent) {
+        self.busy = false;
+        match event {
+            AsyncEvent::LoginFinished(result) => match result {
+                Ok(data) => {
+                    self.screen = Screen::Courses;
+                    self.session = Some(data.session);
+                    self.replace_courses(data.courses, None, None);
+                    self.clear_qr();
+                    self.status =
+                        "登录成功。h/j/k/l 在周日历中移动，H/L 或 [ ] 切周，s 直接签到，g 二维码签到，r 刷新，Shift+X 退出登录"
+                            .to_string();
+                }
+                Err(error) => {
+                    self.status = format!("登录失败: {error}");
+                }
+            },
+            AsyncEvent::RefreshFinished(result) => match result {
+                Ok(courses) => {
+                    let selected_id = self
+                        .selected_course()
+                        .map(|item| item.course_sched_id.clone());
+                    let week_key = self.selected_week_group().map(|item| item.key.clone());
+
+                    self.replace_courses(courses, week_key, selected_id.clone());
+                    let selected_id = self
+                        .selected_course()
+                        .map(|item| item.course_sched_id.clone())
+                        .unwrap_or_default();
+                    let week_label = self
+                        .selected_week_group()
+                        .map(|item| item.label.as_str())
+                        .unwrap_or("未分组");
+                    self.status = format!(
+                        "课程已刷新，共 {} 条，当前周：{}",
+                        self.visible_courses_len(),
+                        week_label
+                    );
+                    if self
+                        .qr_display
+                        .as_ref()
+                        .is_some_and(|qr| qr.course_sched_id != selected_id)
+                    {
+                        self.clear_qr();
+                    }
+                }
+                Err(error) => {
+                    self.status = format!("刷新失败: {error}");
+                }
+            },
+            AsyncEvent::SignFinished(result) => match result {
+                Ok(outcome) => {
+                    self.status = if outcome.success_like {
+                        "签到成功".to_string()
+                    } else {
+                        format!("签到结果: {}", outcome.message)
+                    };
+
+                    if outcome.success_like {
+                        if let Some(index) = self.selected_course_absolute_index() {
+                            if let Some(item) = self.courses.get_mut(index) {
+                                item.sign_status = "1".to_string();
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.status = format!("签到失败: {error}");
+                }
+            },
+        }
+    }
+
+    fn handle_login_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+        if self.busy {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.should_quit = true;
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Tab | KeyCode::Down => self.login.next_focus(),
+            KeyCode::BackTab | KeyCode::Up => self.login.prev_focus(),
+            KeyCode::Enter => self.submit_login(tx),
+            KeyCode::Char(' ') if self.login.current_focus() == LoginFocus::UseVpn => {
+                self.login.use_vpn = !self.login.use_vpn;
+                self.login.reset_focus_bounds();
+            }
+            KeyCode::Char(ch) => self.push_char(ch),
+            KeyCode::Backspace => self.pop_char(),
+            _ => {}
+        }
+    }
+
+    fn handle_courses_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+        if self.busy {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('[') | KeyCode::Char('H') => self.select_prev_week(),
+            KeyCode::Char(']') | KeyCode::Char('L') => self.select_next_week(),
+            KeyCode::Left | KeyCode::Char('h') => self.move_horizontal(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.move_horizontal(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_vertical(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_vertical(1),
+            KeyCode::Char('r') => self.refresh_courses(tx),
+            KeyCode::Char('s') => self.sign_selected(tx),
+            KeyCode::Char('g') => self.toggle_qr(),
+            KeyCode::Char('X') => self.logout(),
+            _ => {}
+        }
+    }
+
+    fn push_char(&mut self, ch: char) {
+        match self.login.current_focus() {
+            LoginFocus::StudentId => self.login.student_id.push(ch),
+            LoginFocus::VpnUsername => self.login.vpn_username.push(ch),
+            LoginFocus::VpnPassword => self.login.vpn_password.push(ch),
+            LoginFocus::UseVpn => {
+                if ch == ' ' {
+                    self.login.use_vpn = !self.login.use_vpn;
+                    self.login.reset_focus_bounds();
+                }
+            }
+        }
+    }
+
+    fn pop_char(&mut self) {
+        match self.login.current_focus() {
+            LoginFocus::StudentId => {
+                self.login.student_id.pop();
+            }
+            LoginFocus::VpnUsername => {
+                self.login.vpn_username.pop();
+            }
+            LoginFocus::VpnPassword => {
+                self.login.vpn_password.pop();
+            }
+            LoginFocus::UseVpn => {}
+        }
+    }
+
+    fn submit_login(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let input = self.login.to_input();
+        if input.student_id.is_empty() {
+            self.status = "请输入学号".to_string();
+            return;
+        }
+        if input.use_vpn && (input.vpn_username.is_empty() || input.vpn_password.is_empty()) {
+            self.status = "VPN 模式需要输入账号和密码".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = "登录中并拉取课程...".to_string();
+        spawn_login(input, tx.clone());
+    }
+
+    fn refresh_courses(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+
+        self.busy = true;
+        self.status = "刷新课程中...".to_string();
+        spawn_refresh(session, tx.clone());
+    }
+
+    fn sign_selected(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course) = self.selected_course().cloned() else {
+            self.status = "当前没有可签到课程".to_string();
+            return;
+        };
+        if course.signed() {
+            self.status = "该课程已签到".to_string();
+            return;
+        }
+        if course.course_sched_id.trim().is_empty() {
+            self.status = "当前课程缺少 courseSchedId，无法签到".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = format!("签到中: {}", course.name);
+        spawn_sign(session, course.course_sched_id, tx.clone());
+    }
+
+    fn logout(&mut self) {
+        self.screen = Screen::Login;
+        self.session = None;
+        self.courses.clear();
+        self.week_groups.clear();
+        self.selected_week = 0;
+        self.selected = 0;
+        self.busy = false;
+        self.clear_qr();
+        self.status = "已退出登录".to_string();
+    }
+
+    fn toggle_qr(&mut self) {
+        if self.qr_refreshing {
+            self.clear_qr();
+            self.status = "已关闭二维码刷新".to_string();
+            return;
+        }
+
+        match self.refresh_qr_inline() {
+            Ok(()) => {
+                self.qr_refreshing = true;
+                self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
+                self.status = "二维码刷新中，按 g 关闭".to_string();
+            }
+            Err(error) => {
+                self.status = format!("二维码生成失败: {error}");
+                self.clear_qr();
+            }
+        }
+    }
+
+    fn refresh_qr_inline(&mut self) -> Result<(), String> {
+        let Some(session) = self.session.clone() else {
+            self.screen = Screen::Login;
+            return Err("当前未登录".to_string());
+        };
+        let Some(course) = self.selected_course().cloned() else {
+            return Err("当前没有可生成二维码的课程".to_string());
+        };
+        if course.course_sched_id.trim().is_empty() {
+            return Err("当前课程缺少 courseSchedId".to_string());
+        }
+
+        let qr = session
+            .api
+            .generate_sign_qr(
+                &course.course_sched_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .map_err(|error| error.to_string())?;
+
+        self.qr_display = Some(QrDisplay {
+            course_sched_id: qr.course_sched_id,
+            qr_url: qr.qr_url,
+            timestamp: qr.timestamp,
+        });
+
+        Ok(())
+    }
+
+    fn clear_qr(&mut self) {
+        self.qr_display = None;
+        self.qr_refreshing = false;
+        self.next_qr_refresh_at = None;
+    }
+
+    fn move_vertical(&mut self, delta: isize) {
+        let Some(current_abs) = self.selected_course_absolute_index() else {
+            return;
+        };
+        let current_date = self.courses[current_abs].date.clone();
+        let day_courses = self.day_course_absolute_indices(&current_date);
+        if day_courses.is_empty() {
+            return;
+        }
+
+        let Some(day_pos) = day_courses.iter().position(|index| *index == current_abs) else {
+            return;
+        };
+
+        let next_pos = clamp_step(day_pos, day_courses.len(), delta);
+        self.set_selected_absolute(day_courses[next_pos]);
+    }
+
+    fn move_horizontal(&mut self, delta_days: i64) {
+        let Some(current_abs) = self.selected_course_absolute_index() else {
+            return;
+        };
+        let Some(current_date) = parse_course_date(&self.courses[current_abs].date) else {
+            return;
+        };
+        let Some(week) = self.selected_week_group() else {
+            return;
+        };
+        let Some(week_start) = parse_course_date(&week.start_date) else {
+            return;
+        };
+
+        let current_day_courses = self.day_course_absolute_indices(&self.courses[current_abs].date);
+        let current_row = current_day_courses
+            .iter()
+            .position(|index| *index == current_abs)
+            .unwrap_or(0);
+
+        let target_date = current_date + ChronoDuration::days(delta_days);
+        if target_date < week_start || target_date > week_start + ChronoDuration::days(6) {
+            return;
+        }
+
+        let target_key = target_date.format("%Y-%m-%d").to_string();
+        let target_courses = self.day_course_absolute_indices(&target_key);
+        if target_courses.is_empty() {
+            return;
+        }
+
+        let target_row = current_row.min(target_courses.len().saturating_sub(1));
+        self.set_selected_absolute(target_courses[target_row]);
+    }
+
+    fn day_course_absolute_indices(&self, date: &str) -> Vec<usize> {
+        self.visible_course_indices()
+            .iter()
+            .copied()
+            .filter(|index| self.courses[*index].date == date)
+            .collect()
+    }
+
+    fn set_selected_absolute(&mut self, absolute_index: usize) {
+        if let Some(position) = self
+            .visible_course_indices()
+            .iter()
+            .position(|index| *index == absolute_index)
+        {
+            self.selected = position;
+            self.clear_qr();
+        }
+    }
+
+    fn select_prev_week(&mut self) {
+        if self.week_groups.is_empty() || self.selected_week == 0 {
+            return;
+        }
+
+        self.selected_week -= 1;
+        self.selected = 0;
+        self.clear_qr();
+        if let Some(week) = self.selected_week_group() {
+            self.status = format!("已切换到 {}", week.label);
+        }
+    }
+
+    fn select_next_week(&mut self) {
+        if self.week_groups.is_empty() || self.selected_week + 1 >= self.week_groups.len() {
+            return;
+        }
+
+        self.selected_week += 1;
+        self.selected = 0;
+        self.clear_qr();
+        if let Some(week) = self.selected_week_group() {
+            self.status = format!("已切换到 {}", week.label);
+        }
+    }
+
+    fn replace_courses(
+        &mut self,
+        courses: Vec<CourseDetailItem>,
+        preferred_week_key: Option<String>,
+        preferred_course_id: Option<String>,
+    ) {
+        self.courses = courses;
+        self.week_groups = build_week_groups(&self.courses);
+
+        self.selected_week = preferred_week_key
+            .as_deref()
+            .and_then(|key| self.week_groups.iter().position(|group| group.key == key))
+            .or_else(|| {
+                self.week_groups
+                    .iter()
+                    .position(|group| group.key == current_week_key())
+            })
+            .unwrap_or(0);
+
+        self.selected = preferred_course_id
+            .as_deref()
+            .and_then(|course_sched_id| {
+                self.visible_course_indices()
+                    .iter()
+                    .position(|index| self.courses[*index].course_sched_id == course_sched_id)
+            })
+            .unwrap_or(0);
+
+        if self.selected >= self.visible_courses_len() {
+            self.selected = 0;
+        }
+    }
+}
+
+fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
+    tokio::spawn(async move {
+        let result = async {
+            let api = IClassApi::new(input.use_vpn)?;
+            let session = api.login(&input).await?;
+            let courses = api.get_merged_course_details(&session, 7).await?;
+            Ok::<LoginSuccess, anyhow::Error>(LoginSuccess { session, courses })
+        }
+        .await
+        .map_err(|error| error.to_string());
+
+        let _ = tx.send(AsyncEvent::LoginFinished(result));
+    });
+}
+
+fn spawn_refresh(session: Session, tx: UnboundedSender<AsyncEvent>) {
+    tokio::spawn(async move {
+        let result = session
+            .api
+            .get_merged_course_details(&session, 7)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx.send(AsyncEvent::RefreshFinished(result));
+    });
+}
+
+fn spawn_sign(session: Session, course_sched_id: String, tx: UnboundedSender<AsyncEvent>) {
+    tokio::spawn(async move {
+        let result = session
+            .api
+            .sign_now(&session, &course_sched_id)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx.send(AsyncEvent::SignFinished(result));
+    });
+}
+
+fn build_week_groups(courses: &[CourseDetailItem]) -> Vec<WeekGroup> {
+    let mut groups: Vec<WeekGroup> = Vec::new();
+    let mut current_group_key = String::new();
+
+    for (index, course) in courses.iter().enumerate() {
+        let Some(date) = parse_course_date(&course.date) else {
+            let key = "unknown".to_string();
+            if current_group_key != key {
+                current_group_key = key.clone();
+                groups.push(WeekGroup {
+                    key,
+                    label: "未识别周".to_string(),
+                    start_date: String::new(),
+                    end_date: String::new(),
+                    course_indices: Vec::new(),
+                });
+            }
+
+            if let Some(group) = groups.last_mut() {
+                group.course_indices.push(index);
+            }
+            continue;
+        };
+
+        let week_start = monday_of(date);
+        let week_end = week_start + ChronoDuration::days(6);
+        let key = week_start.format("%Y-%m-%d").to_string();
+
+        if current_group_key != key {
+            current_group_key = key.clone();
+            groups.push(WeekGroup {
+                key,
+                label: format!(
+                    "{} - {}{}",
+                    week_start.format("%m/%d"),
+                    week_end.format("%m/%d"),
+                    if week_start == monday_of(Local::now().date_naive()) {
+                        " (本周)"
+                    } else {
+                        ""
+                    }
+                ),
+                start_date: week_start.format("%Y-%m-%d").to_string(),
+                end_date: week_end.format("%Y-%m-%d").to_string(),
+                course_indices: Vec::new(),
+            });
+        }
+
+        if let Some(group) = groups.last_mut() {
+            group.course_indices.push(index);
+        }
+    }
+
+    groups
+}
+
+fn parse_course_date(value: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").ok()
+}
+
+fn monday_of(date: NaiveDate) -> NaiveDate {
+    let delta = i64::from(date.weekday().num_days_from_monday());
+    date - ChronoDuration::days(delta)
+}
+
+fn current_week_key() -> String {
+    monday_of(Local::now().date_naive())
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn clamp_step(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+
+    let next = current as isize + delta;
+    next.clamp(0, len.saturating_sub(1) as isize) as usize
+}
