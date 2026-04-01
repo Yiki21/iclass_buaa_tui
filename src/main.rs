@@ -1,10 +1,11 @@
 mod api;
 mod app;
+mod cli;
 mod constants;
 mod model;
 mod ui;
 
-use std::{io, time::Duration};
+use std::{env, io, time::Duration};
 
 use anyhow::Result;
 use app::{App, AsyncEvent};
@@ -18,8 +19,12 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let terminal_result = run_app().await;
-    if let Err(error) = terminal_result {
+    let run_result = if cli::should_run_cli(env::args_os()) {
+        cli::run_cli().await
+    } else {
+        run_app().await
+    };
+    if let Err(error) = run_result {
         eprintln!("{error:?}");
         return Err(error);
     }

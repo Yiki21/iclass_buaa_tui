@@ -1,6 +1,6 @@
 [package]
 name = "iclass_buaa_tui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "BUAA class check TUI software"
 homepage = "https://github.com/Yiki21/iclass_buaa_tui"
@@ -48,6 +48,12 @@ dest = "/usr/share/doc/iclass_buaa_tui/README.md"
 mode = "644"
 doc = true
 
+[[package.metadata.generate-rpm.assets]]
+source = "config.example.toml"
+dest = "/usr/share/doc/iclass_buaa_tui/config.example.toml"
+mode = "644"
+doc = true
+
 [package.metadata.deb]
 maintainer = "Yiki21"
 section = "utils"
@@ -70,11 +76,13 @@ assets = [
   # docs
   ["README.md", "usr/share/doc/iclass_buaa_tui/README.md", "644"],
   ["LICENSE", "usr/share/doc/iclass_buaa_tui/LICENSE", "644"],
+  ["config.example.toml", "usr/share/doc/iclass_buaa_tui/config.example.toml", "644"],
 ]
 
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
 qrcode = "0.14"
 ratatui = "0.30"
@@ -86,6 +94,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "rustls"
 ] }
 scraper = "0.26"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = [
   "macros",
@@ -93,6 +102,7 @@ tokio = { version = "1", features = [
   "sync",
   "time"
 ] }
+toml = "1.1"
 tui-qrcode = "0.2.3"
 
 [profile.dev]

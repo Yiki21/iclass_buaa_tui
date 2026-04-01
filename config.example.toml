@@ -1,0 +1,13 @@
+student_id = "2337xxxx"
+use_vpn = true
+vpn_username = "your-vpn-user"
+vpn_password = "your-vpn-password"
+
+advance_minutes = 5
+retry_count = 6
+retry_interval_seconds = 30
+
+include_courses = ["*"]
+exclude_courses = ["体育", "*实验课*"]
+
+planner_time = "07:00:00"
