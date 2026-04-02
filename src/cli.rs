@@ -198,7 +198,7 @@ pub async fn run_cli() -> Result<()> {
 
 async fn list_today(args: ListTodayArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
-    let today_courses = fetch_today_courses(&config).await?;
+    let today_courses = fetch_today_courses_with_retry(&config).await?;
     let filtered = filter_courses(today_courses, &config);
 
     if args.json {
@@ -555,6 +555,35 @@ async fn fetch_today_courses(config: &AutomationConfig) -> Result<Vec<ListedCour
         .collect())
 }
 
+async fn fetch_today_courses_with_retry(config: &AutomationConfig) -> Result<Vec<ListedCourse>> {
+    let retry = RetryPolicy {
+        max_attempts: config.retry_count,
+        interval_seconds: config.retry_interval_seconds,
+    };
+    let mut last_error = None;
+
+    for attempt in 1..=retry.max_attempts {
+        match fetch_today_courses(config).await {
+            Ok(courses) => return Ok(courses),
+            Err(error) => {
+                let message = error.to_string();
+                eprintln!(
+                    "[attempt {attempt}/{}] 获取今日课程失败 -> {}",
+                    retry.max_attempts, message
+                );
+                last_error = Some(error);
+                if attempt < retry.max_attempts {
+                    sleep(Duration::from_secs(retry.interval_seconds)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap()
+        .context("多次尝试后仍无法获取今日课程"))
+}
+
 fn map_course(course: CourseDetailItem) -> ListedCourse {
     let signed = course.signed();
     ListedCourse {
@@ -699,7 +728,7 @@ async fn sign_with_retry(
 }
 
 async fn build_plan(config: &AutomationConfig, unit_prefix: &str) -> Result<Vec<PlannedUnit>> {
-    let courses = filter_courses(fetch_today_courses(config).await?, config);
+    let courses = filter_courses(fetch_today_courses_with_retry(config).await?, config);
     let now = Local::now();
     let mut planned = Vec::new();
 
