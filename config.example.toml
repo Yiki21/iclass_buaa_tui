@@ -11,3 +11,4 @@ include_courses = ["*"]
 exclude_courses = ["体育", "*实验课*"]
 
 planner_time = "07:00:00"
+planner_interval_minutes = 10

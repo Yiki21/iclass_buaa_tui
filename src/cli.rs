@@ -38,11 +38,11 @@ enum CommandKind {
     ListToday(ListTodayArgs),
     /// Sign one course by course_sched_id, retrying with fresh login each attempt.
     Sign(SignArgs),
-    /// Plan today's sign jobs and optionally create transient systemd user timers.
+    /// Run one automation cycle: fetch today's courses and sign due ones.
     Plan(PlanArgs),
-    /// Install the daily planner systemd user service/timer units.
+    /// Install periodic systemd user service/timer units for automation.
     InstallSystemd(InstallSystemdArgs),
-    /// Disable and remove the daily planner systemd user service/timer units.
+    /// Disable and remove the periodic systemd user service/timer units.
     UninstallSystemd(UninstallSystemdArgs),
 }
 
@@ -80,10 +80,10 @@ struct PlanArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Prefix for generated systemd unit names.
+    /// Prefix for generated systemd unit names. Kept for compatibility.
     #[arg(long)]
     unit_prefix: Option<String>,
-    /// Only print the plan without creating timers.
+    /// Only print today's evaluation without attempting sign.
     #[arg(long)]
     dry_run: bool,
 }
@@ -102,6 +102,9 @@ struct InstallSystemdArgs {
     /// Override planner_time from config when generating the timer unit.
     #[arg(long)]
     planner_time: Option<String>,
+    /// Override planner_interval_minutes from config when generating the timer unit.
+    #[arg(long)]
+    planner_interval_minutes: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +138,8 @@ struct AutomationConfig {
     exclude_courses: Vec<String>,
     #[serde(default = "default_planner_time")]
     planner_time: String,
+    #[serde(default = "default_planner_interval_minutes")]
+    planner_interval_minutes: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -154,11 +159,26 @@ struct RetryPolicy {
     interval_seconds: u64,
 }
 
-#[derive(Debug)]
-struct PlannedUnit {
-    unit_name: String,
-    scheduled_at: DateTime<Local>,
+#[derive(Debug, Clone)]
+struct PollTarget {
     course: ListedCourse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollStatusKind {
+    WaitingForDailyStart,
+    WaitingForCourse,
+    DueNow,
+    Signed,
+    Expired,
+    MissingCourseSchedId,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluatedCourse {
+    course: ListedCourse,
+    status: PollStatusKind,
+    available_at: Option<DateTime<Local>>,
 }
 
 fn default_advance_minutes() -> i64 {
@@ -179,6 +199,10 @@ fn default_include_courses() -> Vec<String> {
 
 fn default_planner_time() -> String {
     "07:00:00".to_string()
+}
+
+fn default_planner_interval_minutes() -> u32 {
+    10
 }
 
 pub fn should_run_cli(args: impl IntoIterator<Item = OsString>) -> bool {
@@ -283,32 +307,70 @@ async fn sign_command(args: SignArgs) -> Result<()> {
 
 async fn plan_command(args: PlanArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
-    let config_path = resolve_config_path(args.config.as_deref())?;
-    let unit_prefix = args
-        .unit_prefix
-        .unwrap_or_else(|| DEFAULT_UNIT_PREFIX.to_string());
-    let binary_path = current_binary_path()?;
-    let planned = build_plan(&config, &unit_prefix).await?;
-
-    if planned.is_empty() {
-        println!("今日无需要调度的课程");
-        return Ok(());
-    }
+    let _unit_prefix = args.unit_prefix;
+    let evaluated = evaluate_today_courses(&config).await?;
 
     if args.dry_run {
-        print_plan(&planned);
+        print_evaluated_courses(&evaluated);
         return Ok(());
     }
 
-    let mut scheduled = 0usize;
-    for entry in &planned {
-        schedule_with_systemd(&binary_path, &config_path, entry)?;
-        scheduled += 1;
+    let due_targets: Vec<PollTarget> = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::DueNow)
+        .filter_map(|entry| {
+            entry.available_at.map(|_| PollTarget {
+                course: entry.course.clone(),
+            })
+        })
+        .collect();
+
+    if due_targets.is_empty() {
+        print_evaluated_summary(&evaluated);
+        return Ok(());
     }
 
-    print_plan(&planned);
-    eprintln!("已创建 {scheduled} 个一次性 systemd user timer");
-    Ok(())
+    print_evaluated_summary(&evaluated);
+
+    let retry = RetryPolicy {
+        max_attempts: config.retry_count,
+        interval_seconds: config.retry_interval_seconds,
+    };
+    let mut failures = Vec::new();
+
+    for target in &due_targets {
+        eprintln!(
+            "开始签到: {} ({})",
+            target.course.name, target.course.course_sched_id
+        );
+        match sign_with_retry(
+            &config,
+            &target.course.course_sched_id,
+            retry.clone(),
+            Some(target.course.name.clone()),
+        )
+        .await
+        {
+            Ok(outcome) => {
+                println!(
+                    "{}\t{}\t{}",
+                    target.course.name, target.course.course_sched_id, outcome.message
+                );
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "{} ({}) -> {}",
+                    target.course.name, target.course.course_sched_id, error
+                ));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    bail!("部分课程签到失败:\n{}", failures.join("\n"))
 }
 
 fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
@@ -319,8 +381,12 @@ fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
         .unit_prefix
         .unwrap_or_else(|| DEFAULT_UNIT_PREFIX.to_string());
     let planner_time = args.planner_time.unwrap_or(config.planner_time.clone());
+    let planner_interval_minutes = args
+        .planner_interval_minutes
+        .unwrap_or(config.planner_interval_minutes);
     let binary_path = current_binary_path()?;
     validate_planner_time(&planner_time)?;
+    validate_planner_interval_minutes(planner_interval_minutes)?;
 
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("创建 systemd 目录失败: {}", output_dir.display()))?;
@@ -330,8 +396,8 @@ fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
     let service_path = output_dir.join(&service_name);
     let timer_path = output_dir.join(&timer_name);
 
-    let service_content = render_planner_service(&binary_path, &config_path, &unit_prefix);
-    let timer_content = render_planner_timer(&service_name, &planner_time);
+    let service_content = render_planner_service(&binary_path, &config_path);
+    let timer_content = render_planner_timer(&service_name, planner_interval_minutes);
 
     fs::write(&service_path, service_content)
         .with_context(|| format!("写入失败: {}", service_path.display()))?;
@@ -342,6 +408,9 @@ fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
         "已生成 systemd user units:\n{}\n{}",
         service_path.display(),
         timer_path.display()
+    );
+    println!(
+        "自动签到将在每天 {planner_time} 后开始按 {planner_interval_minutes} 分钟周期轮询。"
     );
     println!(
         "启用方式: systemctl --user daemon-reload && systemctl --user enable --now {timer_name}"
@@ -529,6 +598,7 @@ impl AutomationConfig {
             bail!("planner_time 不能为空");
         }
         validate_planner_time(&self.planner_time)?;
+        validate_planner_interval_minutes(self.planner_interval_minutes)?;
         Ok(())
     }
 
@@ -582,6 +652,95 @@ async fn fetch_today_courses_with_retry(config: &AutomationConfig) -> Result<Vec
     Err(last_error
         .unwrap()
         .context("多次尝试后仍无法获取今日课程"))
+}
+
+async fn evaluate_today_courses(config: &AutomationConfig) -> Result<Vec<EvaluatedCourse>> {
+    let courses = filter_courses(fetch_today_courses_with_retry(config).await?, config);
+    let now = Local::now();
+    let daily_start_at = daily_start_at(config, now)?;
+    let mut evaluated = Vec::with_capacity(courses.len());
+
+    for course in courses {
+        evaluated.push(evaluate_course(course, daily_start_at, now, config.advance_minutes)?);
+    }
+
+    Ok(evaluated)
+}
+
+fn evaluate_course(
+    course: ListedCourse,
+    daily_start_at: DateTime<Local>,
+    now: DateTime<Local>,
+    advance_minutes: i64,
+) -> Result<EvaluatedCourse> {
+    if course.signed {
+        return Ok(EvaluatedCourse {
+            course,
+            status: PollStatusKind::Signed,
+            available_at: None,
+        });
+    }
+
+    if course.course_sched_id.trim().is_empty() {
+        return Ok(EvaluatedCourse {
+            course,
+            status: PollStatusKind::MissingCourseSchedId,
+            available_at: None,
+        });
+    }
+
+    let Some(start_at) = course_start_at(&course)? else {
+        return Ok(EvaluatedCourse {
+            course,
+            status: PollStatusKind::MissingCourseSchedId,
+            available_at: None,
+        });
+    };
+    let Some(end_at) = course_end_at(&course)? else {
+        return Ok(EvaluatedCourse {
+            course,
+            status: PollStatusKind::Expired,
+            available_at: None,
+        });
+    };
+
+    if end_at <= now {
+        return Ok(EvaluatedCourse {
+            course,
+            status: PollStatusKind::Expired,
+            available_at: None,
+        });
+    }
+
+    let available_at = std::cmp::max(
+        daily_start_at,
+        start_at - ChronoDuration::minutes(advance_minutes),
+    );
+    let status = if now < daily_start_at {
+        PollStatusKind::WaitingForDailyStart
+    } else if now < available_at {
+        PollStatusKind::WaitingForCourse
+    } else {
+        PollStatusKind::DueNow
+    };
+
+    Ok(EvaluatedCourse {
+        course,
+        status,
+        available_at: Some(available_at),
+    })
+}
+
+fn daily_start_at(config: &AutomationConfig, now: DateTime<Local>) -> Result<DateTime<Local>> {
+    let date = now.date_naive();
+    let daily_time = parse_planner_time(&config.planner_time)?;
+    let naive = NaiveDateTime::new(date, daily_time);
+
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(value) => Ok(value),
+        LocalResult::Ambiguous(first, _) => Ok(first),
+        LocalResult::None => bail!("本地时区无法表示时间: {naive}"),
+    }
 }
 
 fn map_course(course: CourseDetailItem) -> ListedCourse {
@@ -727,42 +886,6 @@ async fn sign_with_retry(
     Ok(last_outcome)
 }
 
-async fn build_plan(config: &AutomationConfig, unit_prefix: &str) -> Result<Vec<PlannedUnit>> {
-    let courses = filter_courses(fetch_today_courses_with_retry(config).await?, config);
-    let now = Local::now();
-    let mut planned = Vec::new();
-
-    for course in courses {
-        if course.signed || course.course_sched_id.trim().is_empty() {
-            continue;
-        }
-
-        let Some(start_at) = course_start_at(&course)? else {
-            continue;
-        };
-        let Some(end_at) = course_end_at(&course)? else {
-            continue;
-        };
-
-        let mut scheduled_at = start_at - ChronoDuration::minutes(config.advance_minutes);
-        if scheduled_at <= now {
-            if end_at <= now {
-                continue;
-            }
-            scheduled_at = now + ChronoDuration::seconds(5);
-        }
-
-        planned.push(PlannedUnit {
-            unit_name: build_unit_name(unit_prefix, &course),
-            scheduled_at,
-            course,
-        });
-    }
-
-    planned.sort_by_key(|entry| entry.scheduled_at);
-    Ok(planned)
-}
-
 fn course_start_at(course: &ListedCourse) -> Result<Option<DateTime<Local>>> {
     build_local_time(&course.date, &course.start_time)
 }
@@ -789,97 +912,91 @@ fn build_local_time(date: &str, time: &str) -> Result<Option<DateTime<Local>>> {
     }
 }
 
-fn build_unit_name(unit_prefix: &str, course: &ListedCourse) -> String {
-    let mut suffix = sanitize_unit_component(&course.name);
-    if suffix.is_empty() {
-        suffix = "course".to_string();
-    }
-    format!(
-        "{unit_prefix}-sign-{}-{}-{}",
-        course.date.replace('-', ""),
-        sanitize_unit_component(&course.start_time),
-        sanitize_unit_component(&format!("{}-{}", suffix, course.course_sched_id)),
-    )
-}
-
-fn sanitize_unit_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' => ch,
-            _ => '-',
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_lowercase()
-}
-
-fn print_plan(planned: &[PlannedUnit]) {
-    println!("course\tscheduled_at\tcourse_sched_id");
-    for entry in planned {
+fn print_evaluated_courses(evaluated: &[EvaluatedCourse]) {
+    println!("course\tstatus\tavailable_at\tcourse_sched_id");
+    for entry in evaluated {
+        let available_at = entry
+            .available_at
+            .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{}\t{}\t{}",
+            "{}\t{}\t{}\t{}",
             entry.course.name,
-            entry.scheduled_at.format("%Y-%m-%d %H:%M:%S"),
+            poll_status_label(entry.status),
+            available_at,
             entry.course.course_sched_id
         );
     }
 }
 
-fn schedule_with_systemd(exe_path: &Path, config_path: &Path, entry: &PlannedUnit) -> Result<()> {
-    let timestamp = entry.scheduled_at.format("%Y-%m-%d %H:%M:%S").to_string();
-    let status = Command::new("systemd-run")
-        .arg("--user")
-        .arg("--collect")
-        .arg("--unit")
-        .arg(&entry.unit_name)
-        .arg("--on-calendar")
-        .arg(timestamp)
-        .arg(exe_path)
-        .arg("sign")
-        .arg("--config")
-        .arg(config_path)
-        .arg("--course-sched-id")
-        .arg(&entry.course.course_sched_id)
-        .arg("--course-name")
-        .arg(&entry.course.name)
-        .status()
-        .with_context(|| format!("执行 systemd-run 失败: {}", entry.course.name))?;
+fn print_evaluated_summary(evaluated: &[EvaluatedCourse]) {
+    let due_now = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::DueNow)
+        .count();
+    let waiting = evaluated
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.status,
+                PollStatusKind::WaitingForDailyStart | PollStatusKind::WaitingForCourse
+            )
+        })
+        .count();
+    let signed = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::Signed)
+        .count();
+    let expired = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::Expired)
+        .count();
+    let missing = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::MissingCourseSchedId)
+        .count();
 
-    if !status.success() {
-        bail!(
-            "systemd-run 返回失败状态: {} ({})",
-            status,
-            entry.course.name
-        );
-    }
-    Ok(())
+    println!(
+        "今日课程汇总: due_now={due_now}, waiting={waiting}, signed={signed}, expired={expired}, missing_course_sched_id={missing}"
+    );
 }
 
-fn render_planner_service(exe_path: &Path, config_path: &Path, unit_prefix: &str) -> String {
+fn poll_status_label(status: PollStatusKind) -> &'static str {
+    match status {
+        PollStatusKind::WaitingForDailyStart => "waiting-daily-start",
+        PollStatusKind::WaitingForCourse => "waiting-course-window",
+        PollStatusKind::DueNow => "due-now",
+        PollStatusKind::Signed => "signed",
+        PollStatusKind::Expired => "expired",
+        PollStatusKind::MissingCourseSchedId => "missing-course-sched-id",
+    }
+}
+
+fn render_planner_service(exe_path: &Path, config_path: &Path) -> String {
     let mut content = String::new();
     let _ = writeln!(content, "[Unit]");
-    let _ = writeln!(content, "Description=BUAA iClass daily sign planner");
+    let _ = writeln!(content, "Description=BUAA iClass periodic sign poller");
     let _ = writeln!(content);
     let _ = writeln!(content, "[Service]");
     let _ = writeln!(content, "Type=oneshot");
     let _ = writeln!(
         content,
-        "ExecStart={} plan --config {} --unit-prefix {}",
+        "ExecStart={} plan --config {}",
         escape_exec_arg(&exe_path.display().to_string()),
         escape_exec_arg(&config_path.display().to_string()),
-        escape_exec_arg(unit_prefix),
     );
     content
 }
 
-fn render_planner_timer(service_name: &str, planner_time: &str) -> String {
+fn render_planner_timer(service_name: &str, planner_interval_minutes: u32) -> String {
     let mut content = String::new();
     let _ = writeln!(content, "[Unit]");
-    let _ = writeln!(content, "Description=Run BUAA iClass planner daily");
+    let _ = writeln!(content, "Description=Run BUAA iClass poller periodically");
     let _ = writeln!(content);
     let _ = writeln!(content, "[Timer]");
-    let _ = writeln!(content, "OnCalendar=*-*-* {planner_time}");
+    let _ = writeln!(content, "OnBootSec=1min");
+    let _ = writeln!(content, "OnUnitActiveSec={}min", planner_interval_minutes);
+    let _ = writeln!(content, "AccuracySec=1min");
     let _ = writeln!(content, "Persistent=true");
     let _ = writeln!(content, "Unit={service_name}");
     let _ = writeln!(content);
@@ -900,12 +1017,23 @@ fn escape_exec_arg(text: &str) -> String {
 }
 
 fn validate_planner_time(value: &str) -> Result<()> {
+    parse_planner_time(value)?;
+    Ok(())
+}
+
+fn parse_planner_time(value: &str) -> Result<NaiveTime> {
     let formats = ["%H:%M", "%H:%M:%S"];
-    if formats
-        .iter()
-        .any(|format| NaiveTime::parse_from_str(value, format).is_ok())
-    {
-        return Ok(());
+    for format in formats {
+        if let Ok(parsed) = NaiveTime::parse_from_str(value, format) {
+            return Ok(parsed);
+        }
     }
     bail!("planner_time 格式必须是 HH:MM 或 HH:MM:SS")
+}
+
+fn validate_planner_interval_minutes(value: u32) -> Result<()> {
+    if value == 0 {
+        bail!("planner_interval_minutes 必须大于 0");
+    }
+    Ok(())
 }

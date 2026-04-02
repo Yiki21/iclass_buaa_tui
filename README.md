@@ -83,6 +83,7 @@ include_courses = ["*"]
 exclude_courses = ["体育", "*实验课*"]
 
 planner_time = "07:00:00"
+planner_interval_minutes = 10
 ```
 
 `include_courses = ["*"]` 表示默认包含全部课程，然后再应用 `exclude_courses` 过滤。过滤模式支持：
@@ -100,7 +101,7 @@ iclass_buaa_tui list-today --json
 # 直接签到，失败后按配置重试
 iclass_buaa_tui sign --course-sched-id 123456789
 
-# 每天执行一次，扫描今日课程并创建若干一次性 systemd user timer
+# 执行一次自动签到轮询：抓今天课程并直接尝试签到到点课程
 iclass_buaa_tui plan
 
 # 查看完整参数
@@ -112,15 +113,15 @@ iclass_buaa_tui uninstall-systemd --help
 
 主要参数：
 - `--config <PATH>`: 显式指定配置文件路径，覆盖默认的 XDG 查找顺序。
-- `plan --unit-prefix <PREFIX>`: 指定生成的 systemd unit 名前缀，默认是 `iclass-buaa`。
-- `plan --dry-run`: 只输出今日调度计划，不创建 systemd timer。
+- `plan --dry-run`: 只输出今日课程的自动签到评估结果，不实际签到。
 - `install-systemd --output-dir <PATH>`: 指定生成 `.service`/`.timer` 文件的目录。
 - `install-systemd --planner-time <HH:MM[:SS]>`: 覆盖配置里的 `planner_time`。
+- `install-systemd --planner-interval-minutes <N>`: 覆盖配置里的轮询周期，单位分钟。
 - `uninstall-systemd --output-dir <PATH>`: 指定需要删除的 `.service`/`.timer` 所在目录。
 - `uninstall-systemd --unit-prefix <PREFIX>`: 指定需要卸载的 systemd unit 名前缀。
 
 ### 启用自动签到
-先安装每日 planner 的 systemd user service/timer：
+先安装周期轮询的 systemd user service/timer：
 
 ```bash
 iclass_buaa_tui install-systemd
@@ -133,6 +134,8 @@ systemctl --user enable --now iclass-buaa-planner.timer
 
 `install-systemd` 生成的 `ExecStart=` 会写当前可执行文件的绝对路径，这是故意的。`systemd` 不应该依赖当前 shell 的工作目录，也不应该假设你的 `PATH` 一定包含该程序。
 
+`planner_time` 定义每天开始自动签到轮询的最早时间；`planner_interval_minutes` 定义轮询间隔。timer 会周期触发，但程序在 `planner_time` 之前只会检查并直接退出，不会提前签到。
+
 卸载自动签到：
 
 ```bash
@@ -140,10 +143,10 @@ iclass_buaa_tui uninstall-systemd
 ```
 
 自动签到流程：
-1. `planner.timer` 每天在 `planner_time` 触发一次。
+1. `planner.timer` 按 `planner_interval_minutes` 周期触发一次。
 2. `plan` 登录并读取今天课程。
-3. 对每门需要签到的课，创建一个一次性 systemd user timer。
-4. 到时间后执行 `sign`，每次尝试前都会重新登录，并按配置重试 `retry_count` 次。
+3. 已签到课程会被跳过，未到开始窗口的课程会等待下一轮。
+4. 对已经进入签到窗口的课程，直接执行 `sign`，每次签到前都会重新登录，并按配置重试 `retry_count` 次。
 
 **注意**
 CLI 参数对于登陆只支持配置文件写入!
