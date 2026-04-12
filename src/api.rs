@@ -152,7 +152,7 @@ impl IClassApi {
         }
 
         let urls = network_urls(self.use_vpn);
-        let timestamp = (chrono::Utc::now().timestamp_millis() + 36_000).to_string();
+        let timestamp = (chrono::Utc::now().timestamp_millis() - 3000).to_string();
 
         let response = self
             .client
@@ -183,6 +183,7 @@ impl IClassApi {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+
         let message = raw
             .get("ERRMSG")
             .and_then(Value::as_str)
@@ -206,7 +207,7 @@ impl IClassApi {
             bail!("courseSchedId 不能为空");
         }
 
-        let qr_timestamp = timestamp_ms + 36_000;
+        let qr_timestamp = timestamp_ms - 3000;
         let sign_url = network_urls(self.use_vpn).scan_sign;
         let qr_url = format!(
             "{}?courseSchedId={}&timestamp={}",
