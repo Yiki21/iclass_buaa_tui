@@ -112,6 +112,7 @@ pub struct BykcSignConfig {
     pub sign_points: Vec<BykcSignPoint>,
 }
 
+/// BYKC sign-point definition used to construct a valid check-in location.
 #[derive(Clone, Debug, Default)]
 pub struct BykcSignPoint {
     pub lat: f64,
@@ -119,6 +120,7 @@ pub struct BykcSignPoint {
     pub radius: f64,
 }
 
+/// BYKC client responsible for login, encrypted API calls, and course operations.
 #[derive(Clone, Debug)]
 pub struct BykcApi {
     client: reqwest::Client,
@@ -447,6 +449,7 @@ impl BykcApi {
         Ok(())
     }
 
+    /// Ensures the BYKC auth token exists and refreshes it when the session expires.
     async fn ensure_login(&self, force_refresh: bool) -> Result<()> {
         if !self.login_input.use_vpn {
             bail!("博雅功能当前仅支持 VPN 模式登录");
@@ -505,6 +508,7 @@ impl BykcApi {
         Ok(())
     }
 
+    /// Calls the paged course-list API and validates the business response.
     async fn query_student_semester_course_by_page(
         &self,
         page_number: usize,
@@ -523,6 +527,7 @@ impl BykcApi {
         response.data.ok_or_else(|| anyhow!("博雅课程列表返回为空"))
     }
 
+    /// Loads BYKC global config, mainly to resolve the active semester window.
     async fn get_all_config(&self) -> Result<BykcAllConfig> {
         let response: BykcApiResponse<BykcAllConfig> = self.call_api("getAllConfig", "{}").await?;
         if !response.is_success() {
@@ -534,6 +539,7 @@ impl BykcApi {
         response.data.ok_or_else(|| anyhow!("博雅配置返回为空"))
     }
 
+    /// Loads chosen courses within the given semester date range.
     async fn query_chosen_course(
         &self,
         start_date: &str,
@@ -551,6 +557,7 @@ impl BykcApi {
         Ok(response.data.unwrap_or_default().course_list)
     }
 
+    /// Loads a single raw course record from BYKC.
     async fn query_course_by_id(&self, id: i64) -> Result<BykcCourseRaw> {
         let request = format!(r#"{{"id":{id}}}"#);
         let response: BykcApiResponse<BykcCourseRaw> =
@@ -564,6 +571,7 @@ impl BykcApi {
         response.data.ok_or_else(|| anyhow!("课程详情返回为空"))
     }
 
+    /// Finds the chosen-course record matching a course in the active semester.
     async fn find_chosen_course_for_current_semester(
         &self,
         course_id: i64,
@@ -587,6 +595,7 @@ impl BykcApi {
             .find(|item| item.course_info.as_ref().map(|course| course.id) == Some(course_id)))
     }
 
+    /// Calls a BYKC API and deserializes the decrypted JSON payload.
     async fn call_api<T>(&self, api_name: &str, request_json: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -596,6 +605,7 @@ impl BykcApi {
             .with_context(|| format!("BYKC 响应 JSON 解析失败: {api_name}: {raw}"))
     }
 
+    /// Calls a BYKC API and retries once after refreshing the auth token.
     async fn call_api_raw(&self, api_name: &str, request_json: &str) -> Result<String> {
         self.ensure_login(false).await?;
         match self.do_call_api_raw(api_name, request_json).await {
@@ -610,6 +620,7 @@ impl BykcApi {
         }
     }
 
+    /// Sends one encrypted BYKC request and returns the decrypted response body.
     async fn do_call_api_raw(&self, api_name: &str, request_json: &str) -> Result<String> {
         let encrypted = encrypt_request(request_json)?;
         let endpoint = format!(
@@ -665,11 +676,13 @@ impl BykcApi {
     }
 }
 
+/// Extracts the BYKC auth token from the login redirect URL.
 fn extract_bykc_token(url: &str) -> Option<String> {
     url.split_once("?token=")
         .map(|(_, token)| token.to_string())
 }
 
+/// Resolves the correct BYKC base URL for direct and VPN modes.
 fn bykc_base_url(use_vpn: bool) -> &'static str {
     if use_vpn {
         BYKC_VPN_BASE
@@ -678,6 +691,7 @@ fn bykc_base_url(use_vpn: bool) -> &'static str {
     }
 }
 
+/// Applies the same AES + RSA envelope used by the BYKC web client.
 fn encrypt_request(json_data: &str) -> Result<EncryptedRequest> {
     let data_bytes = json_data.as_bytes();
     let aes_key = generate_aes_key();
@@ -705,6 +719,7 @@ fn encrypt_request(json_data: &str) -> Result<EncryptedRequest> {
     })
 }
 
+/// Decrypts a BYKC response payload with the per-request AES key.
 fn decrypt_response(response_base64: &str, aes_key: &[u8]) -> Result<String> {
     let encrypted_bytes = BASE64
         .decode(response_base64)
@@ -716,6 +731,7 @@ fn decrypt_response(response_base64: &str, aes_key: &[u8]) -> Result<String> {
     String::from_utf8(decrypted).context("BYKC 响应不是合法 UTF-8")
 }
 
+/// Generates the random AES key expected by the BYKC backend.
 fn generate_aes_key() -> Vec<u8> {
     let mut rng = thread_rng();
     (0..16)
@@ -727,6 +743,7 @@ fn generate_aes_key() -> Vec<u8> {
         .collect()
 }
 
+/// RSA-encrypts a BYKC header field and returns the Base64 form.
 fn rsa_encrypt(data: &[u8]) -> Result<String> {
     let der = BASE64
         .decode(RSA_PUBLIC_KEY_BASE64)
@@ -736,6 +753,7 @@ fn rsa_encrypt(data: &[u8]) -> Result<String> {
     Ok(BASE64.encode(encrypted))
 }
 
+/// Performs PKCS#1 v1.5 public-key encryption to match the original BYKC client.
 fn rsa_pkcs1_encrypt(public_key: &RsaPublicKey, message: &[u8]) -> Result<Vec<u8>> {
     let size = public_key.size();
     if message.len() > size.saturating_sub(11) {
@@ -765,6 +783,7 @@ fn rsa_pkcs1_encrypt(public_key: &RsaPublicKey, message: &[u8]) -> Result<Vec<u8
     Ok(output)
 }
 
+/// Parses the embedded sign config JSON attached to a course record.
 fn parse_sign_config(config_json: Option<&str>) -> Option<BykcSignConfig> {
     let raw = config_json?.trim();
     if raw.is_empty() {
@@ -789,6 +808,7 @@ fn parse_sign_config(config_json: Option<&str>) -> Option<BykcSignConfig> {
     })
 }
 
+/// Resolves whether a chosen course can currently sign in or sign out.
 fn resolve_attendance_availability(
     sign_config: Option<&BykcSignConfig>,
     checkin: Option<i32>,
@@ -841,6 +861,7 @@ fn resolve_sign_out_unavailable_reason(checkin: Option<i32>, pass: Option<i32>) 
     }
 }
 
+/// Checks whether the current time falls inside the configured attendance window.
 fn is_within_window(start_date: Option<&str>, end_date: Option<&str>, now: NaiveDateTime) -> bool {
     let Some(start) = parse_date_time(start_date) else {
         return false;
@@ -851,6 +872,7 @@ fn is_within_window(start_date: Option<&str>, end_date: Option<&str>, now: Naive
     now >= start && now <= end
 }
 
+/// Parses the BYKC `yyyy-MM-dd HH:mm:ss` timestamp format.
 fn parse_date_time(value: Option<&str>) -> Option<NaiveDateTime> {
     let value = value?.trim();
     if value.is_empty() {
@@ -859,6 +881,7 @@ fn parse_date_time(value: Option<&str>) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
 }
 
+/// Chooses a legal sign-in point and jitters it within the configured radius.
 fn random_sign_location(sign_config: Option<&BykcSignConfig>) -> Result<(f64, f64)> {
     let point = sign_config
         .and_then(|config| config.sign_points.choose(&mut thread_rng()).cloned())
@@ -873,6 +896,7 @@ fn random_sign_location(sign_config: Option<&BykcSignConfig>) -> Result<(f64, f6
     }
 }
 
+/// Computes the destination coordinates from a start point, distance, and angle.
 fn destination_point(lat: f64, lng: f64, dist: f64, angle: f64) -> (f64, f64) {
     let radius = dist / 6_371_000.0;
     let lat_radians = lat.to_radians();
@@ -885,6 +909,7 @@ fn destination_point(lat: f64, lng: f64, dist: f64, angle: f64) -> (f64, f64) {
     (dest_lat.to_degrees(), dest_lng.to_degrees())
 }
 
+/// Normalizes BYKC business error messages before surfacing them in the TUI.
 fn sanitize_bykc_error_message(raw: &str, fallback: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -894,6 +919,7 @@ fn sanitize_bykc_error_message(raw: &str, fallback: &str) -> String {
     }
 }
 
+/// Derives the list status shown in the BYKC course list.
 fn calculate_course_status(course: &BykcCourseRaw) -> BykcCourseStatus {
     let now = Local::now().naive_local();
     let course_start = parse_date_time(course.course_start_date.as_deref());
@@ -915,12 +941,32 @@ fn calculate_course_status(course: &BykcCourseRaw) -> BykcCourseStatus {
     }
 }
 
+/// Logs into BUAA VPN and establishes the cookie session needed by BYKC.
 async fn vpn_login(client: &reqwest::Client, username: &str, password: &str) -> Result<()> {
     if username.trim().is_empty() || password.is_empty() {
         bail!("博雅功能需要 VPN 账号和密码");
     }
 
-    let execution = fetch_execution(client).await?;
+    let body = client
+        .get(SSO_VPN_LOGIN)
+        .send()
+        .await
+        .context("获取 SSO 登录页失败")?
+        .text()
+        .await
+        .context("读取 SSO 登录页失败")?;
+    let execution = {
+        let document = Html::parse_document(&body);
+        let selector = Selector::parse(r#"input[name="execution"]"#)
+            .map_err(|_| anyhow!("SSO 页面选择器构造失败"))?;
+        document
+            .select(&selector)
+            .next()
+            .and_then(|node| node.value().attr("value"))
+            .map(|value| value.to_string())
+            .ok_or_else(|| anyhow!("无法从 SSO 登录页面解析 execution 参数"))?
+    };
+
     let response = client
         .post(SSO_VPN_LOGIN)
         .header(REFERER, SSO_VPN_LOGIN)
@@ -929,7 +975,7 @@ async fn vpn_login(client: &reqwest::Client, username: &str, password: &str) -> 
             ("password", password),
             ("submit", "登录"),
             ("type", "username_password"),
-            ("execution", execution.as_str()),
+            ("execution", &execution),
             ("_eventId", "submit"),
         ])
         .send()
@@ -942,28 +988,7 @@ async fn vpn_login(client: &reqwest::Client, username: &str, password: &str) -> 
     Ok(())
 }
 
-async fn fetch_execution(client: &reqwest::Client) -> Result<String> {
-    let body = client
-        .get(SSO_VPN_LOGIN)
-        .send()
-        .await
-        .context("获取 SSO 登录页失败")?
-        .text()
-        .await
-        .context("读取 SSO 登录页失败")?;
-
-    let document = Html::parse_document(&body);
-    let selector = Selector::parse(r#"input[name="execution"]"#)
-        .map_err(|_| anyhow!("SSO 页面选择器构造失败"))?;
-
-    document
-        .select(&selector)
-        .next()
-        .and_then(|node| node.value().attr("value"))
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("无法从 SSO 登录页面解析 execution 参数"))
-}
-
+/// Per-request encrypted payload plus the headers derived from it.
 #[derive(Clone)]
 struct EncryptedRequest {
     encrypted_data: String,
@@ -973,6 +998,7 @@ struct EncryptedRequest {
     aes_key: Vec<u8>,
 }
 
+/// Course status shown in the selectable-course list.
 #[derive(Clone, Copy, Debug)]
 enum BykcCourseStatus {
     Expired,
@@ -996,12 +1022,14 @@ impl BykcCourseStatus {
     }
 }
 
+/// Computed attendance availability for a chosen course at the current time.
 #[derive(Clone, Copy, Debug, Default)]
 struct AttendanceAvailability {
     can_sign: bool,
     can_sign_out: bool,
 }
 
+/// Generic outer response envelope used by BYKC APIs.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcApiResponse<T> {
@@ -1018,6 +1046,7 @@ impl<T> BykcApiResponse<T> {
     }
 }
 
+/// Paged payload returned by the course-list query.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcCoursePageResult {
@@ -1030,6 +1059,7 @@ struct BykcCoursePageResult {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct BykcCourseActionResult {}
 
+/// Global BYKC configuration containing the active semester range.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcAllConfig {
@@ -1037,6 +1067,7 @@ struct BykcAllConfig {
     semester: Vec<BykcSemester>,
 }
 
+/// Semester definition extracted from the BYKC config response.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcSemester {
@@ -1046,6 +1077,7 @@ struct BykcSemester {
     semester_end_date: Option<String>,
 }
 
+/// Payload wrapper around the chosen-course list.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcChosenCoursePayload {
@@ -1053,6 +1085,7 @@ struct BykcChosenCoursePayload {
     course_list: Vec<BykcChosenCourseRaw>,
 }
 
+/// Raw course record returned by multiple BYKC APIs.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcCourseRaw {
@@ -1093,6 +1126,7 @@ struct BykcCourseRaw {
     course_sign_config: Option<String>,
 }
 
+/// Raw category node embedded in a BYKC course record.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcCourseKind {
@@ -1100,6 +1134,7 @@ struct BykcCourseKind {
     kind_name: String,
 }
 
+/// Raw chosen-course record returned by BYKC.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcChosenCourseRaw {
@@ -1118,6 +1153,7 @@ struct BykcChosenCourseRaw {
     sign_info: Option<String>,
 }
 
+/// Raw JSON structure stored inside `courseSignConfig`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcSignConfigRaw {
@@ -1133,6 +1169,7 @@ struct BykcSignConfigRaw {
     sign_point_list: Vec<BykcSignPointRaw>,
 }
 
+/// Raw sign-point entry embedded in the sign config JSON.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BykcSignPointRaw {

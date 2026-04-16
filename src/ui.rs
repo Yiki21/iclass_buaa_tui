@@ -39,13 +39,11 @@ fn render_login(frame: &mut Frame, app: &App) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let mut constraints = vec![
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Length(3),
-    ];
+    let mut constraints = vec![Constraint::Length(3), Constraint::Length(3)];
     if app.login.use_vpn {
         constraints.push(Constraint::Length(3));
+        constraints.push(Constraint::Length(3));
+    } else {
         constraints.push(Constraint::Length(3));
     }
     constraints.push(Constraint::Min(3));
@@ -64,6 +62,7 @@ fn render_login(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("登录后可在 iClass 与 BYKC 间切换"),
+        Line::from("VPN 模式下直接使用 VPN 账号登录，不再单独输入学号"),
         Line::from("tab 切换字段，space 切换 VPN，enter 登录，? 帮助，q 退出"),
     ]);
     frame.render_widget(title, chunks[0]);
@@ -71,15 +70,6 @@ fn render_login(frame: &mut Frame, app: &App) {
     render_input(
         frame,
         chunks[1],
-        "学号",
-        &app.login.student_id,
-        app.login.current_focus() == LoginFocus::StudentId,
-        false,
-    );
-
-    render_input(
-        frame,
-        chunks[2],
         "VPN 模式",
         if app.login.use_vpn {
             "开启"
@@ -93,7 +83,7 @@ fn render_login(frame: &mut Frame, app: &App) {
     let status_index = if app.login.use_vpn {
         render_input(
             frame,
-            chunks[3],
+            chunks[2],
             "VPN 账号",
             &app.login.vpn_username,
             app.login.current_focus() == LoginFocus::VpnUsername,
@@ -101,14 +91,22 @@ fn render_login(frame: &mut Frame, app: &App) {
         );
         render_input(
             frame,
-            chunks[4],
+            chunks[3],
             "VPN 密码",
             &mask_password(&app.login.vpn_password),
             app.login.current_focus() == LoginFocus::VpnPassword,
             true,
         );
-        5
+        4
     } else {
+        render_input(
+            frame,
+            chunks[2],
+            "学号",
+            &app.login.student_id,
+            app.login.current_focus() == LoginFocus::StudentId,
+            false,
+        );
         3
     };
 
@@ -121,14 +119,19 @@ fn render_login(frame: &mut Frame, app: &App) {
 fn render_workspace(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(10)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(10),
+        ])
         .split(frame.area());
 
     render_workspace_tabs(frame, chunks[0], app);
+    render_workspace_hint(frame, chunks[1], app);
 
     match app.active_tab {
-        WorkspaceTab::IClass => render_iclass(frame, chunks[1], app),
-        WorkspaceTab::Bykc => render_bykc(frame, chunks[1], app),
+        WorkspaceTab::IClass => render_iclass(frame, chunks[2], app),
+        WorkspaceTab::Bykc => render_bykc(frame, chunks[2], app),
     }
 }
 
@@ -143,7 +146,11 @@ fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let tabs = Tabs::new(titles)
-        .block(Block::default().title("工作区").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("工作区 | tab / shift+tab 切换")
+                .borders(Borders::ALL),
+        )
         .select(selected)
         .highlight_style(
             Style::default()
@@ -152,6 +159,19 @@ fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_widget(tabs, area);
+}
+
+fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
+    let current = match app.active_tab {
+        WorkspaceTab::IClass => "iClass",
+        WorkspaceTab::Bykc => "BYKC",
+    };
+    let hint = Paragraph::new(format!(
+        "当前页: {current} | tab: 下一个标签 | shift+tab: 上一个标签 | ?: 帮助"
+    ))
+    .block(Block::default().title("切换提示").borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(hint, area);
 }
 
 fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {

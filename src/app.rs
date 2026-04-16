@@ -62,6 +62,7 @@ pub enum LoginFocus {
     VpnPassword,
 }
 
+/// Login form state for the TUI login screen.
 #[derive(Clone, Debug, Default)]
 pub struct LoginForm {
     pub student_id: String,
@@ -72,8 +73,12 @@ pub struct LoginForm {
 }
 
 impl LoginForm {
+    /// Returns the fields currently visible to the user.
     pub fn visible_focuses(&self) -> Vec<LoginFocus> {
-        let mut fields = vec![LoginFocus::StudentId, LoginFocus::UseVpn];
+        let mut fields = vec![LoginFocus::UseVpn];
+        if !self.use_vpn {
+            fields.insert(0, LoginFocus::StudentId);
+        }
         if self.use_vpn {
             fields.push(LoginFocus::VpnUsername);
             fields.push(LoginFocus::VpnPassword);
@@ -109,11 +114,18 @@ impl LoginForm {
         }
     }
 
+    /// Builds the login payload expected by the network layer.
     pub fn to_input(&self) -> LoginInput {
+        let student_id = self.student_id.trim();
+        let vpn_username = self.vpn_username.trim();
         LoginInput {
-            student_id: self.student_id.trim().to_string(),
+            student_id: if self.use_vpn && student_id.is_empty() {
+                vpn_username.to_string()
+            } else {
+                student_id.to_string()
+            },
             use_vpn: self.use_vpn,
-            vpn_username: self.vpn_username.trim().to_string(),
+            vpn_username: vpn_username.to_string(),
             vpn_password: self.vpn_password.clone(),
         }
     }
@@ -256,7 +268,7 @@ impl Default for App {
             selected_week: 0,
             selected: 0,
             bykc: BykcState::default(),
-            status: "输入学号后按 enter 登录，tab 切换字段".to_string(),
+            status: "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录".to_string(),
             busy: false,
             should_quit: false,
             show_help: false,
@@ -583,8 +595,8 @@ impl App {
 
     fn submit_login(&mut self, tx: &UnboundedSender<AsyncEvent>) {
         let input = self.login.to_input();
-        if input.student_id.is_empty() {
-            self.status = "请输入学号".to_string();
+        if !input.use_vpn && input.student_id.is_empty() {
+            self.status = "直连模式需要输入学号".to_string();
             return;
         }
         if input.use_vpn && (input.vpn_username.is_empty() || input.vpn_password.is_empty()) {
