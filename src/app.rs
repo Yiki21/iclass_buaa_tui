@@ -1,5 +1,6 @@
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -141,7 +142,9 @@ pub struct BykcState {
     pub chosen_courses: Vec<BykcChosenCourse>,
     pub selected_chosen: usize,
     pub detail: Option<BykcCourseDetail>,
+    pub detail_cache: HashMap<i64, BykcCourseDetail>,
     pub detail_course_id: Option<i64>,
+    pub show_detail_popup: bool,
 }
 
 impl BykcState {
@@ -153,6 +156,12 @@ impl BykcState {
         self.chosen_courses.get(self.selected_chosen)
     }
 
+    pub fn chosen_course_for(&self, course_id: i64) -> Option<&BykcChosenCourse> {
+        self.chosen_courses
+            .iter()
+            .find(|course| course.course_id == course_id)
+    }
+
     pub fn selected_detail_target(&self) -> Option<i64> {
         match self.view {
             BykcView::Courses => self.selected_course().map(|course| course.id),
@@ -161,7 +170,6 @@ impl BykcState {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let previous = self.selected_detail_target();
         match self.view {
             BykcView::Courses => {
                 self.selected_course = clamp_step(self.selected_course, self.courses.len(), delta);
@@ -171,11 +179,8 @@ impl BykcState {
                     clamp_step(self.selected_chosen, self.chosen_courses.len(), delta);
             }
         }
-
-        if previous != self.selected_detail_target() {
-            self.detail = None;
-            self.detail_course_id = None;
-        }
+        self.show_detail_popup = false;
+        self.sync_detail_from_cache();
     }
 
     pub fn set_view(&mut self, view: BykcView) {
@@ -183,8 +188,8 @@ impl BykcState {
             return;
         }
         self.view = view;
-        self.detail = None;
-        self.detail_course_id = None;
+        self.show_detail_popup = false;
+        self.sync_detail_from_cache();
     }
 
     pub fn replace_data(
@@ -217,8 +222,30 @@ impl BykcState {
         }
 
         self.loaded = true;
-        self.detail_course_id = detail.as_ref().map(|item| item.id);
-        self.detail = detail;
+        if let Some(detail) = detail {
+            self.detail_course_id = Some(detail.id);
+            self.detail_cache.insert(detail.id, detail.clone());
+            self.detail = Some(detail);
+        } else {
+            self.sync_detail_from_cache();
+        }
+    }
+
+    pub fn sync_detail_from_cache(&mut self) {
+        let Some(course_id) = self.selected_detail_target() else {
+            self.detail = None;
+            self.detail_course_id = None;
+            return;
+        };
+        self.detail = self.detail_cache.get(&course_id).cloned();
+        self.detail_course_id = self.detail.as_ref().map(|item| item.id);
+    }
+
+    pub fn selected_cached_detail(&self) -> Option<&BykcCourseDetail> {
+        let course_id = self.selected_detail_target()?;
+        self.detail_cache
+            .get(&course_id)
+            .or_else(|| self.detail.as_ref().filter(|detail| detail.id == course_id))
     }
 }
 
@@ -234,6 +261,7 @@ pub struct BykcSyncSuccess {
     pub chosen_courses: Vec<BykcChosenCourse>,
     pub detail: Option<BykcCourseDetail>,
     pub message: Option<String>,
+    pub open_detail_popup: bool,
 }
 
 #[derive(Debug)]
@@ -323,6 +351,19 @@ impl App {
         if key.code == KeyCode::Char('?') {
             self.show_help = true;
             return;
+        }
+
+        if self.screen == Screen::Workspace
+            && self.active_tab == WorkspaceTab::Bykc
+            && self.bykc.show_detail_popup
+        {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('o') => {
+                    self.bykc.show_detail_popup = false;
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match self.screen {
@@ -436,6 +477,7 @@ impl App {
                     });
                     self.bykc
                         .replace_data(data.courses, data.chosen_courses, data.detail);
+                    self.bykc.show_detail_popup = data.open_detail_popup;
                     self.status = message;
                 }
                 Err(error) => {
@@ -530,6 +572,9 @@ impl App {
             KeyCode::Enter | KeyCode::Char('o') => self.load_bykc_detail(tx),
             KeyCode::Char('s') if self.bykc.view == BykcView::Courses => {
                 self.select_bykc_course(tx)
+            }
+            KeyCode::Char('x') if self.bykc.view == BykcView::Courses => {
+                self.deselect_selected_bykc_course(tx)
             }
             KeyCode::Char('x') if self.bykc.view == BykcView::Chosen => {
                 self.deselect_bykc_course(tx)
@@ -639,18 +684,26 @@ impl App {
             self.bykc.include_all,
             self.bykc.detail_course_id,
             None,
+            false,
             tx.clone(),
         );
     }
 
     fn load_bykc_detail(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(course_id) = self.bykc.selected_detail_target() else {
+            self.status = "当前没有可查看的博雅课程".to_string();
+            return;
+        };
+        if let Some(detail) = self.bykc.detail_cache.get(&course_id).cloned() {
+            self.bykc.detail = Some(detail);
+            self.bykc.detail_course_id = Some(course_id);
+            self.bykc.show_detail_popup = true;
+            self.status = "已打开博雅详情".to_string();
+            return;
+        }
         let Some(session) = self.session.clone() else {
             self.status = "当前未登录".to_string();
             self.screen = Screen::Login;
-            return;
-        };
-        let Some(course_id) = self.bykc.selected_detail_target() else {
-            self.status = "当前没有可查看的博雅课程".to_string();
             return;
         };
 
@@ -661,6 +714,7 @@ impl App {
             self.bykc.include_all,
             Some(course_id),
             None,
+            true,
             tx.clone(),
         );
     }
@@ -695,10 +749,42 @@ impl App {
             self.status = "当前没有可退选的博雅课程".to_string();
             return;
         };
+        if !can_deselect_bykc_course(&course.course_cancel_end_date) {
+            self.status = "当前课程已超过退选时间".to_string();
+            return;
+        }
 
         self.busy = true;
         self.status = format!("退选中: {}", course.course_name);
         spawn_bykc_deselect(session, self.bykc.include_all, course.course_id, tx.clone());
+    }
+
+    fn deselect_selected_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course) = self.bykc.selected_course().cloned() else {
+            self.status = "当前没有可退选的博雅课程".to_string();
+            return;
+        };
+        if !course.selected {
+            self.status = "当前课程尚未报名，无法退选".to_string();
+            return;
+        }
+        let Some(chosen) = self.bykc.chosen_course_for(course.id).cloned() else {
+            self.status = "当前课程已标记为已报，但未找到对应已选记录，请先刷新".to_string();
+            return;
+        };
+        if !can_deselect_bykc_course(&chosen.course_cancel_end_date) {
+            self.status = "当前课程已超过退选时间".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = format!("退选中: {}", course.course_name);
+        spawn_bykc_deselect(session, self.bykc.include_all, course.id, tx.clone());
     }
 
     fn sign_in_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -1017,6 +1103,7 @@ fn spawn_bykc_sync(
     include_all: bool,
     detail_course_id: Option<i64>,
     message: Option<String>,
+    open_detail_popup: bool,
     tx: UnboundedSender<AsyncEvent>,
 ) {
     tokio::spawn(async move {
@@ -1027,7 +1114,10 @@ fn spawn_bykc_sync(
                 .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
             let courses = api.get_courses(include_all).await?;
             let chosen_courses = api.get_chosen_courses().await?;
-            let detail = if let Some(course_id) = detail_course_id {
+            let detail_target = detail_course_id
+                .or_else(|| courses.first().map(|course| course.id))
+                .or_else(|| chosen_courses.first().map(|course| course.course_id));
+            let detail = if let Some(course_id) = detail_target {
                 Some(api.get_course_detail(course_id).await?)
             } else {
                 None
@@ -1037,6 +1127,7 @@ fn spawn_bykc_sync(
                 chosen_courses,
                 detail,
                 message,
+                open_detail_popup,
             })
         }
         .await
@@ -1061,12 +1152,29 @@ fn spawn_bykc_select(
             let message = api.select_course(course_id).await?;
             let courses = api.get_courses(include_all).await?;
             let chosen_courses = api.get_chosen_courses().await?;
-            let detail = Some(api.get_course_detail(course_id).await?);
+            let detail_target = courses
+                .iter()
+                .find(|course| course.id == course_id)
+                .map(|course| course.id)
+                .or_else(|| {
+                    chosen_courses
+                        .iter()
+                        .find(|course| course.course_id == course_id)
+                        .map(|course| course.course_id)
+                })
+                .or_else(|| courses.first().map(|course| course.id))
+                .or_else(|| chosen_courses.first().map(|course| course.course_id));
+            let detail = if let Some(detail_target) = detail_target {
+                api.get_course_detail(detail_target).await.ok()
+            } else {
+                None
+            };
             Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
                 courses,
                 chosen_courses,
                 detail,
                 message: Some(message),
+                open_detail_popup: false,
             })
         }
         .await
@@ -1091,12 +1199,23 @@ fn spawn_bykc_deselect(
             let message = api.deselect_course(course_id).await?;
             let courses = api.get_courses(include_all).await?;
             let chosen_courses = api.get_chosen_courses().await?;
-            let detail = Some(api.get_course_detail(course_id).await?);
+            let detail_target = chosen_courses
+                .iter()
+                .find(|course| course.course_id == course_id)
+                .map(|course| course.course_id)
+                .or_else(|| courses.first().map(|course| course.id))
+                .or_else(|| chosen_courses.first().map(|course| course.course_id));
+            let detail = if let Some(detail_target) = detail_target {
+                api.get_course_detail(detail_target).await.ok()
+            } else {
+                None
+            };
             Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
                 courses,
                 chosen_courses,
                 detail,
                 message: Some(message),
+                open_detail_popup: false,
             })
         }
         .await
@@ -1126,12 +1245,23 @@ fn spawn_bykc_sign(
             };
             let courses = api.get_courses(include_all).await?;
             let chosen_courses = api.get_chosen_courses().await?;
-            let detail = Some(api.get_course_detail(course_id).await?);
+            let detail_target = chosen_courses
+                .iter()
+                .find(|course| course.course_id == course_id)
+                .map(|course| course.course_id)
+                .or_else(|| courses.first().map(|course| course.id))
+                .or_else(|| chosen_courses.first().map(|course| course.course_id));
+            let detail = if let Some(detail_target) = detail_target {
+                api.get_course_detail(detail_target).await.ok()
+            } else {
+                None
+            };
             Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
                 courses,
                 chosen_courses,
                 detail,
                 message: Some(message),
+                open_detail_popup: false,
             })
         }
         .await
@@ -1219,4 +1349,15 @@ fn clamp_step(current: usize, len: usize, delta: isize) -> usize {
 
     let next = current as isize + delta;
     next.clamp(0, len.saturating_sub(1) as isize) as usize
+}
+
+fn can_deselect_bykc_course(course_cancel_end_date: &str) -> bool {
+    let value = course_cancel_end_date.trim();
+    if value.is_empty() {
+        return true;
+    }
+
+    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map(|deadline| Local::now().naive_local() <= deadline)
+        .unwrap_or(true)
 }

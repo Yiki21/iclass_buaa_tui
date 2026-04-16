@@ -2,6 +2,8 @@ student_id = "2337xxxx"
 use_vpn = true
 vpn_username = "your-vpn-user"
 vpn_password = "your-vpn-password"
+enable_iclass = true
+enable_bykc = false
 
 advance_minutes = 5
 retry_count = 6
@@ -9,6 +11,10 @@ retry_interval_seconds = 30
 
 include_courses = ["*"]
 exclude_courses = ["体育", "*实验课*"]
+iclass_include_courses = []
+iclass_exclude_courses = []
+bykc_include_courses = []
+bykc_exclude_courses = []
 
 planner_time = "07:00:00"
 planner_interval_minutes = 10

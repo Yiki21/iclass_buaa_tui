@@ -1,6 +1,6 @@
 [package]
 name = "iclass_buaa_tui"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2024"
 description = "BUAA class check TUI software"
 homepage = "https://github.com/Yiki21/iclass_buaa_tui"
@@ -80,14 +80,14 @@ assets = [
 ]
 
 [dependencies]
-aes = "0.8"
+aes = "0.9"
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
-ecb = { version = "0.1", features = ["alloc"] }
-rand = "0.8"
+ecb = { version = "0.2", features = ["alloc"] }
+rand = "0.10"
 qrcode = "0.14"
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = [
@@ -101,7 +101,7 @@ rsa = { version = "0.9", features = ["pem"] }
 scraper = "0.26"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha1 = "0.10"
+sha1 = "0.11"
 tokio = { version = "1", features = [
   "macros",
   "rt-multi-thread",

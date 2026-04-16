@@ -21,6 +21,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_busy_popup(frame);
     } else if app.active_tab == WorkspaceTab::IClass && app.qr_display.is_some() {
         render_qr_popup(frame, app);
+    } else if app.active_tab == WorkspaceTab::Bykc && app.bykc.show_detail_popup {
+        render_bykc_detail_popup(frame, app);
     }
 
     if app.show_help {
@@ -402,7 +404,19 @@ fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|course| {
                 let selected_tag = if course.selected {
-                    "已报"
+                    if let Some(chosen) = app.bykc.chosen_course_for(course.id) {
+                        if chosen.can_sign {
+                            "可签到"
+                        } else if chosen.can_sign_out {
+                            "可签退"
+                        } else if can_deselect_bykc_course_label(&chosen.course_cancel_end_date) {
+                            "已报"
+                        } else {
+                            "已过退选"
+                        }
+                    } else {
+                        "已报"
+                    }
                 } else {
                     course.status.as_str()
                 };
@@ -474,7 +488,7 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = if let Some(detail) = &app.bykc.detail {
+    let lines = if let Some(detail) = app.bykc.selected_cached_detail() {
         vec![
             Line::from(vec![
                 Span::styled("课程: ", Style::default().fg(Color::Yellow)),
@@ -540,9 +554,7 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
                         .unwrap_or_else(|| "-".to_string()),
                 ),
             ]),
-            Line::from(format!(
-                "操作: r 刷新 | o 详情 | s 报名/签到 | x 退选 | u 签退 | a 切换 include_all | Shift+X 退出登录"
-            )),
+            Line::from("操作: o 打开详情浮窗 | s 报名/签到 | x 退选 | u 签退 | a 切换 include_all"),
         ]
     } else {
         let fallback = match app.bykc.view {
@@ -561,10 +573,59 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
                         Span::raw(empty_dash(&course.course_teacher)),
                     ]),
                     Line::from(vec![
+                        Span::styled("地点: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(empty_dash(&course.course_position)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("上课时间: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(format!(
+                            "{} ~ {}",
+                            empty_dash(&course.course_start_date),
+                            empty_dash(&course.course_end_date)
+                        )),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("选课时间: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(format!(
+                            "{} ~ {}",
+                            empty_dash(&course.course_select_start_date),
+                            empty_dash(&course.course_select_end_date)
+                        )),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("退选提示: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(
+                            app.bykc
+                                .chosen_course_for(course.id)
+                                .map(|chosen| {
+                                    if can_deselect_bykc_course_label(
+                                        &chosen.course_cancel_end_date,
+                                    ) {
+                                        format!(
+                                            "可退选，截止 {}",
+                                            empty_dash(&chosen.course_cancel_end_date)
+                                        )
+                                    } else {
+                                        format!(
+                                            "已过退选时间 {}",
+                                            empty_dash(&chosen.course_cancel_end_date)
+                                        )
+                                    }
+                                })
+                                .unwrap_or_else(|| {
+                                    if course.selected {
+                                        "已报，但未找到退选记录".to_string()
+                                    } else {
+                                        "-".to_string()
+                                    }
+                                }),
+                        ),
+                    ]),
+                    Line::from(vec![
                         Span::styled("简介: ", Style::default().fg(Color::Yellow)),
                         Span::raw(empty_dash(&course.course_desc)),
                     ]),
-                    Line::from("按 o 或 enter 加载完整详情，按 s 报名"),
+                    Line::from("按 s 报名，已报课程可按 x 退选；如需补充字段可按 o 或 enter"),
                 ]
             }),
             BykcView::Chosen => app.bykc.selected_chosen_course().map(|course| {
@@ -578,10 +639,58 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
                         Span::raw(course.checkin.to_string()),
                     ]),
                     Line::from(vec![
+                        Span::styled("教师: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(empty_dash(&course.course_teacher)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("地点: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(empty_dash(&course.course_position)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("上课时间: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(format!(
+                            "{} ~ {}",
+                            empty_dash(&course.course_start_date),
+                            empty_dash(&course.course_end_date)
+                        )),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("签到窗口: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(
+                            course
+                                .sign_config
+                                .as_ref()
+                                .map(|config| {
+                                    format!(
+                                        "{} ~ {}",
+                                        empty_dash(&config.sign_start_date),
+                                        empty_dash(&config.sign_end_date)
+                                    )
+                                })
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("签退窗口: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(
+                            course
+                                .sign_config
+                                .as_ref()
+                                .map(|config| {
+                                    format!(
+                                        "{} ~ {}",
+                                        empty_dash(&config.sign_out_start_date),
+                                        empty_dash(&config.sign_out_end_date)
+                                    )
+                                })
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                    ]),
+                    Line::from(vec![
                         Span::styled("签到备注: ", Style::default().fg(Color::Yellow)),
                         Span::raw(empty_dash(&course.sign_info)),
                     ]),
-                    Line::from("按 o 或 enter 加载完整详情，按 s 签到，u 签退，x 退选"),
+                    Line::from("按 s 签到，u 签退，x 退选；如需补充字段可按 o 或 enter"),
                 ]
             }),
         };
@@ -592,6 +701,112 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().title("详情").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     frame.render_widget(detail, area);
+}
+
+fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
+    let Some(detail) = app.bykc.selected_cached_detail() else {
+        return;
+    };
+
+    let area = centered_rect(72, 70, frame.area());
+    frame.render_widget(Clear, area);
+    let outer = Block::default()
+        .title("BYKC 详情")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("课程: ", Style::default().fg(Color::Yellow)),
+            Span::raw(detail.course_name.as_str()),
+        ]),
+        Line::from(vec![
+            Span::styled("教师: ", Style::default().fg(Color::Yellow)),
+            Span::raw(empty_dash(&detail.course_teacher)),
+        ]),
+        Line::from(vec![
+            Span::styled("地点: ", Style::default().fg(Color::Yellow)),
+            Span::raw(empty_dash(&detail.course_position)),
+        ]),
+        Line::from(vec![
+            Span::styled("联系人: ", Style::default().fg(Color::Yellow)),
+            Span::raw(empty_dash(&detail.course_contact)),
+        ]),
+        Line::from(vec![
+            Span::styled("联系电话: ", Style::default().fg(Color::Yellow)),
+            Span::raw(empty_dash(&detail.course_contact_mobile)),
+        ]),
+        Line::from(vec![
+            Span::styled("上课时间: ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!(
+                "{} ~ {}",
+                empty_dash(&detail.course_start_date),
+                empty_dash(&detail.course_end_date)
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("选课时间: ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!(
+                "{} ~ {}",
+                empty_dash(&detail.course_select_start_date),
+                empty_dash(&detail.course_select_end_date)
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("退选截止: ", Style::default().fg(Color::Yellow)),
+            Span::raw(empty_dash(&detail.course_cancel_end_date)),
+        ]),
+        Line::from(vec![
+            Span::styled("状态: ", Style::default().fg(Color::Yellow)),
+            Span::raw(detail.status.as_str()),
+        ]),
+        Line::from(vec![
+            Span::styled("签到窗口: ", Style::default().fg(Color::Yellow)),
+            Span::raw(
+                detail
+                    .sign_config
+                    .as_ref()
+                    .map(|config| {
+                        format!(
+                            "{} ~ {}",
+                            empty_dash(&config.sign_start_date),
+                            empty_dash(&config.sign_end_date)
+                        )
+                    })
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("签退窗口: ", Style::default().fg(Color::Yellow)),
+            Span::raw(
+                detail
+                    .sign_config
+                    .as_ref()
+                    .map(|config| {
+                        format!(
+                            "{} ~ {}",
+                            empty_dash(&config.sign_out_start_date),
+                            empty_dash(&config.sign_out_end_date)
+                        )
+                    })
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("简介: ", Style::default().fg(Color::Yellow)),
+            Span::raw(empty_dash(&detail.course_desc)),
+        ]),
+        Line::from(""),
+        Line::from("按 esc / o / enter 关闭"),
+    ];
+
+    let detail = Paragraph::new(lines)
+        .block(Block::default().title("详细信息").borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, inner);
 }
 
 fn render_input(
@@ -762,4 +977,15 @@ fn empty_dash(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn can_deselect_bykc_course_label(course_cancel_end_date: &str) -> bool {
+    let value = course_cancel_end_date.trim();
+    if value.is_empty() {
+        return true;
+    }
+
+    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map(|deadline| chrono::Local::now().naive_local() <= deadline)
+        .unwrap_or(true)
 }

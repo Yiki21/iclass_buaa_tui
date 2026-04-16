@@ -2,8 +2,8 @@ use aes::Aes128;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Local, NaiveDateTime};
-use ecb::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, block_padding::Pkcs7};
-use rand::{Rng, seq::SliceRandom, thread_rng};
+use ecb::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyInit, block_padding::Pkcs7};
+use rand::{RngExt, prelude::IndexedRandom, rng};
 use reqwest::cookie::Jar;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
@@ -14,18 +14,14 @@ use sha1::{Digest, Sha1};
 use std::f64::consts::PI;
 use std::sync::{Arc, Mutex};
 
-use crate::constants::SSO_VPN_LOGIN;
+use crate::constants::{
+    BYKC_DIRECT_BASE, BYKC_KEY_CHARS, BYKC_PAGE_SIZE, BYKC_RSA_PUBLIC_KEY_BASE64, BYKC_VPN_BASE,
+    SSO_VPN_LOGIN,
+};
 use crate::model::LoginInput;
 
 type Aes128EcbEnc = ecb::Encryptor<Aes128>;
 type Aes128EcbDec = ecb::Decryptor<Aes128>;
-
-const BYKC_DIRECT_BASE: &str = "https://bykc.buaa.edu.cn";
-const BYKC_VPN_BASE: &str =
-    "https://d.buaa.edu.cn/https/77726476706e69737468656265737421f2ee4a9f69327d517f468ca88d1b203b";
-const RSA_PUBLIC_KEY_BASE64: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDlHMQ3B5GsWnCe7Nlo1YiG/YmHdlOiKOST5aRm4iaqYSvhvWmwcigoyWTM+8bv2+sf6nQBRDWTY4KmNV7DBk1eDnTIQo6ENA31k5/tYCLEXgjPbEjCK9spiyB62fCT6cqOhbamJB0lcDJRO6Vo1m3dy+fD0jbxfDVBBNtyltIsDQIDAQAB";
-const KEY_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
-const BYKC_PAGE_SIZE: usize = 100;
 
 /// Lightweight course record shown in the BYKC course list.
 #[allow(dead_code)]
@@ -214,7 +210,7 @@ impl BykcApi {
                         .is_some_and(|item| !item.sign_points.is_empty()),
                     status: status.display_name().to_string(),
                     selected: course.selected.unwrap_or(false),
-                    course_desc: course.course_desc.unwrap_or_default(),
+                    course_desc: html_to_text(course.course_desc.as_deref()),
                 });
             }
 
@@ -351,7 +347,7 @@ impl BykcApi {
                 .unwrap_or_default(),
             status: status.display_name().to_string(),
             selected: course.selected.unwrap_or(false),
-            course_desc: course.course_desc.unwrap_or_default(),
+            course_desc: html_to_text(course.course_desc.as_deref()),
             sign_config,
             checkin,
             pass,
@@ -375,11 +371,10 @@ impl BykcApi {
     /// Cancels an existing enrollment for the chosen course.
     pub async fn deselect_course(&self, course_id: i64) -> Result<String> {
         self.ensure_login(false).await?;
-        let chosen = self
-            .find_chosen_course_for_current_semester(course_id)
+        self.find_chosen_course_for_current_semester(course_id)
             .await?
             .ok_or_else(|| anyhow!("该课程未报名，无法退选"))?;
-        let request = format!(r#"{{"id":{}}}"#, chosen.id);
+        let request = format!(r#"{{"id":{course_id}}}"#);
         let response: BykcApiResponse<BykcCourseActionResult> =
             self.call_api("delChosenCourse", &request).await?;
         if !response.is_success() {
@@ -708,7 +703,7 @@ fn encrypt_request(json_data: &str) -> Result<EncryptedRequest> {
 
     let encrypted_data = Aes128EcbEnc::new_from_slice(&aes_key)
         .map_err(|_| anyhow!("无法初始化 BYKC AES 加密器"))?
-        .encrypt_padded_vec_mut::<Pkcs7>(data_bytes);
+        .encrypt_padded_vec::<Pkcs7>(data_bytes);
 
     Ok(EncryptedRequest {
         encrypted_data: BASE64.encode(encrypted_data),
@@ -726,19 +721,19 @@ fn decrypt_response(response_base64: &str, aes_key: &[u8]) -> Result<String> {
         .context("BYKC 响应 Base64 解码失败")?;
     let decrypted = Aes128EcbDec::new_from_slice(aes_key)
         .map_err(|_| anyhow!("无法初始化 BYKC AES 解密器"))?
-        .decrypt_padded_vec_mut::<Pkcs7>(&encrypted_bytes)
+        .decrypt_padded_vec::<Pkcs7>(&encrypted_bytes)
         .map_err(|_| anyhow!("BYKC 响应 AES 解密失败"))?;
     String::from_utf8(decrypted).context("BYKC 响应不是合法 UTF-8")
 }
 
 /// Generates the random AES key expected by the BYKC backend.
 fn generate_aes_key() -> Vec<u8> {
-    let mut rng = thread_rng();
+    let mut rng = rng();
     (0..16)
         .map(|_| {
-            *KEY_CHARS
+            *BYKC_KEY_CHARS
                 .choose(&mut rng)
-                .expect("KEY_CHARS must not be empty")
+                .expect("BYKC_KEY_CHARS must not be empty")
         })
         .collect()
 }
@@ -746,7 +741,7 @@ fn generate_aes_key() -> Vec<u8> {
 /// RSA-encrypts a BYKC header field and returns the Base64 form.
 fn rsa_encrypt(data: &[u8]) -> Result<String> {
     let der = BASE64
-        .decode(RSA_PUBLIC_KEY_BASE64)
+        .decode(BYKC_RSA_PUBLIC_KEY_BASE64)
         .context("BYKC RSA 公钥解码失败")?;
     let public_key = RsaPublicKey::from_public_key_der(&der).context("BYKC RSA 公钥加载失败")?;
     let encrypted = rsa_pkcs1_encrypt(&public_key, data)?;
@@ -764,9 +759,9 @@ fn rsa_pkcs1_encrypt(public_key: &RsaPublicKey, message: &[u8]) -> Result<Vec<u8
     encoded[1] = 0x02;
 
     let padding_len = size - message.len() - 3;
-    let mut rng = thread_rng();
+    let mut rng = rng();
     for index in 0..padding_len {
-        let value = rng.gen_range(1..=u8::MAX);
+        let value = rng.random_range(1..=u8::MAX);
         encoded[2 + index] = value;
     }
     encoded[2 + padding_len] = 0x00;
@@ -884,12 +879,16 @@ fn parse_date_time(value: Option<&str>) -> Option<NaiveDateTime> {
 /// Chooses a legal sign-in point and jitters it within the configured radius.
 fn random_sign_location(sign_config: Option<&BykcSignConfig>) -> Result<(f64, f64)> {
     let point = sign_config
-        .and_then(|config| config.sign_points.choose(&mut thread_rng()).cloned())
+        .and_then(|config| {
+            let mut rng = rng();
+            config.sign_points.choose(&mut rng).cloned()
+        })
         .ok_or_else(|| anyhow!("未找到可用的签到地点配置"))?;
 
     if point.radius > 0.0 {
-        let dist = point.radius * thread_rng().gen_range(0.0..1.0f64).sqrt();
-        let angle = thread_rng().gen_range(0.0..1.0f64) * 2.0 * PI;
+        let mut rng = rng();
+        let dist = point.radius * rng.random_range(0.0..1.0f64).sqrt();
+        let angle = rng.random_range(0.0..1.0f64) * 2.0 * PI;
         Ok(destination_point(point.lat, point.lng, dist, angle))
     } else {
         Ok((point.lat, point.lng))
@@ -916,6 +915,29 @@ fn sanitize_bykc_error_message(raw: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         raw.replace("签到失败:", "").trim().to_string()
+    }
+}
+
+/// Converts BYKC rich-text HTML into plain text for terminal rendering.
+fn html_to_text(raw: Option<&str>) -> String {
+    let raw = raw.unwrap_or_default().trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+
+    let fragment = Html::parse_fragment(raw);
+    let text = fragment
+        .root_element()
+        .text()
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if text.is_empty() {
+        raw.to_string()
+    } else {
+        text
     }
 }
 

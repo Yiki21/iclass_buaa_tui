@@ -74,6 +74,8 @@ student_id = "2337xxxx"
 use_vpn = true
 vpn_username = "your-vpn-user"
 vpn_password = "your-vpn-password"
+enable_iclass = true
+enable_bykc = false
 
 advance_minutes = 5
 retry_count = 6
@@ -81,27 +83,45 @@ retry_interval_seconds = 30
 
 include_courses = ["*"]
 exclude_courses = ["体育", "*实验课*"]
+iclass_include_courses = []
+iclass_exclude_courses = []
+bykc_include_courses = []
+bykc_exclude_courses = []
 
 planner_time = "07:00:00"
 planner_interval_minutes = 10
 ```
 
-`include_courses = ["*"]` 表示默认包含全部课程，然后再应用 `exclude_courses` 过滤。过滤模式支持：
+`enable_iclass` 和 `enable_bykc` 分别控制自动化是否纳入 `iClass` 和 `BYKC`。如果启用 `BYKC`，自动轮询会同时处理签到和签退。
+
+`include_courses = ["*"]` 表示默认包含全部课程，然后再应用 `exclude_courses` 过滤。你也可以分别配置：
+- `iclass_include_courses` / `iclass_exclude_courses`
+- `bykc_include_courses` / `bykc_exclude_courses`
+
+如果某一侧的专属过滤为空，就回退到通用的 `include_courses` / `exclude_courses`。过滤模式支持：
 - 课程名精确匹配
 - `*` 通配符
-- `course_id` / `course_sched_id` 匹配
+- `course_id` / `course_sched_id` / BYKC `course_id` 匹配
+
+`enable_bykc = true` 时，`plan` 和 `list-today` 会额外纳入博雅已选课程里“今天存在签到窗口或签退窗口”的项目。该能力要求 `use_vpn = true`。
 
 ### CLI 命令说明
 常用命令：
 
 ```bash
-# 输出今日匹配课程
+# 输出今日匹配签到目标（iClass + 可选 BYKC，含 BYKC 签退）
 iclass_buaa_tui list-today --json
 
-# 直接签到，失败后按配置重试
+# iClass 直接签到，失败后按配置重试
 iclass_buaa_tui sign --course-sched-id 123456789
 
-# 执行一次自动签到轮询：抓今天课程并直接尝试签到到点课程
+# BYKC 手动签到
+iclass_buaa_tui sign --source bykc --bykc-course-id 12345 --course-name "博雅课程名"
+
+# BYKC 手动签退
+iclass_buaa_tui sign --source bykc --action sign-out --bykc-course-id 12345
+
+# 执行一次自动签到轮询：抓今天签到/签退目标并直接尝试执行到点项目
 iclass_buaa_tui plan
 
 # 查看完整参数
@@ -144,14 +164,15 @@ iclass_buaa_tui uninstall-systemd
 
 自动签到流程：
 1. `planner.timer` 按 `planner_interval_minutes` 周期触发一次。
-2. `plan` 登录并读取今天课程。
-3. 已签到课程会被跳过，未到开始窗口的课程会等待下一轮。
-4. 对已经进入签到窗口的课程，直接执行 `sign`，每次签到前都会重新登录，并按配置重试 `retry_count` 次。
+2. `plan` 登录并读取今天的 iClass 课程，以及可选的 BYKC 签到/签退窗口。
+3. 已签到项目会被跳过，未到开始窗口的项目会等待下一轮。
+4. 对已经进入窗口的项目，直接执行签到或签退；每次操作前都会重新登录，并按配置重试 `retry_count` 次。
 
 **注意**
 CLI 参数对于登陆只支持配置文件写入!
 
 ## Todo
-自动签到功能支持 Windows/MacOS/Linux without systemd
+- 自动签到功能支持 Windows/MacOS/Linux without systemd
+- 更多其他功能?
 
 Inspired By [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa)

@@ -1,7 +1,22 @@
+/// Shared CAS login entry used by both iClass and BYKC VPN mode.
 pub const SSO_VPN_LOGIN: &str = "https://d.buaa.edu.cn/https/77726476706e69737468656265737421e3e44ed225256951300d8db9d6562d/login?service=https%3A%2F%2Fd.buaa.edu.cn%2Flogin%3Fcas_login%3Dtrue";
 
+/// iClass VPN base URL.
 const VPN_BASE: &str = "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018";
+/// iClass direct base URL.
 const DIRECT_BASE: &str = "https://iclass.buaa.edu.cn:8347";
+
+/// BYKC direct base URL.
+pub const BYKC_DIRECT_BASE: &str = "https://bykc.buaa.edu.cn";
+/// BYKC VPN base URL.
+pub const BYKC_VPN_BASE: &str =
+    "https://d.buaa.edu.cn/https/77726476706e69737468656265737421f2ee4a9f69327d517f468ca88d1b203b";
+/// BYKC RSA public key used by the web client envelope.
+pub const BYKC_RSA_PUBLIC_KEY_BASE64: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDlHMQ3B5GsWnCe7Nlo1YiG/YmHdlOiKOST5aRm4iaqYSvhvWmwcigoyWTM+8bv2+sf6nQBRDWTY4KmNV7DBk1eDnTIQo6ENA31k5/tYCLEXgjPbEjCK9spiyB62fCT6cqOhbamJB0lcDJRO6Vo1m3dy+fD0jbxfDVBBNtyltIsDQIDAQAB";
+/// Allowed BYKC AES session key characters.
+pub const BYKC_KEY_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
+/// Default BYKC page size used by paged course queries.
+pub const BYKC_PAGE_SIZE: usize = 100;
 
 #[derive(Clone, Copy)]
 pub struct NetworkUrls {
