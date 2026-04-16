@@ -9,6 +9,7 @@ pub struct LoginInput {
     pub vpn_password: String,
 }
 
+/// Login session shared across TUI and CLI operations.
 #[derive(Clone, Debug)]
 pub struct Session {
     pub api: IClassApi,
@@ -59,6 +60,7 @@ impl CourseDetailItem {
 }
 
 impl Session {
+    /// Returns the current server-aligned timestamp in milliseconds.
     pub fn server_now_millis(&self) -> i64 {
         chrono::Utc::now()
             .timestamp_millis()

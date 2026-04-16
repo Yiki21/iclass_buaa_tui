@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Local, Utc};
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, DATE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -39,6 +39,7 @@ impl IClassApi {
         Ok(Self { client, use_vpn })
     }
 
+    /// Logs in and captures the server clock offset needed by later sign requests.
     pub async fn login(&self, input: &LoginInput) -> Result<Session> {
         let student_id = input.student_id.trim();
         if student_id.is_empty() {
@@ -301,6 +302,7 @@ impl IClassApi {
         Ok(execution)
     }
 
+    /// Fetches user info and derives `server_time_offset_ms` from the HTTP `Date` header.
     async fn fetch_user_info(&self, username: &str) -> Result<(Value, i64)> {
         let urls = network_urls(self.use_vpn);
         let response = self
@@ -316,7 +318,17 @@ impl IClassApi {
             .send()
             .await
             .context("请求 iClass 用户信息失败")?;
-        let server_time_offset_ms = extract_server_time_offset_ms(&response);
+        let server_time_offset_ms = response
+            .headers()
+            .get("date")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| DateTime::parse_from_rfc2822(value).ok())
+            .map(|server_time| {
+                server_time
+                    .timestamp_millis()
+                    .saturating_sub(Utc::now().timestamp_millis())
+            })
+            .unwrap_or(0);
 
         if !response.status().is_success() {
             bail!("请求 iClass 用户信息失败，HTTP 状态: {}", response.status());
@@ -526,22 +538,6 @@ fn looks_like_vpn_portal_home(url: &str) -> bool {
             parsed.host_str() == Some("d.buaa.edu.cn") && !parsed.path().contains("/login")
         })
         .unwrap_or(false)
-}
-
-fn extract_server_time_offset_ms(response: &reqwest::Response) -> i64 {
-    let Some(date_header) = response.headers().get(DATE) else {
-        return 0;
-    };
-    let Ok(date_header) = date_header.to_str() else {
-        return 0;
-    };
-    let Ok(server_time) = DateTime::parse_from_rfc2822(date_header) else {
-        return 0;
-    };
-
-    server_time
-        .timestamp_millis()
-        .saturating_sub(Utc::now().timestamp_millis())
 }
 
 async fn parse_json(response: reqwest::Response) -> Result<Value> {

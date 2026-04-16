@@ -121,6 +121,7 @@ struct UninstallSystemdArgs {
     unit_prefix: Option<String>,
 }
 
+/// Automation settings loaded from the CLI config file.
 #[derive(Debug, Clone, Deserialize)]
 struct AutomationConfig {
     student_id: String,
@@ -146,6 +147,7 @@ struct AutomationConfig {
     planner_interval_minutes: u32,
 }
 
+/// A normalized course row used by the planner and retry logic.
 #[derive(Debug, Clone)]
 struct ListedCourse {
     name: String,
@@ -157,27 +159,31 @@ struct ListedCourse {
     signed: bool,
 }
 
+/// Retry behavior shared by course fetch and sign operations.
 #[derive(Debug, Clone)]
 struct RetryPolicy {
     max_attempts: u32,
     interval_seconds: u64,
 }
 
-#[derive(Debug, Clone)]
-struct PollTarget {
-    course: ListedCourse,
-}
-
+/// Planner state for a course in the current automation cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PollStatusKind {
+    /// The planner has not reached the configured daily start time yet.
     WaitingForDailyStart,
+    /// The daily planner is active, but this course is not in its sign window yet.
     WaitingForCourse,
+    /// The course should be signed immediately.
     DueNow,
+    /// The course is already signed.
     Signed,
+    /// The course has already ended.
     Expired,
+    /// The course is missing `course_sched_id`, so sign requests cannot be sent.
     MissingCourseSchedId,
 }
 
+/// A course plus its computed planner state and first eligible sign time.
 #[derive(Debug, Clone)]
 struct EvaluatedCourse {
     course: ListedCourse,
@@ -213,6 +219,7 @@ pub fn should_run_cli(args: impl IntoIterator<Item = OsString>) -> bool {
     args.into_iter().nth(1).is_some()
 }
 
+/// Entry point for the non-TUI command set.
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -224,6 +231,7 @@ pub async fn run_cli() -> Result<()> {
     }
 }
 
+/// Prints today's filtered courses without attempting any sign action.
 async fn list_today(args: ListTodayArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
     let today_courses = fetch_today_courses_with_retry(&config).await?;
@@ -270,6 +278,7 @@ async fn list_today(args: ListTodayArgs) -> Result<()> {
     Ok(())
 }
 
+/// Signs a single course immediately and optionally emits debug diagnostics.
 async fn sign_command(args: SignArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
     let retry = RetryPolicy {
@@ -314,6 +323,7 @@ async fn sign_command(args: SignArgs) -> Result<()> {
     bail!("签到未成功: {}", outcome.message)
 }
 
+/// Runs one planner cycle and signs every course that is currently due.
 async fn plan_command(args: PlanArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
     let _unit_prefix = args.unit_prefix;
@@ -324,14 +334,10 @@ async fn plan_command(args: PlanArgs) -> Result<()> {
         return Ok(());
     }
 
-    let due_targets: Vec<PollTarget> = evaluated
+    let due_targets: Vec<ListedCourse> = evaluated
         .iter()
         .filter(|entry| entry.status == PollStatusKind::DueNow)
-        .filter_map(|entry| {
-            entry.available_at.map(|_| PollTarget {
-                course: entry.course.clone(),
-            })
-        })
+        .map(|entry| entry.course.clone())
         .collect();
 
     if due_targets.is_empty() {
@@ -348,28 +354,25 @@ async fn plan_command(args: PlanArgs) -> Result<()> {
     let mut failures = Vec::new();
 
     for target in &due_targets {
-        eprintln!(
-            "开始签到: {} ({})",
-            target.course.name, target.course.course_sched_id
-        );
+        eprintln!("开始签到: {} ({})", target.name, target.course_sched_id);
         match sign_with_retry(
             &config,
-            &target.course.course_sched_id,
+            &target.course_sched_id,
             retry.clone(),
-            Some(target.course.name.clone()),
+            Some(target.name.clone()),
         )
         .await
         {
             Ok(outcome) => {
                 println!(
                     "{}\t{}\t{}",
-                    target.course.name, target.course.course_sched_id, outcome.message
+                    target.name, target.course_sched_id, outcome.message
                 );
             }
             Err(error) => {
                 failures.push(format!(
                     "{} ({}) -> {}",
-                    target.course.name, target.course.course_sched_id, error
+                    target.name, target.course_sched_id, error
                 ));
             }
         }
@@ -386,6 +389,7 @@ fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
     let config_path = resolve_config_path(args.config.as_deref())?;
     let output_dir = args.output_dir.unwrap_or(default_systemd_user_dir()?);
+
     let unit_prefix = args
         .unit_prefix
         .unwrap_or_else(|| DEFAULT_UNIT_PREFIX.to_string());
@@ -393,8 +397,9 @@ fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
     let planner_interval_minutes = args
         .planner_interval_minutes
         .unwrap_or(config.planner_interval_minutes);
+
     let binary_path = current_binary_path()?;
-    validate_planner_time(&planner_time)?;
+    parse_planner_time(&planner_time)?;
     validate_planner_interval_minutes(planner_interval_minutes)?;
 
     fs::create_dir_all(&output_dir)
@@ -604,7 +609,8 @@ impl AutomationConfig {
         if self.planner_time.trim().is_empty() {
             bail!("planner_time 不能为空");
         }
-        validate_planner_time(&self.planner_time)?;
+
+        parse_planner_time(&self.planner_time)?;
         validate_planner_interval_minutes(self.planner_interval_minutes)?;
         Ok(())
     }
@@ -632,6 +638,7 @@ async fn fetch_today_courses(config: &AutomationConfig) -> Result<Vec<ListedCour
         .collect())
 }
 
+/// Fetches today's courses, retrying login and API calls on transient failures.
 async fn fetch_today_courses_with_retry(config: &AutomationConfig) -> Result<Vec<ListedCourse>> {
     let retry = RetryPolicy {
         max_attempts: config.retry_count,
@@ -659,6 +666,7 @@ async fn fetch_today_courses_with_retry(config: &AutomationConfig) -> Result<Vec
     Err(last_error.unwrap().context("多次尝试后仍无法获取今日课程"))
 }
 
+/// Computes planner status for every filtered course scheduled today.
 async fn evaluate_today_courses(config: &AutomationConfig) -> Result<Vec<EvaluatedCourse>> {
     let courses = filter_courses(fetch_today_courses_with_retry(config).await?, config);
     let now = Local::now();
@@ -677,6 +685,7 @@ async fn evaluate_today_courses(config: &AutomationConfig) -> Result<Vec<Evaluat
     Ok(evaluated)
 }
 
+/// Classifies one course into the current planner state.
 fn evaluate_course(
     course: ListedCourse,
     daily_start_at: DateTime<Local>,
@@ -699,14 +708,14 @@ fn evaluate_course(
         });
     }
 
-    let Some(start_at) = course_start_at(&course)? else {
+    let Some(start_at) = build_local_time(&course.date, &course.start_time)? else {
         return Ok(EvaluatedCourse {
             course,
             status: PollStatusKind::MissingCourseSchedId,
             available_at: None,
         });
     };
-    let Some(end_at) = course_end_at(&course)? else {
+    let Some(end_at) = build_local_time(&course.date, &course.end_time)? else {
         return Ok(EvaluatedCourse {
             course,
             status: PollStatusKind::Expired,
@@ -741,6 +750,7 @@ fn evaluate_course(
     })
 }
 
+/// Resolves today's planner start time from `planner_time`.
 fn daily_start_at(config: &AutomationConfig, now: DateTime<Local>) -> Result<DateTime<Local>> {
     let date = now.date_naive();
     let daily_time = parse_planner_time(&config.planner_time)?;
@@ -908,10 +918,6 @@ async fn sign_with_retry(
     Ok(last_outcome)
 }
 
-fn course_start_at(course: &ListedCourse) -> Result<Option<DateTime<Local>>> {
-    build_local_time(&course.date, &course.start_time)
-}
-
 async fn enrich_sign_result_with_debug(
     result: Value,
     config: &AutomationConfig,
@@ -991,10 +997,6 @@ async fn collect_sign_debug_context(
         },
         "matched_today_course": matched_course,
     }))
-}
-
-fn course_end_at(course: &ListedCourse) -> Result<Option<DateTime<Local>>> {
-    build_local_time(&course.date, &course.end_time)
 }
 
 fn build_local_time(date: &str, time: &str) -> Result<Option<DateTime<Local>>> {
@@ -1117,11 +1119,6 @@ fn escape_exec_arg(text: &str) -> String {
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
-}
-
-fn validate_planner_time(value: &str) -> Result<()> {
-    parse_planner_time(value)?;
-    Ok(())
 }
 
 fn parse_planner_time(value: &str) -> Result<NaiveTime> {
