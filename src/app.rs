@@ -468,10 +468,7 @@ impl App {
 
         let qr = session
             .api
-            .generate_sign_qr(
-                &course.course_sched_id,
-                chrono::Utc::now().timestamp_millis(),
-            )
+            .generate_sign_qr(&course.course_sched_id, session.server_now_millis())
             .map_err(|error| error.to_string())?;
 
         self.qr_display = Some(QrDisplay {

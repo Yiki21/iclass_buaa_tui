@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{
     DateTime, Duration as ChronoDuration, Local, LocalResult, NaiveDate, NaiveDateTime, NaiveTime,
-    TimeZone,
+    TimeZone, Utc,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
@@ -19,6 +19,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::{
     api::IClassApi,
+    constants::network_urls,
     model::{CourseDetailItem, LoginInput, SignOutcome},
 };
 
@@ -73,6 +74,9 @@ struct SignArgs {
     /// Override retry_interval_seconds from config.
     #[arg(long)]
     retry_interval_seconds: Option<u64>,
+    /// Print server raw response and local timing diagnostics.
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(Debug, Args)]
@@ -296,6 +300,11 @@ async fn sign_command(args: SignArgs) -> Result<()> {
         "message": outcome.message,
         "success": outcome.success_like,
     });
+    let result = if args.debug {
+        enrich_sign_result_with_debug(result, &config, &args.course_sched_id, &outcome).await
+    } else {
+        result
+    };
     println!("{}", serde_json::to_string_pretty(&result)?);
 
     if outcome.success_like {
@@ -409,9 +418,7 @@ fn install_systemd(args: InstallSystemdArgs) -> Result<()> {
         service_path.display(),
         timer_path.display()
     );
-    println!(
-        "自动签到将在每天 {planner_time} 后开始按 {planner_interval_minutes} 分钟周期轮询。"
-    );
+    println!("自动签到将在每天 {planner_time} 后开始按 {planner_interval_minutes} 分钟周期轮询。");
     println!(
         "启用方式: systemctl --user daemon-reload && systemctl --user enable --now {timer_name}"
     );
@@ -649,9 +656,7 @@ async fn fetch_today_courses_with_retry(config: &AutomationConfig) -> Result<Vec
         }
     }
 
-    Err(last_error
-        .unwrap()
-        .context("多次尝试后仍无法获取今日课程"))
+    Err(last_error.unwrap().context("多次尝试后仍无法获取今日课程"))
 }
 
 async fn evaluate_today_courses(config: &AutomationConfig) -> Result<Vec<EvaluatedCourse>> {
@@ -661,7 +666,12 @@ async fn evaluate_today_courses(config: &AutomationConfig) -> Result<Vec<Evaluat
     let mut evaluated = Vec::with_capacity(courses.len());
 
     for course in courses {
-        evaluated.push(evaluate_course(course, daily_start_at, now, config.advance_minutes)?);
+        evaluated.push(evaluate_course(
+            course,
+            daily_start_at,
+            now,
+            config.advance_minutes,
+        )?);
     }
 
     Ok(evaluated)
@@ -845,6 +855,9 @@ async fn sign_with_retry(
     let mut last_outcome = SignOutcome {
         message: "未执行签到".to_string(),
         success_like: false,
+        http_status: 0,
+        server_status: String::new(),
+        raw_response: Value::Null,
     };
 
     for attempt in 1..=retry.max_attempts {
@@ -860,6 +873,12 @@ async fn sign_with_retry(
                 return Ok(SignOutcome {
                     message: format!("{display_name} 已签到"),
                     success_like: true,
+                    http_status: 200,
+                    server_status: "0".to_string(),
+                    raw_response: json!({
+                        "STATUS": "0",
+                        "ERRMSG": format!("{display_name} 已签到"),
+                    }),
                 });
             }
         }
@@ -874,6 +893,9 @@ async fn sign_with_retry(
             return Ok(SignOutcome {
                 message: outcome.message,
                 success_like: true,
+                http_status: outcome.http_status,
+                server_status: outcome.server_status,
+                raw_response: outcome.raw_response,
             });
         }
 
@@ -888,6 +910,87 @@ async fn sign_with_retry(
 
 fn course_start_at(course: &ListedCourse) -> Result<Option<DateTime<Local>>> {
     build_local_time(&course.date, &course.start_time)
+}
+
+async fn enrich_sign_result_with_debug(
+    result: Value,
+    config: &AutomationConfig,
+    course_sched_id: &str,
+    outcome: &SignOutcome,
+) -> Value {
+    let mut object = result.as_object().cloned().unwrap_or_default();
+    object.insert("http_status".to_string(), json!(outcome.http_status));
+    object.insert("server_status".to_string(), json!(outcome.server_status));
+    object.insert("raw_response".to_string(), outcome.raw_response.clone());
+
+    match collect_sign_debug_context(config, course_sched_id).await {
+        Ok(debug) => {
+            object.insert("debug".to_string(), debug);
+        }
+        Err(error) => {
+            object.insert("debug_error".to_string(), json!(error.to_string()));
+        }
+    }
+
+    Value::Object(object)
+}
+
+async fn collect_sign_debug_context(
+    config: &AutomationConfig,
+    course_sched_id: &str,
+) -> Result<Value> {
+    let api = IClassApi::new(config.use_vpn)?;
+    let session = api.login(&config.login_input()).await?;
+    let now = Local::now();
+    let server_now_ms = session.server_now_millis();
+    let today = now.format("%Y-%m-%d").to_string();
+    let daily_start = daily_start_at(config, now)?;
+    let endpoints = network_urls(config.use_vpn);
+    let course = api
+        .get_merged_course_details(&session, 0)
+        .await?
+        .into_iter()
+        .filter(|course| course.date == today)
+        .map(map_course)
+        .into_iter()
+        .find(|course| course.course_sched_id == course_sched_id);
+
+    let matched_course = if let Some(course) = course {
+        let evaluated = evaluate_course(course.clone(), daily_start, now, config.advance_minutes)?;
+        json!({
+            "name": course.name,
+            "course_id": course.course_id,
+            "course_sched_id": course.course_sched_id,
+            "date": course.date,
+            "start_time": course.start_time,
+            "end_time": course.end_time,
+            "signed": course.signed,
+            "local_status": poll_status_label(evaluated.status),
+            "available_at": evaluated.available_at.map(|value| value.to_rfc3339()),
+        })
+    } else {
+        Value::Null
+    };
+
+    Ok(json!({
+        "local_now": now.to_rfc3339(),
+        "server_time_offset_ms": session.server_time_offset_ms,
+        "server_now": Utc
+            .timestamp_millis_opt(server_now_ms)
+            .single()
+            .map(|value| value.to_rfc3339()),
+        "planner_time": config.planner_time,
+        "advance_minutes": config.advance_minutes,
+        "use_vpn": session.use_vpn,
+        "session_user_id": session.user_id,
+        "endpoints": {
+            "user_login": endpoints.user_login,
+            "course_schedule_by_date": endpoints.course_schedule_by_date,
+            "course_sign_detail": endpoints.course_sign_detail,
+            "scan_sign": endpoints.scan_sign,
+        },
+        "matched_today_course": matched_course,
+    }))
 }
 
 fn course_end_at(course: &ListedCourse) -> Result<Option<DateTime<Local>>> {

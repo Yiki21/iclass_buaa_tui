@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{Duration, Local};
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
+use chrono::{DateTime, Duration, Local, Utc};
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, DATE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -50,7 +50,7 @@ impl IClassApi {
                 .await?;
         }
 
-        let user_info = self.fetch_user_info(student_id).await?;
+        let (user_info, server_time_offset_ms) = self.fetch_user_info(student_id).await?;
         let user_id = user_info
             .get("id")
             .and_then(Value::as_i64)
@@ -83,6 +83,7 @@ impl IClassApi {
             user_id,
             user_name,
             session_id,
+            server_time_offset_ms,
             use_vpn: self.use_vpn,
         })
     }
@@ -152,7 +153,7 @@ impl IClassApi {
         }
 
         let urls = network_urls(self.use_vpn);
-        let timestamp = (chrono::Utc::now().timestamp_millis() - 3000).to_string();
+        let timestamp = session.server_now_millis().to_string();
 
         let response = self
             .client
@@ -194,6 +195,9 @@ impl IClassApi {
         Ok(SignOutcome {
             message,
             success_like: status == "0",
+            http_status: status_code,
+            server_status: status,
+            raw_response: raw,
         })
     }
 
@@ -207,7 +211,7 @@ impl IClassApi {
             bail!("courseSchedId 不能为空");
         }
 
-        let qr_timestamp = timestamp_ms - 3000;
+        let qr_timestamp = timestamp_ms;
         let sign_url = network_urls(self.use_vpn).scan_sign;
         let qr_url = format!(
             "{}?courseSchedId={}&timestamp={}",
@@ -297,7 +301,7 @@ impl IClassApi {
         Ok(execution)
     }
 
-    async fn fetch_user_info(&self, username: &str) -> Result<Value> {
+    async fn fetch_user_info(&self, username: &str) -> Result<(Value, i64)> {
         let urls = network_urls(self.use_vpn);
         let response = self
             .client
@@ -312,6 +316,7 @@ impl IClassApi {
             .send()
             .await
             .context("请求 iClass 用户信息失败")?;
+        let server_time_offset_ms = extract_server_time_offset_ms(&response);
 
         if !response.status().is_success() {
             bail!("请求 iClass 用户信息失败，HTTP 状态: {}", response.status());
@@ -319,9 +324,12 @@ impl IClassApi {
 
         let data = parse_json(response).await?;
         ensure_status_ok(&data)?;
-        data.get("result")
+        let user_info = data
+            .get("result")
             .cloned()
-            .ok_or_else(|| anyhow!("iClass API 返回的用户信息格式异常"))
+            .ok_or_else(|| anyhow!("iClass API 返回的用户信息格式异常"))?;
+
+        Ok((user_info, server_time_offset_ms))
     }
 
     async fn get_current_semester(
@@ -518,6 +526,22 @@ fn looks_like_vpn_portal_home(url: &str) -> bool {
             parsed.host_str() == Some("d.buaa.edu.cn") && !parsed.path().contains("/login")
         })
         .unwrap_or(false)
+}
+
+fn extract_server_time_offset_ms(response: &reqwest::Response) -> i64 {
+    let Some(date_header) = response.headers().get(DATE) else {
+        return 0;
+    };
+    let Ok(date_header) = date_header.to_str() else {
+        return 0;
+    };
+    let Ok(server_time) = DateTime::parse_from_rfc2822(date_header) else {
+        return 0;
+    };
+
+    server_time
+        .timestamp_millis()
+        .saturating_sub(Utc::now().timestamp_millis())
 }
 
 async fn parse_json(response: reqwest::Response) -> Result<Value> {

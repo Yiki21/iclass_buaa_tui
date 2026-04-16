@@ -1,4 +1,5 @@
 use crate::api::IClassApi;
+use serde_json::Value;
 
 #[derive(Clone, Debug, Default)]
 pub struct LoginInput {
@@ -14,6 +15,7 @@ pub struct Session {
     pub user_id: String,
     pub user_name: String,
     pub session_id: String,
+    pub server_time_offset_ms: i64,
     pub use_vpn: bool,
 }
 
@@ -38,6 +40,9 @@ pub struct CourseDetailItem {
 pub struct SignOutcome {
     pub message: String,
     pub success_like: bool,
+    pub http_status: u16,
+    pub server_status: String,
+    pub raw_response: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -50,5 +55,13 @@ pub struct SignQrData {
 impl CourseDetailItem {
     pub fn signed(&self) -> bool {
         self.sign_status == "1"
+    }
+}
+
+impl Session {
+    pub fn server_now_millis(&self) -> i64 {
+        chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_add(self.server_time_offset_ms)
     }
 }
