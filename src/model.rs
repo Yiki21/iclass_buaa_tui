@@ -1,4 +1,5 @@
 use crate::api::IClassApi;
+use crate::bykc::BykcApi;
 use serde_json::Value;
 
 #[derive(Clone, Debug, Default)]
@@ -13,6 +14,7 @@ pub struct LoginInput {
 #[derive(Clone, Debug)]
 pub struct Session {
     pub api: IClassApi,
+    pub bykc_api: Option<BykcApi>,
     pub user_id: String,
     pub user_name: String,
     pub session_id: String,

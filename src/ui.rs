@@ -5,21 +5,21 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
-use tui_qrcode::{Colors, QrCodeWidget, QuietZone, Scaling};
+use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
-use crate::app::{App, LoginFocus, Screen};
+use crate::app::{App, BykcView, LoginFocus, Screen, WorkspaceTab};
 
 pub fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Login => render_login(frame, app),
-        Screen::Courses => render_courses(frame, app),
+        Screen::Workspace => render_workspace(frame, app),
     }
 
     if app.busy {
         render_busy_popup(frame);
-    } else if app.qr_display.is_some() {
+    } else if app.active_tab == WorkspaceTab::IClass && app.qr_display.is_some() {
         render_qr_popup(frame, app);
     }
 
@@ -33,7 +33,7 @@ fn render_login(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
 
     let outer = Block::default()
-        .title("BUAA iClass Rust")
+        .title("BUAA Rust TUI")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let inner = outer.inner(area);
@@ -58,13 +58,13 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     let title = Paragraph::new(vec![
         Line::from(Span::styled(
-            "Ratatui + Tokio 终端版签到工具",
+            "Ratatui + Tokio 终端工具",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from("登录后可在 iClass 与 BYKC 间切换"),
         Line::from("tab 切换字段，space 切换 VPN，enter 登录，? 帮助，q 退出"),
-        Line::from("登录页已改为全屏表单，避免输入框重叠"),
     ]);
     frame.render_widget(title, chunks[0]);
 
@@ -77,16 +77,15 @@ fn render_login(frame: &mut Frame, app: &App) {
         false,
     );
 
-    let vpn_value = if app.login.use_vpn {
-        "开启"
-    } else {
-        "关闭"
-    };
     render_input(
         frame,
         chunks[2],
         "VPN 模式",
-        vpn_value,
+        if app.login.use_vpn {
+            "开启"
+        } else {
+            "关闭"
+        },
         app.login.current_focus() == LoginFocus::UseVpn,
         false,
     );
@@ -119,7 +118,43 @@ fn render_login(frame: &mut Frame, app: &App) {
     frame.render_widget(status, chunks[status_index]);
 }
 
-fn render_courses(frame: &mut Frame, app: &App) {
+fn render_workspace(frame: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(10)])
+        .split(frame.area());
+
+    render_workspace_tabs(frame, chunks[0], app);
+
+    match app.active_tab {
+        WorkspaceTab::IClass => render_iclass(frame, chunks[1], app),
+        WorkspaceTab::Bykc => render_bykc(frame, chunks[1], app),
+    }
+}
+
+fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
+    let titles = [" iClass ", " BYKC "]
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let selected = match app.active_tab {
+        WorkspaceTab::IClass => 0,
+        WorkspaceTab::Bykc => 1,
+    };
+
+    let tabs = Tabs::new(titles)
+        .block(Block::default().title("工作区").borders(Borders::ALL))
+        .select(selected)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(tabs, area);
+}
+
+fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -129,7 +164,7 @@ fn render_courses(frame: &mut Frame, app: &App) {
             Constraint::Length(8),
             Constraint::Length(4),
         ])
-        .split(frame.area());
+        .split(area);
 
     let header_text = if let Some(session) = &app.session {
         format!(
@@ -148,7 +183,7 @@ fn render_courses(frame: &mut Frame, app: &App) {
 
     let week_text = if let Some(week) = app.selected_week_group() {
         format!(
-            "当前周: {} | {} ~ {} | {} 条课程 | H/L 或 [ ] 切周 | ? 帮助",
+            "当前周: {} | {} ~ {} | {} 条课程 | H/L 或 [ ] 切周",
             week.label,
             week.start_date,
             week.end_date,
@@ -230,7 +265,7 @@ fn render_courses(frame: &mut Frame, app: &App) {
         frame.render_stateful_widget(day_list, *area, &mut list_state);
     }
 
-    let detail_text = if let Some(course) = app.selected_course() {
+    let detail_lines = if let Some(course) = app.selected_course() {
         vec![
             Line::from(vec![
                 Span::styled("课程: ", Style::default().fg(Color::Yellow)),
@@ -257,66 +292,321 @@ fn render_courses(frame: &mut Frame, app: &App) {
                 Span::raw(course.course_sched_id.as_str()),
             ]),
             Line::from(""),
-            Line::from("操作:"),
-            Line::from("  h/l 跨天移动"),
-            Line::from("  j/k 当天上下移动"),
-            Line::from("  H/L 或 [ ] 切换周"),
-            Line::from("  s 直接签到"),
-            Line::from("  g 二维码签到/关闭"),
-            Line::from("  r 刷新课程"),
-            Line::from("  ? 打开帮助页"),
-            Line::from("  Shift+X 退出登录"),
-            Line::from("  q 退出程序"),
+            Line::from("操作: r 刷新 | s 直接签到 | g 二维码签到 | Shift+X 退出登录"),
         ]
     } else {
-        vec![Line::from("暂无选中课程")]
+        vec![Line::from("当前没有课程")]
     };
-    let detail = Paragraph::new(detail_text)
+
+    let detail = Paragraph::new(detail_lines)
         .block(Block::default().title("详情").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     frame.render_widget(detail, vertical[3]);
 
-    let footer = Paragraph::new(app.status.as_str())
+    let status = Paragraph::new(app.status.as_str())
         .block(Block::default().title("状态").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    frame.render_widget(footer, vertical[4]);
+    frame.render_widget(status, vertical[4]);
+}
+
+fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(12),
+            Constraint::Length(4),
+        ])
+        .split(area);
+
+    let header_text = if let Some(session) = &app.session {
+        format!(
+            "用户: {} ({}) | VPN: {} | 可选 {} 门 | 已选 {} 门",
+            session.user_name,
+            session.user_id,
+            if session.use_vpn { "开启" } else { "关闭" },
+            app.bykc.courses.len(),
+            app.bykc.chosen_courses.len(),
+        )
+    } else {
+        "未登录".to_string()
+    };
+    let header = Paragraph::new(header_text)
+        .block(Block::default().title("BYKC 会话").borders(Borders::ALL));
+    frame.render_widget(header, vertical[0]);
+
+    let view_titles = [" 可选课程 ", " 已选课程 "]
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let selected_view = match app.bykc.view {
+        BykcView::Courses => 0,
+        BykcView::Chosen => 1,
+    };
+    let subtitle = format!(
+        " include_all={} | 1/2 或 h/l 切换视图 | o 查看详情 ",
+        if app.bykc.include_all { "on" } else { "off" }
+    );
+    let tabs = Tabs::new(view_titles)
+        .block(Block::default().title(subtitle).borders(Borders::ALL))
+        .select(selected_view)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(tabs, vertical[1]);
+
+    match app.bykc.view {
+        BykcView::Courses => render_bykc_courses_list(frame, vertical[2], app),
+        BykcView::Chosen => render_bykc_chosen_list(frame, vertical[2], app),
+    }
+
+    render_bykc_detail(frame, vertical[3], app);
+
+    let status = Paragraph::new(app.status.as_str())
+        .block(Block::default().title("状态").borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(status, vertical[4]);
+}
+
+fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
+    let items = if app.bykc.courses.is_empty() {
+        vec![ListItem::new("暂无课程")]
+    } else {
+        app.bykc
+            .courses
+            .iter()
+            .map(|course| {
+                let selected_tag = if course.selected {
+                    "已报"
+                } else {
+                    course.status.as_str()
+                };
+                let label = format!(
+                    "[{}] {} | {} | {}/{}",
+                    selected_tag,
+                    course.course_name,
+                    if course.course_teacher.is_empty() {
+                        "未知教师"
+                    } else {
+                        course.course_teacher.as_str()
+                    },
+                    course.course_current_count,
+                    course.course_max_count,
+                );
+                ListItem::new(label)
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(Block::default().title("课程列表").borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default()
+        .with_selected((!app.bykc.courses.is_empty()).then_some(app.bykc.selected_course));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
+    let items = if app.bykc.chosen_courses.is_empty() {
+        vec![ListItem::new("暂无已选课程")]
+    } else {
+        app.bykc
+            .chosen_courses
+            .iter()
+            .map(|course| {
+                let attendance = if course.can_sign {
+                    "可签到"
+                } else if course.can_sign_out {
+                    "可签退"
+                } else {
+                    "不可操作"
+                };
+                let label = format!(
+                    "[{}] {} | checkin={} | {}",
+                    attendance, course.course_name, course.checkin, course.sign_info
+                );
+                ListItem::new(label)
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(Block::default().title("已选课程").borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default()
+        .with_selected((!app.bykc.chosen_courses.is_empty()).then_some(app.bykc.selected_chosen));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let lines = if let Some(detail) = &app.bykc.detail {
+        vec![
+            Line::from(vec![
+                Span::styled("课程: ", Style::default().fg(Color::Yellow)),
+                Span::raw(detail.course_name.as_str()),
+            ]),
+            Line::from(vec![
+                Span::styled("教师: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if detail.course_teacher.is_empty() {
+                    "-"
+                } else {
+                    detail.course_teacher.as_str()
+                }),
+            ]),
+            Line::from(vec![
+                Span::styled("地点: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if detail.course_position.is_empty() {
+                    "-"
+                } else {
+                    detail.course_position.as_str()
+                }),
+            ]),
+            Line::from(vec![
+                Span::styled("状态: ", Style::default().fg(Color::Yellow)),
+                Span::raw(detail.status.as_str()),
+            ]),
+            Line::from(vec![
+                Span::styled("选课时间: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!(
+                    "{} ~ {}",
+                    empty_dash(&detail.course_select_start_date),
+                    empty_dash(&detail.course_select_end_date)
+                )),
+            ]),
+            Line::from(vec![
+                Span::styled("签到窗口: ", Style::default().fg(Color::Yellow)),
+                Span::raw(
+                    detail
+                        .sign_config
+                        .as_ref()
+                        .map(|config| {
+                            format!(
+                                "{} ~ {}",
+                                empty_dash(&config.sign_start_date),
+                                empty_dash(&config.sign_end_date)
+                            )
+                        })
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("签退窗口: ", Style::default().fg(Color::Yellow)),
+                Span::raw(
+                    detail
+                        .sign_config
+                        .as_ref()
+                        .map(|config| {
+                            format!(
+                                "{} ~ {}",
+                                empty_dash(&config.sign_out_start_date),
+                                empty_dash(&config.sign_out_end_date)
+                            )
+                        })
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+            ]),
+            Line::from(format!(
+                "操作: r 刷新 | o 详情 | s 报名/签到 | x 退选 | u 签退 | a 切换 include_all | Shift+X 退出登录"
+            )),
+        ]
+    } else {
+        let fallback = match app.bykc.view {
+            BykcView::Courses => app.bykc.selected_course().map(|course| {
+                vec![
+                    Line::from(vec![
+                        Span::styled("课程: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(course.course_name.as_str()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("状态: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(course.status.as_str()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("教师: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(empty_dash(&course.course_teacher)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("简介: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(empty_dash(&course.course_desc)),
+                    ]),
+                    Line::from("按 o 或 enter 加载完整详情，按 s 报名"),
+                ]
+            }),
+            BykcView::Chosen => app.bykc.selected_chosen_course().map(|course| {
+                vec![
+                    Line::from(vec![
+                        Span::styled("课程: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(course.course_name.as_str()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("签到状态: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(course.checkin.to_string()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("签到备注: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(empty_dash(&course.sign_info)),
+                    ]),
+                    Line::from("按 o 或 enter 加载完整详情，按 s 签到，u 签退，x 退选"),
+                ]
+            }),
+        };
+        fallback.unwrap_or_else(|| vec![Line::from("当前没有可显示的博雅课程")])
+    };
+
+    let detail = Paragraph::new(lines)
+        .block(Block::default().title("详情").borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, area);
 }
 
 fn render_input(
     frame: &mut Frame,
     area: Rect,
-    label: &str,
+    title: &str,
     value: &str,
     focused: bool,
-    sensitive: bool,
+    secret: bool,
 ) {
-    let border_style = if focused {
-        Style::default().fg(Color::Cyan)
-    } else if sensitive {
-        Style::default().fg(Color::Magenta)
+    let display = if secret {
+        mask_password(value)
     } else {
-        Style::default()
+        value.to_string()
     };
-
-    let paragraph = Paragraph::new(value).block(
-        Block::default()
-            .title(label)
-            .borders(Borders::ALL)
-            .border_style(border_style),
-    );
-    frame.render_widget(paragraph, area);
+    let widget = Paragraph::new(display)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(if focused {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                }),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(widget, area);
 }
 
 fn render_busy_popup(frame: &mut Frame) {
-    let area = centered_rect(40, 5, frame.area());
+    let area = centered_rect(40, 20, frame.area());
     frame.render_widget(Clear, area);
-    let popup = Paragraph::new("网络请求处理中...")
-        .block(
-            Block::default()
-                .title("请稍候")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
-        )
+    let popup = Paragraph::new("处理中...")
+        .block(Block::default().title("请稍候").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     frame.render_widget(popup, area);
 }
@@ -326,185 +616,130 @@ fn render_qr_popup(frame: &mut Frame, app: &App) {
         return;
     };
 
-    let area = centered_rect(78, 82, frame.area());
+    let area = centered_rect(70, 80, frame.area());
     frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .title("二维码签到")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(6),
-        ])
-        .split(area);
+        .constraints([Constraint::Min(10), Constraint::Length(6)])
+        .split(inner);
 
-    let title = if app.qr_refreshing {
-        "二维码签到（自动刷新中）"
+    if let Ok(code) = QrCode::new(qr.qr_url.as_bytes()) {
+        let widget = QrCodeWidget::new(code)
+            .quiet_zone(QuietZone::Disabled)
+            .scaling(Scaling::Min);
+        frame.render_widget(widget, sections[0]);
     } else {
-        "二维码签到"
-    };
-    let outer = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
-    frame.render_widget(outer, area);
+        let failed = Paragraph::new("二维码生成失败")
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(failed, sections[0]);
+    }
 
     let generated_at = chrono::Local
         .timestamp_millis_opt(qr.timestamp)
         .single()
-        .map(|time| time.format("%F %T").to_string())
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| qr.timestamp.to_string());
-
-    let summary = Paragraph::new(vec![
+    let info = Paragraph::new(vec![
         Line::from(format!("courseSchedId: {}", qr.course_sched_id)),
-        Line::from(format!("生成时间: {}", generated_at)),
-        Line::from("按 g 关闭二维码刷新"),
+        Line::from(format!("生成时间: {generated_at}")),
+        Line::from("二维码每 2 秒刷新，按 g 关闭"),
     ])
+    .block(Block::default().title("信息").borders(Borders::ALL))
     .wrap(Wrap { trim: true });
-    frame.render_widget(summary, sections[0]);
-
-    let qr_block = Block::default().title("QR").borders(Borders::ALL);
-    let qr_inner = qr_block.inner(sections[1]);
-    frame.render_widget(qr_block, sections[1]);
-
-    if let Ok(code) = QrCode::new(qr.qr_url.as_bytes()) {
-        let qr_area = centered_qr_rect(qr_inner, code.width() as u16);
-        let widget = QrCodeWidget::new(code)
-            .quiet_zone(QuietZone::Disabled)
-            .scaling(Scaling::Exact(1, 1))
-            .colors(Colors::Inverted);
-        frame.render_widget(widget, qr_area);
-    } else {
-        let fallback = Paragraph::new("二维码渲染失败").wrap(Wrap { trim: true });
-        frame.render_widget(fallback, qr_inner);
-    }
-
-    let url = Paragraph::new(qr.qr_url.as_str())
-        .block(Block::default().title("链接").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(url, sections[2]);
+    frame.render_widget(info, sections[1]);
 }
 
 fn render_help_popup(frame: &mut Frame, app: &App) {
-    let area = centered_rect(82, 86, frame.area());
+    let area = centered_rect(70, 70, frame.area());
     frame.render_widget(Clear, area);
 
-    let outer = Block::default()
-        .title("Helper")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-    let inner = outer.inner(area);
-    frame.render_widget(outer, area);
-
-    let mut lines = vec![
+    let lines = vec![
         Line::from(Span::styled(
             "全局",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  ? 打开或关闭帮助页"),
-        Line::from("  q 退出程序"),
-        Line::from("  esc 关闭帮助页或退出当前弹层"),
+        Line::from("tab / shift+tab: 切换 iClass / BYKC"),
+        Line::from("?: 打开或关闭帮助"),
+        Line::from("Shift+X: 退出登录"),
+        Line::from("q / esc: 退出程序"),
         Line::from(""),
+        Line::from(Span::styled(
+            "iClass",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("h/j/k/l: 周视图内移动"),
+        Line::from("[ ] / H L: 切换周"),
+        Line::from("r: 刷新课程"),
+        Line::from("s: 直接签到"),
+        Line::from("g: 打开或关闭二维码签到"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "BYKC",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("1 / 2 或 h / l: 切换 可选课程 / 已选课程"),
+        Line::from("j / k: 移动选中项"),
+        Line::from("r: 刷新博雅数据"),
+        Line::from("o / enter: 加载课程详情"),
+        Line::from("a: 切换 include_all（仅可选课程视图）"),
+        Line::from("s: 报名课程，或在已选课程里执行签到"),
+        Line::from("x: 退选当前已选课程"),
+        Line::from("u: 执行签退"),
+        Line::from(""),
+        Line::from(format!("当前标签: {:?}", app.active_tab)),
+        Line::from("按 ?、q 或 esc 关闭帮助"),
     ];
 
-    match app.screen {
-        Screen::Login => {
-            lines.push(Line::from(Span::styled(
-                "登录页",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from("  tab / shift+tab 切换字段"));
-            lines.push(Line::from("  space 切换 VPN 开关"));
-            lines.push(Line::from("  enter 提交登录"));
-            lines.push(Line::from(""));
-        }
-        Screen::Courses => {
-            lines.push(Line::from(Span::styled(
-                "课程页",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from("  h / l 在周日历里左右移动"));
-            lines.push(Line::from("  j / k 在当天课程里上下移动"));
-            lines.push(Line::from("  H / L 或 [ / ] 切换周"));
-            lines.push(Line::from("  s 直接签到"));
-            lines.push(Line::from("  g 打开或关闭二维码签到"));
-            lines.push(Line::from("  r 刷新课程"));
-            lines.push(Line::from("  Shift+X 退出登录"));
-            lines.push(Line::from(""));
-        }
-    }
-
-    if app.qr_display.is_some() {
-        lines.push(Line::from(Span::styled(
-            "二维码弹层",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from("  g 关闭二维码自动刷新"));
-        lines.push(Line::from(""));
-    }
-
-    lines.push(Line::from(Span::styled(
-        "说明",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from("  帮助页打开后，? / esc / q 都可以关闭帮助页"));
-    lines.push(Line::from("  帮助页会覆盖在课程页、登录页和二维码弹层之上"));
-
-    let body = Paragraph::new(lines)
-        .block(Block::default().title("快捷键").borders(Borders::ALL))
+    let popup = Paragraph::new(lines)
+        .block(Block::default().title("帮助").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    frame.render_widget(body, inner);
+    frame.render_widget(popup, area);
 }
 
-fn mask_password(password: &str) -> String {
-    if password.is_empty() {
-        String::new()
-    } else {
-        "*".repeat(password.chars().count())
-    }
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let popup_layout = Layout::default()
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage((100 - height) / 2),
-            Constraint::Percentage(height),
-            Constraint::Percentage((100 - height) / 2),
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
         ])
         .split(area);
 
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage((100 - width) / 2),
-            Constraint::Percentage(width),
-            Constraint::Percentage((100 - width) / 2),
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
         ])
-        .split(popup_layout[1])[1]
+        .split(vertical[1])[1]
 }
 
-fn centered_qr_rect(area: Rect, modules: u16) -> Rect {
-    let qr_width = modules.min(area.width.max(1));
-    let qr_height = qr_width.div_ceil(2).min(area.height.max(1));
-    let left = area.x + area.width.saturating_sub(qr_width) / 2;
-    let top = area.y + area.height.saturating_sub(qr_height) / 2;
+fn mask_password(value: &str) -> String {
+    "*".repeat(value.chars().count())
+}
 
-    Rect {
-        x: left,
-        y: top,
-        width: qr_width,
-        height: qr_height,
+fn empty_dash(value: &str) -> String {
+    if value.trim().is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
     }
 }

@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod bykc;
 mod cli;
 mod constants;
 mod model;

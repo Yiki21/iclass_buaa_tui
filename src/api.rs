@@ -5,6 +5,7 @@ use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashSet;
 
+use crate::bykc::BykcApi;
 use crate::constants::{SSO_VPN_LOGIN, network_urls};
 use crate::model::{CourseDetailItem, CourseItem, LoginInput, Session, SignOutcome, SignQrData};
 
@@ -81,6 +82,11 @@ impl IClassApi {
 
         Ok(Session {
             api: self.clone(),
+            bykc_api: if input.use_vpn {
+                Some(BykcApi::new(input.clone())?)
+            } else {
+                None
+            },
             user_id,
             user_name,
             session_id,

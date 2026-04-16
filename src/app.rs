@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::api::IClassApi;
+use crate::bykc::{BykcChosenCourse, BykcCourse, BykcCourseDetail};
 use crate::model::{CourseDetailItem, LoginInput, Session, SignOutcome};
 
 #[derive(Clone, Debug)]
@@ -11,6 +11,7 @@ pub enum AsyncEvent {
     LoginFinished(Result<LoginSuccess, String>),
     RefreshFinished(Result<Vec<CourseDetailItem>, String>),
     SignFinished(Result<SignOutcome, String>),
+    BykcSyncFinished(Result<BykcSyncSuccess, String>),
 }
 
 #[derive(Clone, Debug)]
@@ -38,7 +39,19 @@ pub struct WeekGroup {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Screen {
     Login,
+    Workspace,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceTab {
+    IClass,
+    Bykc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BykcView {
     Courses,
+    Chosen,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,15 +119,122 @@ impl LoginForm {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct BykcState {
+    pub view: BykcView,
+    pub include_all: bool,
+    pub loaded: bool,
+    pub courses: Vec<BykcCourse>,
+    pub selected_course: usize,
+    pub chosen_courses: Vec<BykcChosenCourse>,
+    pub selected_chosen: usize,
+    pub detail: Option<BykcCourseDetail>,
+    pub detail_course_id: Option<i64>,
+}
+
+impl BykcState {
+    pub fn selected_course(&self) -> Option<&BykcCourse> {
+        self.courses.get(self.selected_course)
+    }
+
+    pub fn selected_chosen_course(&self) -> Option<&BykcChosenCourse> {
+        self.chosen_courses.get(self.selected_chosen)
+    }
+
+    pub fn selected_detail_target(&self) -> Option<i64> {
+        match self.view {
+            BykcView::Courses => self.selected_course().map(|course| course.id),
+            BykcView::Chosen => self.selected_chosen_course().map(|course| course.course_id),
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let previous = self.selected_detail_target();
+        match self.view {
+            BykcView::Courses => {
+                self.selected_course = clamp_step(self.selected_course, self.courses.len(), delta);
+            }
+            BykcView::Chosen => {
+                self.selected_chosen =
+                    clamp_step(self.selected_chosen, self.chosen_courses.len(), delta);
+            }
+        }
+
+        if previous != self.selected_detail_target() {
+            self.detail = None;
+            self.detail_course_id = None;
+        }
+    }
+
+    pub fn set_view(&mut self, view: BykcView) {
+        if self.view == view {
+            return;
+        }
+        self.view = view;
+        self.detail = None;
+        self.detail_course_id = None;
+    }
+
+    pub fn replace_data(
+        &mut self,
+        courses: Vec<BykcCourse>,
+        chosen_courses: Vec<BykcChosenCourse>,
+        detail: Option<BykcCourseDetail>,
+    ) {
+        let previous_course_id = self.selected_course().map(|course| course.id);
+        let previous_chosen_id = self.selected_chosen_course().map(|course| course.id);
+
+        self.courses = courses;
+        self.selected_course = previous_course_id
+            .and_then(|id| self.courses.iter().position(|course| course.id == id))
+            .unwrap_or(0);
+        if self.selected_course >= self.courses.len() {
+            self.selected_course = 0;
+        }
+
+        self.chosen_courses = chosen_courses;
+        self.selected_chosen = previous_chosen_id
+            .and_then(|id| {
+                self.chosen_courses
+                    .iter()
+                    .position(|course| course.id == id)
+            })
+            .unwrap_or(0);
+        if self.selected_chosen >= self.chosen_courses.len() {
+            self.selected_chosen = 0;
+        }
+
+        self.loaded = true;
+        self.detail_course_id = detail.as_ref().map(|item| item.id);
+        self.detail = detail;
+    }
+}
+
+impl Default for BykcView {
+    fn default() -> Self {
+        Self::Courses
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BykcSyncSuccess {
+    pub courses: Vec<BykcCourse>,
+    pub chosen_courses: Vec<BykcChosenCourse>,
+    pub detail: Option<BykcCourseDetail>,
+    pub message: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub screen: Screen,
+    pub active_tab: WorkspaceTab,
     pub login: LoginForm,
     pub session: Option<Session>,
     pub courses: Vec<CourseDetailItem>,
     pub week_groups: Vec<WeekGroup>,
     pub selected_week: usize,
     pub selected: usize,
+    pub bykc: BykcState,
     pub status: String,
     pub busy: bool,
     pub should_quit: bool,
@@ -128,12 +248,14 @@ impl Default for App {
     fn default() -> Self {
         Self {
             screen: Screen::Login,
+            active_tab: WorkspaceTab::IClass,
             login: LoginForm::default(),
             session: None,
             courses: Vec::new(),
             week_groups: Vec::new(),
             selected_week: 0,
             selected: 0,
+            bykc: BykcState::default(),
             status: "输入学号后按 enter 登录，tab 切换字段".to_string(),
             busy: false,
             should_quit: false,
@@ -193,12 +315,12 @@ impl App {
 
         match self.screen {
             Screen::Login => self.handle_login_key(key, tx),
-            Screen::Courses => self.handle_courses_key(key, tx),
+            Screen::Workspace => self.handle_workspace_key(key, tx),
         }
     }
 
     pub fn handle_tick(&mut self) {
-        if !self.qr_refreshing {
+        if !self.qr_refreshing || self.active_tab != WorkspaceTab::IClass {
             return;
         }
 
@@ -225,13 +347,13 @@ impl App {
         match event {
             AsyncEvent::LoginFinished(result) => match result {
                 Ok(data) => {
-                    self.screen = Screen::Courses;
+                    self.screen = Screen::Workspace;
+                    self.active_tab = WorkspaceTab::IClass;
                     self.session = Some(data.session);
                     self.replace_courses(data.courses, None, None);
+                    self.bykc = BykcState::default();
                     self.clear_qr();
-                    self.status =
-                        "登录成功。h/j/k/l 在周日历中移动，H/L 或 [ ] 切周，s 直接签到，g 二维码签到，r 刷新，Shift+X 退出登录"
-                            .to_string();
+                    self.status = "登录成功。tab 切换 iClass / BYKC，iClass 内 h/j/k/l 移动，s 直接签到，g 二维码签到，r 刷新，Shift+X 退出登录".to_string();
                 }
                 Err(error) => {
                     self.status = format!("登录失败: {error}");
@@ -290,6 +412,24 @@ impl App {
                     self.status = format!("签到失败: {error}");
                 }
             },
+            AsyncEvent::BykcSyncFinished(result) => match result {
+                Ok(data) => {
+                    let course_count = data.courses.len();
+                    let chosen_count = data.chosen_courses.len();
+                    let message = data.message.unwrap_or_else(|| {
+                        format!(
+                            "博雅数据已加载，可选 {} 门，已选 {} 门",
+                            course_count, chosen_count
+                        )
+                    });
+                    self.bykc
+                        .replace_data(data.courses, data.chosen_courses, data.detail);
+                    self.status = message;
+                }
+                Err(error) => {
+                    self.status = format!("博雅操作失败: {error}");
+                }
+            },
         }
     }
 
@@ -316,15 +456,33 @@ impl App {
         }
     }
 
-    fn handle_courses_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+    fn handle_workspace_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
         if self.busy {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                _ => {}
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.should_quit = true;
             }
             return;
         }
 
+        match key.code {
+            KeyCode::Tab => {
+                self.switch_workspace_tab(1, tx);
+                return;
+            }
+            KeyCode::BackTab => {
+                self.switch_workspace_tab(-1, tx);
+                return;
+            }
+            _ => {}
+        }
+
+        match self.active_tab {
+            WorkspaceTab::IClass => self.handle_iclass_key(key, tx),
+            WorkspaceTab::Bykc => self.handle_bykc_key(key, tx),
+        }
+    }
+
+    fn handle_iclass_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('[') | KeyCode::Char('H') => self.select_prev_week(),
@@ -338,6 +496,59 @@ impl App {
             KeyCode::Char('g') => self.toggle_qr(),
             KeyCode::Char('X') => self.logout(),
             _ => {}
+        }
+    }
+
+    fn handle_bykc_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('1') => {
+                self.bykc.set_view(BykcView::Courses)
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('2') => {
+                self.bykc.set_view(BykcView::Chosen)
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.bykc.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.bykc.move_selection(1),
+            KeyCode::Char('r') => self.refresh_bykc(tx),
+            KeyCode::Char('a') if self.bykc.view == BykcView::Courses => {
+                self.bykc.include_all = !self.bykc.include_all;
+                self.refresh_bykc(tx);
+            }
+            KeyCode::Enter | KeyCode::Char('o') => self.load_bykc_detail(tx),
+            KeyCode::Char('s') if self.bykc.view == BykcView::Courses => {
+                self.select_bykc_course(tx)
+            }
+            KeyCode::Char('x') if self.bykc.view == BykcView::Chosen => {
+                self.deselect_bykc_course(tx)
+            }
+            KeyCode::Char('s') if self.bykc.view == BykcView::Chosen => {
+                self.sign_in_bykc_course(tx)
+            }
+            KeyCode::Char('u') if self.bykc.view == BykcView::Chosen => {
+                self.sign_out_bykc_course(tx)
+            }
+            KeyCode::Char('X') => self.logout(),
+            _ => {}
+        }
+    }
+
+    fn switch_workspace_tab(&mut self, delta: isize, tx: &UnboundedSender<AsyncEvent>) {
+        let tabs = [WorkspaceTab::IClass, WorkspaceTab::Bykc];
+        let current_index = tabs
+            .iter()
+            .position(|tab| *tab == self.active_tab)
+            .unwrap_or_default();
+        let next_index =
+            ((current_index as isize + delta).rem_euclid(tabs.len() as isize)) as usize;
+        self.active_tab = tabs[next_index];
+
+        if self.active_tab != WorkspaceTab::IClass {
+            self.clear_qr();
+        }
+
+        if self.active_tab == WorkspaceTab::Bykc && !self.bykc.loaded {
+            self.refresh_bykc(tx);
         }
     }
 
@@ -398,6 +609,138 @@ impl App {
         spawn_refresh(session, tx.clone());
     }
 
+    fn refresh_bykc(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        if session.bykc_api.is_none() {
+            self.status = "博雅功能需要 VPN 模式登录".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = "加载博雅课程中...".to_string();
+        spawn_bykc_sync(
+            session,
+            self.bykc.include_all,
+            self.bykc.detail_course_id,
+            None,
+            tx.clone(),
+        );
+    }
+
+    fn load_bykc_detail(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course_id) = self.bykc.selected_detail_target() else {
+            self.status = "当前没有可查看的博雅课程".to_string();
+            return;
+        };
+
+        self.busy = true;
+        self.status = "加载博雅课程详情...".to_string();
+        spawn_bykc_sync(
+            session,
+            self.bykc.include_all,
+            Some(course_id),
+            None,
+            tx.clone(),
+        );
+    }
+
+    fn select_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course) = self.bykc.selected_course().cloned() else {
+            self.status = "当前没有可报名的博雅课程".to_string();
+            return;
+        };
+        if course.selected {
+            self.status = "该课程已经报名".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = format!("报名中: {}", course.course_name);
+        spawn_bykc_select(session, self.bykc.include_all, course.id, tx.clone());
+    }
+
+    fn deselect_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course) = self.bykc.selected_chosen_course().cloned() else {
+            self.status = "当前没有可退选的博雅课程".to_string();
+            return;
+        };
+
+        self.busy = true;
+        self.status = format!("退选中: {}", course.course_name);
+        spawn_bykc_deselect(session, self.bykc.include_all, course.course_id, tx.clone());
+    }
+
+    fn sign_in_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course) = self.bykc.selected_chosen_course().cloned() else {
+            self.status = "当前没有可签到的博雅课程".to_string();
+            return;
+        };
+        if !course.can_sign {
+            self.status = "当前课程不在可签到状态".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = format!("博雅签到中: {}", course.course_name);
+        spawn_bykc_sign(
+            session,
+            self.bykc.include_all,
+            course.course_id,
+            1,
+            tx.clone(),
+        );
+    }
+
+    fn sign_out_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+        let Some(session) = self.session.clone() else {
+            self.status = "当前未登录".to_string();
+            self.screen = Screen::Login;
+            return;
+        };
+        let Some(course) = self.bykc.selected_chosen_course().cloned() else {
+            self.status = "当前没有可签退的博雅课程".to_string();
+            return;
+        };
+        if !course.can_sign_out {
+            self.status = "当前课程不在可签退状态".to_string();
+            return;
+        }
+
+        self.busy = true;
+        self.status = format!("博雅签退中: {}", course.course_name);
+        spawn_bykc_sign(
+            session,
+            self.bykc.include_all,
+            course.course_id,
+            2,
+            tx.clone(),
+        );
+    }
+
     fn sign_selected(&mut self, tx: &UnboundedSender<AsyncEvent>) {
         let Some(session) = self.session.clone() else {
             self.status = "当前未登录".to_string();
@@ -424,11 +767,13 @@ impl App {
 
     fn logout(&mut self) {
         self.screen = Screen::Login;
+        self.active_tab = WorkspaceTab::IClass;
         self.session = None;
         self.courses.clear();
         self.week_groups.clear();
         self.selected_week = 0;
         self.selected = 0;
+        self.bykc = BykcState::default();
         self.busy = false;
         self.clear_qr();
         self.status = "已退出登录".to_string();
@@ -621,7 +966,7 @@ impl App {
 fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
     tokio::spawn(async move {
         let result = async {
-            let api = IClassApi::new(input.use_vpn)?;
+            let api = crate::api::IClassApi::new(input.use_vpn)?;
             let session = api.login(&input).await?;
             let courses = api.get_merged_course_details(&session, 7).await?;
             Ok::<LoginSuccess, anyhow::Error>(LoginSuccess { session, courses })
@@ -652,6 +997,135 @@ fn spawn_sign(session: Session, course_sched_id: String, tx: UnboundedSender<Asy
             .await
             .map_err(|error| error.to_string());
         let _ = tx.send(AsyncEvent::SignFinished(result));
+    });
+}
+
+fn spawn_bykc_sync(
+    session: Session,
+    include_all: bool,
+    detail_course_id: Option<i64>,
+    message: Option<String>,
+    tx: UnboundedSender<AsyncEvent>,
+) {
+    tokio::spawn(async move {
+        let result = async {
+            let api = session
+                .bykc_api
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
+            let courses = api.get_courses(include_all).await?;
+            let chosen_courses = api.get_chosen_courses().await?;
+            let detail = if let Some(course_id) = detail_course_id {
+                Some(api.get_course_detail(course_id).await?)
+            } else {
+                None
+            };
+            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
+                courses,
+                chosen_courses,
+                detail,
+                message,
+            })
+        }
+        .await
+        .map_err(|error| error.to_string());
+
+        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+    });
+}
+
+fn spawn_bykc_select(
+    session: Session,
+    include_all: bool,
+    course_id: i64,
+    tx: UnboundedSender<AsyncEvent>,
+) {
+    tokio::spawn(async move {
+        let result = async {
+            let api = session
+                .bykc_api
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
+            let message = api.select_course(course_id).await?;
+            let courses = api.get_courses(include_all).await?;
+            let chosen_courses = api.get_chosen_courses().await?;
+            let detail = Some(api.get_course_detail(course_id).await?);
+            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
+                courses,
+                chosen_courses,
+                detail,
+                message: Some(message),
+            })
+        }
+        .await
+        .map_err(|error| error.to_string());
+
+        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+    });
+}
+
+fn spawn_bykc_deselect(
+    session: Session,
+    include_all: bool,
+    course_id: i64,
+    tx: UnboundedSender<AsyncEvent>,
+) {
+    tokio::spawn(async move {
+        let result = async {
+            let api = session
+                .bykc_api
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
+            let message = api.deselect_course(course_id).await?;
+            let courses = api.get_courses(include_all).await?;
+            let chosen_courses = api.get_chosen_courses().await?;
+            let detail = Some(api.get_course_detail(course_id).await?);
+            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
+                courses,
+                chosen_courses,
+                detail,
+                message: Some(message),
+            })
+        }
+        .await
+        .map_err(|error| error.to_string());
+
+        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+    });
+}
+
+fn spawn_bykc_sign(
+    session: Session,
+    include_all: bool,
+    course_id: i64,
+    sign_type: i32,
+    tx: UnboundedSender<AsyncEvent>,
+) {
+    tokio::spawn(async move {
+        let result = async {
+            let api = session
+                .bykc_api
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
+            let message = if sign_type == 1 {
+                api.sign_in(course_id).await?
+            } else {
+                api.sign_out(course_id).await?
+            };
+            let courses = api.get_courses(include_all).await?;
+            let chosen_courses = api.get_chosen_courses().await?;
+            let detail = Some(api.get_course_detail(course_id).await?);
+            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
+                courses,
+                chosen_courses,
+                detail,
+                message: Some(message),
+            })
+        }
+        .await
+        .map_err(|error| error.to_string());
+
+        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
     });
 }
 
