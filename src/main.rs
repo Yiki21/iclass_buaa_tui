@@ -11,7 +11,7 @@ use std::{env, io, time::Duration};
 use anyhow::Result;
 use app::{App, AsyncEvent};
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -71,7 +71,9 @@ async fn event_loop(
         }
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
                 app.handle_key(key, tx);
             }
         }
