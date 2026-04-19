@@ -57,7 +57,12 @@ cargo install --path .
 ## 自动签到 CLI
 无参数运行时仍然进入 TUI；带子命令时进入 CLI 自动化模式。
 
-自动签到目前是实验性功能，仅支持带 `systemd` 的 Linux 环境。
+自动签到目前仍是实验性功能，但已经支持三套原生调度器：
+- Linux: `systemd --user`
+- macOS: `launchd`
+- Windows: `schtasks`
+
+其中 Linux 支持相对稳定；Windows 和 macOS 版本目前仍属实验性功能，仍需要更多用户帮助测试和反馈。
 
 默认会按 XDG 顺序查找配置文件：
 - `$XDG_CONFIG_HOME/iclass-buaa/config.toml`
@@ -127,43 +132,51 @@ iclass_buaa_tui plan
 # 查看完整参数
 iclass_buaa_tui --help
 iclass_buaa_tui plan --help
-iclass_buaa_tui install-systemd --help
-iclass_buaa_tui uninstall-systemd --help
+iclass_buaa_tui install-autologin --help
+iclass_buaa_tui uninstall-autologin --help
 ```
 
 主要参数：
 - `--config <PATH>`: 显式指定配置文件路径，覆盖默认的 XDG 查找顺序。
 - `plan --dry-run`: 只输出今日课程的自动签到评估结果，不实际签到。
-- `install-systemd --output-dir <PATH>`: 指定生成 `.service`/`.timer` 文件的目录。
-- `install-systemd --planner-time <HH:MM[:SS]>`: 覆盖配置里的 `planner_time`。
-- `install-systemd --planner-interval-minutes <N>`: 覆盖配置里的轮询周期，单位分钟。
-- `uninstall-systemd --output-dir <PATH>`: 指定需要删除的 `.service`/`.timer` 所在目录。
-- `uninstall-systemd --unit-prefix <PREFIX>`: 指定需要卸载的 systemd unit 名前缀。
+- `install-autologin --output-dir <PATH>`: 指定平台调度文件的输出目录。Linux 写 `.service`/`.timer`，macOS 写 `.plist`，Windows 写包装 `.cmd`。
+- `install-autologin --planner-time <HH:MM[:SS]>`: 覆盖配置里的 `planner_time`。
+- `install-autologin --planner-interval-minutes <N>`: 覆盖配置里的轮询周期，单位分钟。
+- `uninstall-autologin --output-dir <PATH>`: 指定需要删除的平台调度文件目录。
+- `uninstall-autologin --unit-prefix <PREFIX>`: 指定需要卸载的任务名前缀。
 
 ### 启用自动签到
-先安装周期轮询的 systemd user service/timer：
+先安装自动签到调度器：
 
 ```bash
-iclass_buaa_tui install-systemd
+iclass_buaa_tui install-autologin
+```
 
+各平台行为：
+- Linux: 生成 `systemd --user` 的 `.service` 和 `.timer`，随后需要执行 `systemctl --user daemon-reload && systemctl --user enable --now iclass-buaa-planner.timer`
+- macOS: 生成并加载 `~/Library/LaunchAgents/<prefix>.planner.plist`
+- Windows: 生成包装 `.cmd` 并注册 `schtasks` 计划任务
+
+Linux 下等价于：
+
+```bash
 # 启用新添加的 systemd user service
 systemctl --user daemon-reload
-# Or
 systemctl --user enable --now iclass-buaa-planner.timer
 ```
 
-`install-systemd` 生成的 `ExecStart=` 会写当前可执行文件的绝对路径，这是故意的。`systemd` 不应该依赖当前 shell 的工作目录，也不应该假设你的 `PATH` 一定包含该程序。
+`install-autologin` 生成的调度配置都会写入当前可执行文件的绝对路径。这是故意的，调度器不应该依赖当前 shell 的工作目录，也不应该假设你的 `PATH` 一定包含该程序。
 
-`planner_time` 定义每天开始自动签到轮询的最早时间；`planner_interval_minutes` 定义轮询间隔。timer 会周期触发，但程序在 `planner_time` 之前只会检查并直接退出，不会提前签到。
+`planner_time` 定义每天开始自动签到轮询的最早时间；`planner_interval_minutes` 定义轮询间隔。不同平台的调度器会按自己的方式周期触发，但程序在 `planner_time` 之前只会检查并直接退出，不会提前签到。
 
 卸载自动签到：
 
 ```bash
-iclass_buaa_tui uninstall-systemd
+iclass_buaa_tui uninstall-autologin
 ```
 
 自动签到流程：
-1. `planner.timer` 按 `planner_interval_minutes` 周期触发一次。
+1. 平台调度器按 `planner_interval_minutes` 周期触发一次。
 2. `plan` 登录并读取今天的 iClass 课程，以及可选的 BYKC 签到/签退窗口。
 3. 已签到项目会被跳过，未到开始窗口的项目会等待下一轮。
 4. 对已经进入窗口的项目，直接执行签到或签退；每次操作前都会重新登录，并按配置重试 `retry_count` 次。
@@ -172,7 +185,6 @@ iclass_buaa_tui uninstall-systemd
 CLI 参数对于登陆只支持配置文件写入!
 
 ## Todo
-- 自动签到功能支持 Windows/MacOS/Linux without systemd
 - 更多其他功能?
 
 Inspired By [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa)

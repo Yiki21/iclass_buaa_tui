@@ -1,3 +1,5 @@
+//! Pure rendering code for the login screen, iClass workspace, and BYKC views.
+
 use chrono::{Duration, NaiveDate, TimeZone};
 use qrcode::QrCode;
 use ratatui::{
@@ -11,6 +13,12 @@ use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
 use crate::app::{App, BykcView, LoginFocus, Screen, WorkspaceTab};
 
+/// Renders the whole frame, then overlays transient popups in a fixed z-order.
+///
+/// Why:
+/// Busy, QR, detail, and help overlays can coexist conceptually, so the top-level
+/// renderer keeps their ordering explicit instead of scattering popup decisions
+/// across the screen-specific renderers.
 pub fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Login => render_login(frame, app),
@@ -118,6 +126,7 @@ fn render_login(frame: &mut Frame, app: &App) {
     frame.render_widget(status, chunks[status_index]);
 }
 
+/// Renders the shared workspace shell before delegating to the active tab body.
 fn render_workspace(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -176,6 +185,13 @@ fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(hint, area);
 }
 
+/// Renders the iClass weekly grid plus the selected-course detail panel.
+///
+/// How:
+/// The layout is split into session info, week info, seven day columns, one
+/// detail block, and one status block. Selection highlighting is derived from
+/// the absolute selected course index so horizontal and vertical navigation stay
+/// aligned with the same underlying flat course list.
 fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -229,7 +245,7 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
     let selected_absolute_index = app.selected_course_absolute_index();
     let weekday_labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
-    for (offset, area) in day_columns.into_iter().enumerate() {
+    for (offset, area) in day_columns.iter().enumerate() {
         let Some(week_start) = week_start else {
             let empty = Paragraph::new("无周数据")
                 .block(
@@ -331,6 +347,7 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(status, vertical[4]);
 }
 
+/// Renders the BYKC workspace with view tabs, list content, detail, and status.
 fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -487,6 +504,12 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// Renders the inline BYKC detail panel under the current list.
+///
+/// Why:
+/// Users should see location, windows, and basic status immediately on cursor
+/// movement, even before opening the full popup. This panel therefore prefers
+/// cached detail, but falls back to lighter list payloads when necessary.
 fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
     let lines = if let Some(detail) = app.bykc.selected_cached_detail() {
         vec![

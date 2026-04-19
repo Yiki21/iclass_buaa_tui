@@ -1,3 +1,5 @@
+//! Application state, async event routing, and keyboard-driven TUI behavior.
+
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
@@ -9,10 +11,10 @@ use crate::model::{CourseDetailItem, LoginInput, Session, SignOutcome};
 
 #[derive(Clone, Debug)]
 pub enum AsyncEvent {
-    LoginFinished(Result<LoginSuccess, String>),
-    RefreshFinished(Result<Vec<CourseDetailItem>, String>),
-    SignFinished(Result<SignOutcome, String>),
-    BykcSyncFinished(Result<BykcSyncSuccess, String>),
+    Login(Result<LoginSuccess, String>),
+    Refresh(Result<Vec<CourseDetailItem>, String>),
+    Sign(Result<SignOutcome, String>),
+    BykcSync(Box<Result<BykcSyncSuccess, String>>),
 }
 
 #[derive(Clone, Debug)]
@@ -49,8 +51,9 @@ pub enum WorkspaceTab {
     Bykc,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BykcView {
+    #[default]
     Courses,
     Chosen,
 }
@@ -116,6 +119,11 @@ impl LoginForm {
     }
 
     /// Builds the login payload expected by the network layer.
+    ///
+    /// Why:
+    /// Direct mode and VPN mode shape credentials differently. Centralizing that
+    /// rule here keeps the input handlers focused on editing state instead of
+    /// duplicating login normalization logic.
     pub fn to_input(&self) -> LoginInput {
         let student_id = self.student_id.trim();
         let vpn_username = self.vpn_username.trim();
@@ -192,6 +200,12 @@ impl BykcState {
         self.sync_detail_from_cache();
     }
 
+    /// Replaces BYKC list data while preserving selection and cached detail when possible.
+    ///
+    /// How:
+    /// Resolve the previous selected ids before replacing the vectors, then map
+    /// those ids back onto the fresh lists. This avoids cursor jumps after a
+    /// refresh and keeps the detail panel anchored to the same logical course.
     pub fn replace_data(
         &mut self,
         courses: Vec<BykcCourse>,
@@ -231,6 +245,7 @@ impl BykcState {
         }
     }
 
+    /// Rebinds the inline detail panel to the current selection using cached detail first.
     pub fn sync_detail_from_cache(&mut self) {
         let Some(course_id) = self.selected_detail_target() else {
             self.detail = None;
@@ -246,12 +261,6 @@ impl BykcState {
         self.detail_cache
             .get(&course_id)
             .or_else(|| self.detail.as_ref().filter(|detail| detail.id == course_id))
-    }
-}
-
-impl Default for BykcView {
-    fn default() -> Self {
-        Self::Courses
     }
 }
 
@@ -332,6 +341,11 @@ impl App {
         self.courses.get(index)
     }
 
+    /// Applies one key press to the current screen state.
+    ///
+    /// Why:
+    /// Global shortcuts, popups, and screen-specific handlers must share one
+    /// gateway so they do not conflict with each other as more features are added.
     pub fn handle_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -395,10 +409,16 @@ impl App {
         self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
     }
 
+    /// Incorporates one completed background task back into foreground UI state.
+    ///
+    /// How:
+    /// Worker tasks only return immutable payloads. All UI mutation in response
+    /// to those payloads flows through this single function, which makes async
+    /// state transitions much easier to reason about.
     pub fn handle_async(&mut self, event: AsyncEvent) {
         self.busy = false;
         match event {
-            AsyncEvent::LoginFinished(result) => match result {
+            AsyncEvent::Login(result) => match result {
                 Ok(data) => {
                     self.screen = Screen::Workspace;
                     self.active_tab = WorkspaceTab::IClass;
@@ -412,7 +432,7 @@ impl App {
                     self.status = format!("登录失败: {error}");
                 }
             },
-            AsyncEvent::RefreshFinished(result) => match result {
+            AsyncEvent::Refresh(result) => match result {
                 Ok(courses) => {
                     let selected_id = self
                         .selected_course()
@@ -445,7 +465,7 @@ impl App {
                     self.status = format!("刷新失败: {error}");
                 }
             },
-            AsyncEvent::SignFinished(result) => match result {
+            AsyncEvent::Sign(result) => match result {
                 Ok(outcome) => {
                     self.status = if outcome.success_like {
                         "签到成功".to_string()
@@ -453,19 +473,18 @@ impl App {
                         format!("签到结果: {}", outcome.message)
                     };
 
-                    if outcome.success_like {
-                        if let Some(index) = self.selected_course_absolute_index() {
-                            if let Some(item) = self.courses.get_mut(index) {
-                                item.sign_status = "1".to_string();
-                            }
-                        }
+                    if outcome.success_like
+                        && let Some(index) = self.selected_course_absolute_index()
+                        && let Some(item) = self.courses.get_mut(index)
+                    {
+                        item.sign_status = "1".to_string();
                     }
                 }
                 Err(error) => {
                     self.status = format!("签到失败: {error}");
                 }
             },
-            AsyncEvent::BykcSyncFinished(result) => match result {
+            AsyncEvent::BykcSync(result) => match *result {
                 Ok(data) => {
                     let course_count = data.courses.len();
                     let chosen_count = data.chosen_courses.len();
@@ -1064,7 +1083,7 @@ impl App {
 fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
     tokio::spawn(async move {
         let result = async {
-            let api = crate::api::IClassApi::new(input.use_vpn)?;
+            let api = crate::iclass::IClassApi::new(input.use_vpn)?;
             let session = api.login(&input).await?;
             let courses = api.get_merged_course_details(&session, 7).await?;
             Ok::<LoginSuccess, anyhow::Error>(LoginSuccess { session, courses })
@@ -1072,7 +1091,7 @@ fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
         .await
         .map_err(|error| error.to_string());
 
-        let _ = tx.send(AsyncEvent::LoginFinished(result));
+        let _ = tx.send(AsyncEvent::Login(result));
     });
 }
 
@@ -1083,7 +1102,7 @@ fn spawn_refresh(session: Session, tx: UnboundedSender<AsyncEvent>) {
             .get_merged_course_details(&session, 7)
             .await
             .map_err(|error| error.to_string());
-        let _ = tx.send(AsyncEvent::RefreshFinished(result));
+        let _ = tx.send(AsyncEvent::Refresh(result));
     });
 }
 
@@ -1094,10 +1113,16 @@ fn spawn_sign(session: Session, course_sched_id: String, tx: UnboundedSender<Asy
             .sign_now(&session, &course_sched_id)
             .await
             .map_err(|error| error.to_string());
-        let _ = tx.send(AsyncEvent::SignFinished(result));
+        let _ = tx.send(AsyncEvent::Sign(result));
     });
 }
 
+/// Spawns one BYKC refresh task that can update lists and optionally load a detail record.
+///
+/// Why:
+/// BYKC screens often need a list refresh and a focused detail fetch to land
+/// together. Running them in one worker avoids racing updates from multiple
+/// overlapping tasks.
 fn spawn_bykc_sync(
     session: Session,
     include_all: bool,
@@ -1133,7 +1158,7 @@ fn spawn_bykc_sync(
         .await
         .map_err(|error| error.to_string());
 
-        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
     });
 }
 
@@ -1180,7 +1205,7 @@ fn spawn_bykc_select(
         .await
         .map_err(|error| error.to_string());
 
-        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
     });
 }
 
@@ -1221,7 +1246,7 @@ fn spawn_bykc_deselect(
         .await
         .map_err(|error| error.to_string());
 
-        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
     });
 }
 
@@ -1267,10 +1292,15 @@ fn spawn_bykc_sign(
         .await
         .map_err(|error| error.to_string());
 
-        let _ = tx.send(AsyncEvent::BykcSyncFinished(result));
+        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
     });
 }
 
+/// Builds Monday-based week buckets from the flat iClass course list.
+///
+/// Why:
+/// The backend returns rows, but the UI is a weekly grid. Precomputing week
+/// groups once keeps navigation and rendering simple and stable.
 fn build_week_groups(courses: &[CourseDetailItem]) -> Vec<WeekGroup> {
     let mut groups: Vec<WeekGroup> = Vec::new();
     let mut current_group_key = String::new();

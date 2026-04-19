@@ -1,3 +1,8 @@
+//! iClass client implementation, login flow, course loading, and sign requests.
+//! Sorry for this big file because i don't wanna split it into multi shits
+//! and that's make the maintain more difficult for me
+//! maybe in the future i will carefully split it
+
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Local, Utc};
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
@@ -16,6 +21,7 @@ pub struct IClassApi {
 }
 
 impl IClassApi {
+    /// Creates one iClass HTTP client with the headers shared by all requests.
     pub fn new(use_vpn: bool) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -95,6 +101,18 @@ impl IClassApi {
         })
     }
 
+    /// Loads course details from both the legacy list/detail flow and the daily schedule API.
+    ///
+    /// Why:
+    /// The upstream iClass APIs are inconsistent. One endpoint is better for
+    /// complete course coverage, while the other is better for near-term
+    /// schedule accuracy. Merging both gives the TUI and CLI a more reliable
+    /// view of what can actually be signed.
+    ///
+    /// How:
+    /// Query the semester-based course list first, expand it into detail rows,
+    /// then load the date-based rows for `future_days` concurrently. Finally,
+    /// deduplicate by course/date/time identity and sort for stable display.
     pub async fn get_merged_course_details(
         &self,
         session: &Session,
@@ -120,14 +138,22 @@ impl IClassApi {
             }
         }
 
+        let mut tasks = Vec::with_capacity(future_days + 1);
         for offset in 0..=future_days {
+            let api = self.clone();
+            let user_id = session.user_id.clone();
+            let session_id = session.session_id.clone();
             let date_str = (Local::now().date_naive() + Duration::days(offset as i64))
                 .format("%Y%m%d")
                 .to_string();
-            for item in self
-                .get_course_by_date(&session.user_id, &session.session_id, &date_str)
-                .await?
-            {
+            tasks.push(tokio::spawn(async move {
+                api.get_course_by_date(&user_id, &session_id, &date_str)
+                    .await
+            }));
+        }
+
+        for task in tasks {
+            for item in task.await.context("按日期获取课程任务执行失败")?? {
                 let key = merged_key(&item);
                 if seen.insert(key) {
                     merged.push(item);
@@ -153,6 +179,17 @@ impl IClassApi {
         Ok(merged)
     }
 
+    /// Submits one immediate iClass sign request using the server-aligned timestamp.
+    ///
+    /// Why:
+    /// iClass sign requests are sensitive to server time drift. Reusing the
+    /// offset captured at login keeps the CLI and TUI aligned with the server's
+    /// notion of "now" without adding extra round trips before every sign.
+    ///
+    /// How:
+    /// Reuse the same JSON parsing and business-status check as the other iClass
+    /// endpoints so sign requests fail consistently on malformed responses or
+    /// non-zero `STATUS` codes instead of silently inventing a fallback payload.
     pub async fn sign_now(&self, session: &Session, course_sched_id: &str) -> Result<SignOutcome> {
         let course_sched_id = course_sched_id.trim();
         if course_sched_id.is_empty() {
@@ -175,39 +212,38 @@ impl IClassApi {
             .await
             .context("签到请求失败")?;
 
-        let status_code = response.status().as_u16();
-        let raw_text = response.text().await.context("签到响应读取失败")?;
-        let raw = serde_json::from_str::<Value>(&raw_text).unwrap_or_else(|_| {
-            serde_json::json!({
-                "STATUS": "1",
-                "ERRMSG": "签到接口返回非 JSON",
-                "statusCode": status_code,
-                "raw": raw_text.chars().take(200).collect::<String>(),
-            })
-        });
+        let http_status = response.status().as_u16();
+        let raw_response = parse_json(response).await.context("签到响应解析失败")?;
+        ensure_status_ok(&raw_response).context("签到失败")?;
 
-        let status = raw
+        let server_status = raw_response
             .get("STATUS")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-
-        let message = raw
+        let message = raw_response
             .get("ERRMSG")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
+            .or_else(|| raw_response.get("MSG").and_then(Value::as_str))
             .unwrap_or("已提交")
             .to_string();
 
         Ok(SignOutcome {
             message,
-            success_like: status == "0",
-            http_status: status_code,
-            server_status: status,
-            raw_response: raw,
+            success_like: true,
+            http_status,
+            server_status,
+            raw_response,
         })
     }
 
+    /// Builds the QR payload that the mobile client would normally scan.
+    ///
+    /// Why:
+    /// The TUI and CLI expose a QR mode for users who want the timestamped sign
+    /// URL without immediately firing the request. That keeps QR generation and
+    /// direct sign submission aligned on the same URL shape.
     pub fn generate_sign_qr(&self, course_sched_id: &str, timestamp_ms: i64) -> Result<SignQrData> {
         if self.use_vpn {
             bail!("VPN 模式不支持生成二维码，请使用直接签到");
@@ -234,6 +270,13 @@ impl IClassApi {
         })
     }
 
+    /// Completes the BUAA VPN login flow and verifies that iClass is reachable.
+    ///
+    /// Why:
+    /// A successful SSO form submission is not enough on its own. The VPN may
+    /// still leave the session on a portal page, which later causes confusing
+    /// iClass failures. This helper finishes the login and proves the cookies
+    /// actually grant access to the target service.
     async fn vpn_login(&self, username: &str, password: &str) -> Result<()> {
         if username.trim().is_empty() || password.is_empty() {
             bail!("VPN 模式需要输入账号和密码");
@@ -283,6 +326,12 @@ impl IClassApi {
         bail!("登录失败，最终 URL: {final_url}");
     }
 
+    /// Extracts the transient `execution` token required by BUAA SSO.
+    ///
+    /// Why:
+    /// The login form is stateful and rejects submissions without the current
+    /// hidden token, so this remains a dedicated pre-step instead of being
+    /// inlined into the larger VPN login flow.
     async fn fetch_execution(&self) -> Result<String> {
         let body = self
             .client
@@ -309,6 +358,11 @@ impl IClassApi {
     }
 
     /// Fetches user info and derives `server_time_offset_ms` from the HTTP `Date` header.
+    ///
+    /// Why:
+    /// iClass sign requests are time-sensitive, and the server clock can differ
+    /// from the local machine. Capturing the offset once during login is the
+    /// cheapest way to keep later sign timestamps aligned.
     async fn fetch_user_info(&self, username: &str) -> Result<(Value, i64)> {
         let urls = network_urls(self.use_vpn);
         let response = self
@@ -350,6 +404,13 @@ impl IClassApi {
         Ok((user_info, server_time_offset_ms))
     }
 
+    /// Resolves the semester code that downstream course APIs expect.
+    ///
+    /// Why:
+    /// Most course endpoints need an explicit semester code, but the login
+    /// response does not provide one. Preferring the row marked current keeps
+    /// normal behavior correct while still falling back gracefully if the flag
+    /// is absent.
     async fn get_current_semester(
         &self,
         user_id: &str,
@@ -386,6 +447,11 @@ impl IClassApi {
         Ok(current)
     }
 
+    /// Loads the coarse course list for the current semester.
+    ///
+    /// Why:
+    /// The detail API is keyed by course id, so we first need this lightweight
+    /// list as the expansion seed for the richer schedule records.
     async fn get_courses(
         &self,
         user_id: &str,
@@ -422,8 +488,13 @@ impl IClassApi {
             if id.is_empty() {
                 continue;
             }
+            let course_name = value_to_string(item.get("course_name"));
             courses.push(CourseItem {
-                name: value_to_string(item.get("course_name")).if_empty("未知课程"),
+                name: if course_name.trim().is_empty() {
+                    "未知课程".to_string()
+                } else {
+                    course_name
+                },
                 id,
             });
         }
@@ -431,6 +502,18 @@ impl IClassApi {
         Ok(courses)
     }
 
+    /// Expands each semester course into signable schedule rows.
+    ///
+    /// Why:
+    /// The semester list only tells us which courses exist. The TUI and CLI act
+    /// on concrete schedule rows, so we fan out here and normalize the result
+    /// into one shared `CourseDetailItem` shape.
+    ///
+    /// How:
+    /// The upstream detail API is per-course, so fetching dozens of rows
+    /// serially wastes time on avoidable network latency. We fire all detail
+    /// requests concurrently, then sort the flattened result to keep the final
+    /// display stable for the TUI and CLI.
     async fn get_courses_detail(
         &self,
         user_id: &str,
@@ -438,46 +521,88 @@ impl IClassApi {
         courses: &[CourseItem],
     ) -> Result<Vec<CourseDetailItem>> {
         let urls = network_urls(self.use_vpn);
-        let mut details = Vec::new();
-
+        let mut tasks = Vec::with_capacity(courses.len());
         for course in courses {
-            let url = format!(
-                "{}?id={}&courseId={}&sessionId={}",
-                urls.course_sign_detail, user_id, course.id, session_id
-            );
-            let data = parse_json(
-                self.client
-                    .get(&url)
-                    .send()
-                    .await
-                    .with_context(|| format!("请求课程详情失败: {}", course.name))?,
-            )
-            .await?;
+            let api = self.clone();
+            let user_id = user_id.to_string();
+            let session_id = session_id.to_string();
+            let course = course.clone();
+            tasks.push(tokio::spawn(async move {
+                let url = format!(
+                    "{}?id={}&courseId={}&sessionId={}",
+                    urls.course_sign_detail, user_id, course.id, session_id
+                );
+                let data = parse_json(
+                    api.client
+                        .get(&url)
+                        .send()
+                        .await
+                        .with_context(|| format!("请求课程详情失败: {}", course.name))?,
+                )
+                .await?;
+                ensure_status_ok(&data)
+                    .with_context(|| format!("课程详情返回业务错误: {}", course.name))?;
 
-            let records = data
-                .get("result")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+                let records = data
+                    .get("result")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
 
-            for record in records {
-                details.push(CourseDetailItem {
-                    name: course.name.clone(),
-                    id: course.id.clone(),
-                    course_sched_id: value_to_string(record.get("courseSchedId")),
-                    date: normalize_date_display(&value_to_string(record.get("teachTime"))),
-                    start_time: normalize_time_display(&value_to_string(
-                        record.get("classBeginTime"),
-                    )),
-                    end_time: normalize_time_display(&value_to_string(record.get("classEndTime"))),
-                    sign_status: value_to_string(record.get("signStatus")),
-                });
-            }
+                let mut details = Vec::with_capacity(records.len());
+                for record in records {
+                    details.push(CourseDetailItem {
+                        name: course.name.clone(),
+                        id: course.id.clone(),
+                        course_sched_id: value_to_string(record.get("courseSchedId")),
+                        date: normalize_date_display(&value_to_string(record.get("teachTime"))),
+                        start_time: normalize_time_display(&value_to_string(
+                            record.get("classBeginTime"),
+                        )),
+                        end_time: normalize_time_display(&value_to_string(
+                            record.get("classEndTime"),
+                        )),
+                        sign_status: value_to_string(record.get("signStatus")),
+                    });
+                }
+
+                Ok::<Vec<CourseDetailItem>, anyhow::Error>(details)
+            }));
         }
+
+        let mut details = Vec::new();
+        for task in tasks {
+            details.extend(task.await.context("课程详情任务执行失败")??);
+        }
+
+        details.sort_by(|a, b| {
+            (
+                a.date.as_str(),
+                a.start_time.as_str(),
+                a.end_time.as_str(),
+                a.name.as_str(),
+                a.id.as_str(),
+                a.course_sched_id.as_str(),
+            )
+                .cmp(&(
+                    b.date.as_str(),
+                    b.start_time.as_str(),
+                    b.end_time.as_str(),
+                    b.name.as_str(),
+                    b.id.as_str(),
+                    b.course_sched_id.as_str(),
+                ))
+        });
 
         Ok(details)
     }
 
+    /// Loads schedule rows from the date-based API for one calendar day.
+    ///
+    /// Why:
+    /// This endpoint often exposes imminent classes more accurately than the
+    /// semester-detail flow. Keeping it separate lets the caller merge both data
+    /// sources and prefer broader coverage over trusting only one endpoint.
     async fn get_course_by_date(
         &self,
         user_id: &str,
@@ -509,13 +634,21 @@ impl IClassApi {
 
         let mut details = Vec::new();
         for record in records {
+            let course_name = value_to_string(record.get("courseName"));
+            let teach_time = value_to_string(record.get("teachTime"));
             details.push(CourseDetailItem {
-                name: value_to_string(record.get("courseName")).if_empty("未知课程"),
+                name: if course_name.trim().is_empty() {
+                    "未知课程".to_string()
+                } else {
+                    course_name
+                },
                 id: value_to_string(record.get("courseId")),
                 course_sched_id: value_to_string(record.get("id")),
-                date: normalize_date_display(
-                    &value_to_string(record.get("teachTime")).if_empty(date_str),
-                ),
+                date: normalize_date_display(if teach_time.trim().is_empty() {
+                    date_str
+                } else {
+                    teach_time.as_str()
+                }),
                 start_time: normalize_time_display(&value_to_string(record.get("classBeginTime"))),
                 end_time: normalize_time_display(&value_to_string(record.get("classEndTime"))),
                 sign_status: value_to_string(record.get("signStatus")),
@@ -526,6 +659,12 @@ impl IClassApi {
     }
 }
 
+/// Builds the deduplication key used when merging multiple iClass data sources.
+///
+/// Why:
+/// The semester-detail API and the date-based API overlap but do not always
+/// expose the same identifiers. Prefer `course_sched_id` when present, then
+/// fall back to a coarse identity so the merged list stays stable.
 fn merged_key(item: &CourseDetailItem) -> String {
     if !item.course_sched_id.is_empty() {
         format!("sched:{}", item.course_sched_id)
@@ -534,10 +673,12 @@ fn merged_key(item: &CourseDetailItem) -> String {
     }
 }
 
+/// Detects whether a redirect target has already landed inside iClass.
 fn looks_like_iclass_url(url: &str) -> bool {
     url.contains("iclass.buaa.edu.cn") || url.contains("d.buaa.edu.cn/https-834")
 }
 
+/// Detects the generic VPN portal page that appears before entering iClass.
 fn looks_like_vpn_portal_home(url: &str) -> bool {
     reqwest::Url::parse(url)
         .map(|parsed| {
@@ -546,6 +687,12 @@ fn looks_like_vpn_portal_home(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Parses JSON while preserving enough response context for debugging.
+///
+/// Why:
+/// Both the TUI and CLI need actionable errors when the upstream service sends
+/// HTML, truncated JSON, or other unexpected payloads. Centralizing the parsing
+/// keeps those diagnostics consistent.
 async fn parse_json(response: reqwest::Response) -> Result<Value> {
     let status = response.status();
     let body = response.text().await.context("读取响应失败")?;
@@ -557,6 +704,11 @@ async fn parse_json(response: reqwest::Response) -> Result<Value> {
     })
 }
 
+/// Interprets iClass' business-status convention.
+///
+/// Why:
+/// Many iClass endpoints return HTTP 200 even when the operation failed, so the
+/// JSON `STATUS` field is the real success signal.
 fn ensure_status_ok(data: &Value) -> Result<()> {
     if data.get("STATUS").and_then(Value::as_str) == Some("0") {
         return Ok(());
@@ -564,6 +716,7 @@ fn ensure_status_ok(data: &Value) -> Result<()> {
     bail!("iClass API 返回错误: {}", data);
 }
 
+/// Normalizes date-like fields into `YYYY-MM-DD` for stable display and merge keys.
 fn normalize_date_display(raw: &str) -> String {
     let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() >= 8 {
@@ -573,6 +726,7 @@ fn normalize_date_display(raw: &str) -> String {
     }
 }
 
+/// Normalizes time-like fields into `HH:MM` when the upstream payload is loose.
 fn normalize_time_display(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -590,6 +744,11 @@ fn normalize_time_display(raw: &str) -> String {
     format!("{:0>2}:{}", hour, minute)
 }
 
+/// Converts a permissive JSON scalar into a displayable string.
+///
+/// Why:
+/// The upstream APIs mix strings, numbers, and booleans for the same logical
+/// fields, so callers use this helper to keep normalization code compact.
 fn value_to_string(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(v)) => v.clone(),
@@ -599,6 +758,7 @@ fn value_to_string(value: Option<&Value>) -> String {
     }
 }
 
+/// Percent-encodes one query component for QR URL generation.
 fn encode_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -613,18 +773,4 @@ fn encode_component(value: &str) -> String {
         }
     }
     encoded
-}
-
-trait StringFallback {
-    fn if_empty(self, fallback: &str) -> String;
-}
-
-impl StringFallback for String {
-    fn if_empty(self, fallback: &str) -> String {
-        if self.trim().is_empty() {
-            fallback.to_string()
-        } else {
-            self
-        }
-    }
 }

@@ -1,7 +1,9 @@
-use crate::api::IClassApi;
-use crate::bykc::BykcApi;
-use serde_json::Value;
+//! Shared data models exchanged between the TUI, CLI, and the iClass/BYKC clients.
 
+use crate::bykc::BykcApi;
+use crate::iclass::IClassApi;
+
+/// Login credentials normalized from either the TUI form or the CLI config file.
 #[derive(Clone, Debug, Default)]
 pub struct LoginInput {
     pub student_id: String,
@@ -18,6 +20,7 @@ pub struct Session {
     pub user_id: String,
     pub user_name: String,
     pub session_id: String,
+    // iclass need this
     pub server_time_offset_ms: i64,
     pub use_vpn: bool,
 }
@@ -45,7 +48,8 @@ pub struct SignOutcome {
     pub success_like: bool,
     pub http_status: u16,
     pub server_status: String,
-    pub raw_response: Value,
+    /// Raw server payload retained for CLI debug output and future diagnostics.
+    pub raw_response: serde_json::value::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +60,7 @@ pub struct SignQrData {
 }
 
 impl CourseDetailItem {
+    /// Returns whether iClass already marks this row as signed.
     pub fn signed(&self) -> bool {
         self.sign_status == "1"
     }

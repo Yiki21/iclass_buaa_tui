@@ -4,8 +4,11 @@ version = "0.4.0"
 edition = "2024"
 description = "BUAA class check TUI software"
 homepage = "https://github.com/Yiki21/iclass_buaa_tui"
-license = "MIT"
+license = "GPL-3"
 
+# ----------------------
+# For MacOS
+# ---------------------
 [package.metadata.packager]
 product-name = "iClass BUAA TUI"
 identifier = "io.github.yiki21.iclass-buaa-tui"
@@ -25,6 +28,9 @@ Features:
 - Async HTTP requests
 """
 
+# ----------------------
+# For RPM
+# ---------------------
 [package.metadata.generate-rpm]
 summary = "BUAA class check-in TUI tool"
 vendor = "Yiki21"
@@ -54,6 +60,9 @@ dest = "/usr/share/doc/iclass_buaa_tui/config.example.toml"
 mode = "644"
 doc = true
 
+# ----------------------
+# For Deb
+# ---------------------
 [package.metadata.deb]
 maintainer = "Yiki21"
 section = "utils"

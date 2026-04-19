@@ -1,8 +1,10 @@
-mod api;
+//! Program entry point for switching between the interactive TUI and the automation CLI.
+
 mod app;
 mod bykc;
 mod cli;
 mod constants;
+mod iclass;
 mod model;
 mod ui;
 
@@ -32,6 +34,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Runs the full interactive terminal lifecycle from raw-mode setup to teardown.
+///
+/// Why:
+/// Terminal state is easy to leave broken on early returns. Keeping setup, loop
+/// execution, and teardown in one place makes that lifecycle easier to audit.
 async fn run_app() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -51,6 +58,12 @@ async fn run_app() -> Result<()> {
     loop_result
 }
 
+/// Drives one TUI frame loop by applying async results, redrawing, and reading input.
+///
+/// How:
+/// Each iteration first drains finished background jobs, then updates timer-based
+/// state, renders the latest frame, and only then consumes one key event. That
+/// ordering keeps the UI responsive without a second render thread.
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -70,12 +83,11 @@ async fn event_loop(
             break;
         }
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                app.handle_key(key, tx);
-            }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            app.handle_key(key, tx);
         }
     }
 
