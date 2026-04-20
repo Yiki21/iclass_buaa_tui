@@ -540,8 +540,8 @@ impl IClassApi {
                         .with_context(|| format!("请求课程详情失败: {}", course.name))?,
                 )
                 .await?;
-                ensure_status_ok(&data)
-                    .with_context(|| format!("课程详情返回业务错误: {}", course.name))?;
+                // ensure_status_ok(&data)
+                //     .with_context(|| format!("课程详情返回业务错误: {}", course.name))?;
 
                 let records = data
                     .get("result")
