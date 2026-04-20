@@ -1160,7 +1160,11 @@ dependencies = [
 
 [[package]]
 name = "iclass_buaa_tui"
+<<<<<<< HEAD
 version = "0.4.3"
+=======
+version = "0.4.2"
+>>>>>>> e466e9c37df1004a6e14609f53c95a80d4272742
 dependencies = [
  "aes",
  "anyhow",
