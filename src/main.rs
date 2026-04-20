@@ -10,6 +10,14 @@ mod ui;
 
 use std::{env, io, time::Duration};
 
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::{OsStr, OsString},
+    io::IsTerminal,
+    path::Path,
+    process::Command,
+};
+
 use anyhow::Result;
 use app::{App, AsyncEvent};
 use crossterm::{
@@ -22,7 +30,15 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let run_result = if cli::should_run_cli(env::args_os()) {
+    let args = env::args_os().collect::<Vec<_>>();
+    let run_cli = cli::should_run_cli(args.iter().cloned());
+
+    #[cfg(target_os = "macos")]
+    if !run_cli && relaunch_bundled_app_in_terminal_if_needed(&args)? {
+        return Ok(());
+    }
+
+    let run_result = if run_cli {
         cli::run_cli().await
     } else {
         run_app().await
@@ -32,6 +48,77 @@ async fn main() -> Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+/// macOS app bundles launched from Finder have no attached TTY, so the TUI needs
+/// to relaunch itself inside Terminal before entering raw mode.
+#[cfg(target_os = "macos")]
+fn relaunch_bundled_app_in_terminal_if_needed(args: &[OsString]) -> Result<bool> {
+    if args.len() > 1
+        || io::stdin().is_terminal()
+        || io::stdout().is_terminal()
+        || io::stderr().is_terminal()
+    {
+        return Ok(false);
+    }
+
+    let executable = env::current_exe()?;
+    if !is_macos_app_bundle_executable(&executable) {
+        return Ok(false);
+    }
+
+    let command = shell_quote(executable.to_string_lossy().as_ref());
+    let status = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"Terminal\" to activate")
+        .arg("-e")
+        .arg(format!(
+            "tell application \"Terminal\" to do script \"{}\"",
+            escape_applescript_string(&command)
+        ))
+        .status()?;
+
+    anyhow::ensure!(
+        status.success(),
+        "failed to relaunch the app inside Terminal.app"
+    );
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_app_bundle_executable(path: &Path) -> bool {
+    let Some(macos_dir) = path.parent() else {
+        return false;
+    };
+    let Some(contents_dir) = macos_dir.parent() else {
+        return false;
+    };
+    let Some(app_dir) = contents_dir.parent() else {
+        return false;
+    };
+
+    macos_dir.file_name() == Some(OsStr::new("MacOS"))
+        && contents_dir.file_name() == Some(OsStr::new("Contents"))
+        && app_dir.extension() == Some(OsStr::new("app"))
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote(input: &str) -> String {
+    let mut quoted = String::from("'");
+    for ch in input.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Runs the full interactive terminal lifecycle from raw-mode setup to teardown.

@@ -14,6 +14,16 @@
 - Apple Silicon: `macos-arm64`
 - Intel: `macos-x64`
 
+安装和启动方式：
+- 打开 `.dmg` 后，把 `iClass BUAA TUI.app` 拖到 `Applications`
+- 不要直接从桌面上的磁盘映像图标运行，也不要停留在挂载出来的 DMG 里直接启动
+- 这是终端 TUI 程序；新版本会在双击 `.app` 时自动拉起 `Terminal.app`
+- 如果你使用的是旧版本，双击没有反应时，请在终端手动运行：
+
+```bash
+/Applications/iClass\ BUAA\ TUI.app/Contents/MacOS/iclass_buaa_tui
+```
+
 ### Windows
 在 Releases 中选择对应架构的 `.exe`：
 - x64: `windows-x64`
