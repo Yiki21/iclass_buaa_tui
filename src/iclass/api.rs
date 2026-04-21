@@ -49,7 +49,7 @@ impl IClassApi {
     /// Logs in and captures the server clock offset needed by later sign requests.
     pub async fn login(&self, input: &LoginInput) -> Result<Session> {
         let student_id = input.student_id.trim();
-        if student_id.is_empty() {
+        if student_id.is_empty() && !self.use_vpn {
             bail!("学号不能为空");
         }
 
@@ -394,12 +394,12 @@ impl IClassApi {
             bail!("请求 iClass 用户信息失败，HTTP 状态: {}", response.status());
         }
 
-        let data = parse_json(response).await?;
+        let mut data = parse_json(response).await?;
         ensure_status_ok(&data)?;
         let user_info = data
-            .get("result")
-            .cloned()
-            .ok_or_else(|| anyhow!("iClass API 返回的用户信息格式异常"))?;
+            .get_mut("result")
+            .ok_or_else(|| anyhow!("iClass API 返回的用户信息格式异常"))?
+            .take();
 
         Ok((user_info, server_time_offset_ms))
     }

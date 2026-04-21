@@ -66,7 +66,7 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     let title = Paragraph::new(vec![
         Line::from(Span::styled(
-            "Ratatui + Tokio 终端工具",
+            "Controll Your Campus Life In Terminal",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
