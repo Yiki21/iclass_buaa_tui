@@ -118,7 +118,7 @@ tokio = { version = "1", features = [
   "time"
 ] }
 toml = "1.1"
-tui-qrcode = "0.2.3"
+tui-qrcode = "0.2.4"
 
 [profile.dev]
 incremental = true

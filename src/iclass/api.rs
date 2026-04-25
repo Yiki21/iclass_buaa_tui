@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::bykc::BykcApi;
-use crate::constants::{SSO_VPN_LOGIN, network_urls};
+use crate::constants::{SSO_VPN_LOGIN, VPN_OFFSET_CORRECTION_MS, network_urls};
 use crate::model::{CourseDetailItem, CourseItem, LoginInput, Session, SignOutcome, SignQrData};
 
 #[derive(Clone, Debug)]
@@ -389,6 +389,10 @@ impl IClassApi {
                     .saturating_sub(Utc::now().timestamp_millis())
             })
             .unwrap_or(0);
+
+        // if self.use_vpn {
+        //     server_time_offset_ms += VPN_OFFSET_CORRECTION_MS;
+        // }
 
         if !response.status().is_success() {
             bail!("请求 iClass 用户信息失败，HTTP 状态: {}", response.status());

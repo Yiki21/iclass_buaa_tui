@@ -18,6 +18,9 @@ pub const BYKC_KEY_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz234
 /// Default BYKC page size used by paged course queries.
 pub const BYKC_PAGE_SIZE: usize = 100;
 
+#[allow(unused)]
+pub const VPN_OFFSET_CORRECTION_MS: i64 = -1000;
+
 #[derive(Clone, Copy)]
 pub struct NetworkUrls {
     pub service_home: &'static str,

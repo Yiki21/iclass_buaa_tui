@@ -874,7 +874,7 @@ fn render_qr_popup(frame: &mut Frame, app: &App) {
         return;
     };
 
-    let area = centered_rect(70, 80, frame.area());
+    let area = centered_rect(92, 94, frame.area());
     frame.render_widget(Clear, area);
 
     let outer = Block::default()
@@ -887,13 +887,14 @@ fn render_qr_popup(frame: &mut Frame, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Min(10), Constraint::Length(6)])
+        .constraints([Constraint::Min(12), Constraint::Length(5)])
         .split(inner);
 
     if let Ok(code) = QrCode::new(qr.qr_url.as_bytes()) {
         let widget = QrCodeWidget::new(code)
-            .quiet_zone(QuietZone::Disabled)
-            .scaling(Scaling::Min);
+            .quiet_zone(QuietZone::Enabled)
+            .scaling(Scaling::Max)
+            .style(Style::default().fg(Color::Black).bg(Color::White));
         frame.render_widget(widget, sections[0]);
     } else {
         let failed = Paragraph::new("二维码生成失败")
