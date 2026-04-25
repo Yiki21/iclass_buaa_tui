@@ -1,6 +1,6 @@
 [package]
 name = "iclass_buaa_tui"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 description = "BUAA class check TUI software"
 homepage = "https://github.com/Yiki21/iclass_buaa_tui"
