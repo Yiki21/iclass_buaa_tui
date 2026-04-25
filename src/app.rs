@@ -2,6 +2,7 @@
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
@@ -15,6 +16,7 @@ pub enum AsyncEvent {
     Refresh(Result<Vec<CourseDetailItem>, String>),
     Sign(Result<SignOutcome, String>),
     BykcSync(Box<Result<BykcSyncSuccess, String>>),
+    VersionCheck(Result<VersionInfo, String>),
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +30,14 @@ pub struct QrDisplay {
     pub course_sched_id: String,
     pub qr_url: String,
     pub timestamp: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct VersionInfo {
+    pub current: String,
+    pub latest: String,
+    pub latest_url: String,
+    pub is_latest: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -290,6 +300,8 @@ pub struct App {
     pub show_help: bool,
     pub qr_display: Option<QrDisplay>,
     pub qr_refreshing: bool,
+    pub version_info: Option<VersionInfo>,
+    pub version_error: Option<String>,
     next_qr_refresh_at: Option<Instant>,
 }
 
@@ -311,6 +323,8 @@ impl Default for App {
             show_help: false,
             qr_display: None,
             qr_refreshing: false,
+            version_info: None,
+            version_error: None,
             next_qr_refresh_at: None,
         }
     }
@@ -339,6 +353,52 @@ impl App {
     pub fn selected_course(&self) -> Option<&CourseDetailItem> {
         let index = *self.visible_course_indices().get(self.selected)?;
         self.courses.get(index)
+    }
+
+    pub fn version_text(&self) -> String {
+        if let Some(info) = &self.version_info {
+            if info.is_latest {
+                return format!("版本: v{} | 已是最新", info.current);
+            }
+            return format!(
+                "版本: v{} | 最新: v{} | {}",
+                info.current, info.latest, info.latest_url
+            );
+        }
+
+        if self.version_error.is_some() {
+            return format!(
+                "版本: v{} | 更新检查失败: {}",
+                env!("CARGO_PKG_VERSION"),
+                self.version_error.as_deref().unwrap_or("未知错误")
+            );
+        }
+
+        format!("版本: v{} | 正在检查更新...", env!("CARGO_PKG_VERSION"))
+    }
+
+    pub fn version_style(&self) -> Style {
+        if self.version_error.is_some() {
+            return Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        }
+        if self
+            .version_info
+            .as_ref()
+            .is_some_and(|info| !info.is_latest)
+        {
+            return Style::default()
+                .fg(Color::LightYellow)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD);
+        }
+        if self.version_info.is_some() {
+            return Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD);
+        }
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Applies one key press to the current screen state.
@@ -501,6 +561,16 @@ impl App {
                 }
                 Err(error) => {
                     self.status = format!("博雅操作失败: {error}");
+                }
+            },
+            AsyncEvent::VersionCheck(result) => match result {
+                Ok(info) => {
+                    self.version_error = None;
+                    self.version_info = Some(info);
+                }
+                Err(error) => {
+                    self.version_info = None;
+                    self.version_error = Some(error);
                 }
             },
         }
@@ -1095,6 +1165,15 @@ fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
     });
 }
 
+pub fn spawn_version_check(tx: UnboundedSender<AsyncEvent>) {
+    tokio::spawn(async move {
+        let result = fetch_latest_version_info()
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx.send(AsyncEvent::VersionCheck(result));
+    });
+}
+
 fn spawn_refresh(session: Session, tx: UnboundedSender<AsyncEvent>) {
     tokio::spawn(async move {
         let result = session
@@ -1370,6 +1449,75 @@ fn current_week_key() -> String {
     monday_of(Local::now().date_naive())
         .format("%Y-%m-%d")
         .to_string()
+}
+
+async fn fetch_latest_version_info() -> anyhow::Result<VersionInfo> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let (latest, latest_url) = fetch_tag(&current).await?;
+    Ok(make_version_info(&current, &latest, &latest_url))
+}
+
+fn compare_version(current: &str, latest: &str) -> i32 {
+    let current_parts = parse_version_parts(normalize_version(current));
+    let latest_parts = parse_version_parts(normalize_version(latest));
+    let max_len = current_parts.len().max(latest_parts.len());
+
+    for index in 0..max_len {
+        let left = current_parts.get(index).copied().unwrap_or(0);
+        let right = latest_parts.get(index).copied().unwrap_or(0);
+        if left > right {
+            return 1;
+        }
+        if left < right {
+            return -1;
+        }
+    }
+
+    0
+}
+
+fn normalize_version(version: &str) -> &str {
+    version.trim().trim_start_matches(['v', 'V'])
+}
+
+fn parse_version_parts(version: &str) -> Vec<u32> {
+    version
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u32>()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn make_version_info(current: &str, latest: &str, latest_url: &str) -> VersionInfo {
+    VersionInfo {
+        current: current.to_string(),
+        latest: normalize_version(latest).to_string(),
+        latest_url: latest_url.to_string(),
+        is_latest: compare_version(current, latest) >= 0,
+    }
+}
+
+async fn fetch_tag(current: &str) -> anyhow::Result<(String, String)> {
+    let response = reqwest::Client::builder()
+        .build()?
+        .get("https://github.com/Yiki21/iclass_buaa_tui/releases/latest")
+        .header("User-Agent", format!("iclass_buaa_tui/{current}"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let latest_url = response.url().to_string();
+    let latest = latest_url
+        .rsplit("/tag/")
+        .next()
+        .filter(|value| !value.is_empty() && *value != latest_url)
+        .ok_or_else(|| anyhow::anyhow!("GitHub releases/latest 未跳转到 tag 页面: {latest_url}"))?
+        .to_string();
+    Ok((latest, latest_url))
 }
 
 fn clamp_step(current: usize, len: usize, delta: isize) -> usize {

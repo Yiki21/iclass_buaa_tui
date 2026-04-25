@@ -1,7 +1,7 @@
 //! Pure rendering code for the login screen, iClass workspace, and BYKC views.
 
 use chrono::{Duration, NaiveDate, TimeZone};
-use qrcode::QrCode;
+use qrcode::{EcLevel, QrCode};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -71,6 +71,7 @@ fn render_login(frame: &mut Frame, app: &App) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(app.version_text(), app.version_style())),
         Line::from("登录后可在 iClass 与 BYKC 间切换"),
         Line::from("VPN 模式下直接使用 VPN 账号登录，不再单独输入学号"),
         Line::from("tab 切换字段，space 切换 VPN，enter 登录，? 帮助，q 退出"),
@@ -177,9 +178,12 @@ fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
         WorkspaceTab::IClass => "iClass",
         WorkspaceTab::Bykc => "BYKC",
     };
-    let hint = Paragraph::new(format!(
-        "当前页: {current} | tab: 下一个标签 | shift+tab: 上一个标签 | ?: 帮助"
-    ))
+    let hint = Paragraph::new(vec![
+        Line::from(format!(
+            "当前页: {current} | tab: 下一个标签 | shift+tab: 上一个标签 | ?: 帮助"
+        )),
+        Line::from(Span::styled(app.version_text(), app.version_style())),
+    ])
     .block(Block::default().title("切换提示").borders(Borders::ALL))
     .wrap(Wrap { trim: true });
     frame.render_widget(hint, area);
@@ -890,12 +894,14 @@ fn render_qr_popup(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(12), Constraint::Length(5)])
         .split(inner);
 
-    if let Ok(code) = QrCode::new(qr.qr_url.as_bytes()) {
+    if let Ok(code) = QrCode::with_error_correction_level(qr.qr_url.as_bytes(), EcLevel::L) {
+        let module_count = qr_module_count(&code);
+        let qr_area = centered_qr_rect(module_count, sections[0]);
         let widget = QrCodeWidget::new(code)
             .quiet_zone(QuietZone::Enabled)
-            .scaling(Scaling::Max)
+            .scaling(qr_scaling(qr_area, module_count))
             .style(Style::default().fg(Color::Black).bg(Color::White));
-        frame.render_widget(widget, sections[0]);
+        frame.render_widget(widget, qr_area);
     } else {
         let failed = Paragraph::new("二维码生成失败")
             .block(Block::default().borders(Borders::ALL))
@@ -989,6 +995,40 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn centered_qr_rect(module_count: u16, area: Rect) -> Rect {
+    let scale = qr_scale(area, module_count);
+    let width = module_count.saturating_mul(scale).min(area.width);
+    let height = module_count
+        .saturating_mul(scale)
+        .div_ceil(2)
+        .min(area.height);
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn qr_scaling(area: Rect, module_count: u16) -> Scaling {
+    Scaling::Exact(qr_scale(area, module_count), qr_scale(area, module_count))
+}
+
+fn qr_scale(area: Rect, module_count: u16) -> u16 {
+    if module_count == 0 {
+        return 1;
+    }
+
+    let horizontal = area.width / module_count;
+    let vertical = area.height.saturating_mul(2) / module_count;
+    horizontal.min(vertical).max(1)
+}
+
+fn qr_module_count(code: &QrCode) -> u16 {
+    code.width() as u16 + 8
 }
 
 fn mask_password(value: &str) -> String {

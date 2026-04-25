@@ -19,7 +19,7 @@ use std::{
 };
 
 use anyhow::Result;
-use app::{App, AsyncEvent};
+use app::{App, AsyncEvent, spawn_version_check};
 use crossterm::{
     event::{self, Event, KeyEventKind},
     execute,
@@ -135,6 +135,7 @@ async fn run_app() -> Result<()> {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AsyncEvent>();
     let mut app = App::default();
+    spawn_version_check(tx.clone());
 
     let loop_result = event_loop(&mut terminal, &mut app, &tx, &mut rx).await;
 

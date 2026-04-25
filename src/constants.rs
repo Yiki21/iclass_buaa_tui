@@ -1,5 +1,5 @@
 /// Shared CAS login entry used by both iClass and BYKC VPN mode.
-pub const SSO_VPN_LOGIN: &str = "https://d.buaa.edu.cn/https/77726476706e69737468656265737421e3e44ed225256951300d8db9d6562d/login?service=https%3A%2F%2Fd.buaa.edu.cn%2Flogin%3Fcas_login%3Dtrue";
+pub const SSO_VPN_ENTRY: &str = "https://d.buaa.edu.cn/";
 
 /// iClass VPN base URL.
 const VPN_BASE: &str = "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018";

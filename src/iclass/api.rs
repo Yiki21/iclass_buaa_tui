@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::bykc::BykcApi;
-use crate::constants::{SSO_VPN_LOGIN, VPN_OFFSET_CORRECTION_MS, network_urls};
+use crate::constants::{SSO_VPN_ENTRY, VPN_OFFSET_CORRECTION_MS, network_urls};
 use crate::model::{CourseDetailItem, CourseItem, LoginInput, Session, SignOutcome, SignQrData};
 
 #[derive(Clone, Debug)]
@@ -282,11 +282,11 @@ impl IClassApi {
             bail!("VPN 模式需要输入账号和密码");
         }
 
-        let execution = self.fetch_execution().await?;
+        let (login_url, execution) = self.fetch_execution().await?;
         let response = self
             .client
-            .post(SSO_VPN_LOGIN)
-            .header(REFERER, SSO_VPN_LOGIN)
+            .post(&login_url)
+            .header(REFERER, &login_url)
             .form(&[
                 ("username", username.trim()),
                 ("password", password),
@@ -320,10 +320,12 @@ impl IClassApi {
             if looks_like_iclass_url(&probe_final) {
                 return Ok(());
             }
-            bail!("VPN 登录后进入 iClass 失败，最终 URL: {probe_final}");
+            let probe_body = probe.text().await.unwrap_or_default();
+            return vpn_login_error(&probe_final, &probe_body);
         }
 
-        bail!("登录失败，最终 URL: {final_url}");
+        let body = response.text().await.unwrap_or_default();
+        vpn_login_error(&final_url, &body)
     }
 
     /// Extracts the transient `execution` token required by BUAA SSO.
@@ -332,16 +334,15 @@ impl IClassApi {
     /// The login form is stateful and rejects submissions without the current
     /// hidden token, so this remains a dedicated pre-step instead of being
     /// inlined into the larger VPN login flow.
-    async fn fetch_execution(&self) -> Result<String> {
-        let body = self
+    async fn fetch_execution(&self) -> Result<(String, String)> {
+        let response = self
             .client
-            .get(SSO_VPN_LOGIN)
+            .get(SSO_VPN_ENTRY)
             .send()
             .await
-            .context("获取 SSO 登录页失败")?
-            .text()
-            .await
-            .context("读取 SSO 登录页失败")?;
+            .context("获取 SSO 登录页失败")?;
+        let login_url = response.url().to_string();
+        let body = response.text().await.context("读取 SSO 登录页失败")?;
 
         let document = Html::parse_document(&body);
         let selector = Selector::parse(r#"input[name="execution"]"#)
@@ -354,7 +355,7 @@ impl IClassApi {
             .map(str::to_string)
             .ok_or_else(|| anyhow!("无法从 SSO 登录页面解析 execution 参数"))?;
 
-        Ok(execution)
+        Ok((login_url, execution))
     }
 
     /// Fetches user info and derives `server_time_offset_ms` from the HTTP `Date` header.
@@ -378,7 +379,7 @@ impl IClassApi {
             .send()
             .await
             .context("请求 iClass 用户信息失败")?;
-        let server_time_offset_ms = response
+        let mut server_time_offset_ms = response
             .headers()
             .get("date")
             .and_then(|value| value.to_str().ok())
@@ -390,9 +391,10 @@ impl IClassApi {
             })
             .unwrap_or(0);
 
-        // if self.use_vpn {
-        //     server_time_offset_ms += VPN_OFFSET_CORRECTION_MS;
-        // }
+        if self.use_vpn {
+            // Match upstream WebVPN handling and bias away from future timestamps.
+            server_time_offset_ms = server_time_offset_ms.saturating_add(VPN_OFFSET_CORRECTION_MS);
+        }
 
         if !response.status().is_success() {
             bail!("请求 iClass 用户信息失败，HTTP 状态: {}", response.status());
@@ -689,6 +691,38 @@ fn looks_like_vpn_portal_home(url: &str) -> bool {
             parsed.host_str() == Some("d.buaa.edu.cn") && !parsed.path().contains("/login")
         })
         .unwrap_or(false)
+}
+
+fn needs_vpn_captcha(body: &str) -> bool {
+    body.contains("/captcha?captchaId=")
+        || body.contains("captcha?captchaId=")
+        || body.contains("config.captcha.id")
+        || body.contains("\"captcha\":{\"id\"")
+        || body.contains("'captcha':{'id'")
+}
+
+fn looks_like_bad_vpn_credentials(body: &str) -> bool {
+    [
+        "Invalid credentials",
+        "认证信息无效",
+        "账号或密码错误",
+        "用户名或密码错误",
+        "password is invalid",
+    ]
+    .iter()
+    .any(|marker| body.contains(marker))
+}
+
+fn vpn_login_error(final_url: &str, body: &str) -> Result<()> {
+    if needs_vpn_captcha(body) {
+        bail!("当前 VPN 登录需要验证码，请先在浏览器完成 WebVPN 登录后重试");
+    }
+
+    if looks_like_bad_vpn_credentials(body) {
+        bail!("登录失败：账号或密码错误，或密码过弱需先修改后再登录");
+    }
+
+    bail!("登录失败，最终 URL: {final_url}");
 }
 
 /// Parses JSON while preserving enough response context for debugging.

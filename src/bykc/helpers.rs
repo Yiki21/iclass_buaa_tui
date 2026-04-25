@@ -13,7 +13,7 @@ use sha1::{Digest, Sha1};
 use std::f64::consts::PI;
 
 use crate::constants::{
-    BYKC_DIRECT_BASE, BYKC_KEY_CHARS, BYKC_RSA_PUBLIC_KEY_BASE64, BYKC_VPN_BASE, SSO_VPN_LOGIN,
+    BYKC_DIRECT_BASE, BYKC_KEY_CHARS, BYKC_RSA_PUBLIC_KEY_BASE64, BYKC_VPN_BASE, SSO_VPN_ENTRY,
 };
 
 use super::raw::{BykcCourseRaw, BykcSignConfigRaw};
@@ -283,14 +283,13 @@ pub(super) async fn vpn_login(
         bail!("博雅功能需要 VPN 账号和密码");
     }
 
-    let body = client
-        .get(SSO_VPN_LOGIN)
+    let response = client
+        .get(SSO_VPN_ENTRY)
         .send()
         .await
-        .context("获取 SSO 登录页失败")?
-        .text()
-        .await
-        .context("读取 SSO 登录页失败")?;
+        .context("获取 SSO 登录页失败")?;
+    let login_url = response.url().to_string();
+    let body = response.text().await.context("读取 SSO 登录页失败")?;
     let execution = {
         let document = Html::parse_document(&body);
         let selector = Selector::parse(r#"input[name="execution"]"#)
@@ -304,8 +303,8 @@ pub(super) async fn vpn_login(
     };
 
     let response = client
-        .post(SSO_VPN_LOGIN)
-        .header(REFERER, SSO_VPN_LOGIN)
+        .post(&login_url)
+        .header(REFERER, &login_url)
         .form(&[
             ("username", username.trim()),
             ("password", password),
