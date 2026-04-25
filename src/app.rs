@@ -4,10 +4,13 @@ use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::bykc::{BykcChosenCourse, BykcCourse, BykcCourseDetail};
+use crate::bykc::{
+    BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, can_deselect_bykc_course,
+};
 use crate::model::{CourseDetailItem, LoginInput, Session, SignOutcome};
 
 #[derive(Clone, Debug)]
@@ -281,6 +284,13 @@ pub struct BykcSyncSuccess {
     pub detail: Option<BykcCourseDetail>,
     pub message: Option<String>,
     pub open_detail_popup: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BykcDetailTarget {
+    Auto,
+    CourseFirst(i64),
+    ChosenFirst(i64),
 }
 
 #[derive(Debug)]
@@ -1210,35 +1220,17 @@ fn spawn_bykc_sync(
     open_detail_popup: bool,
     tx: UnboundedSender<AsyncEvent>,
 ) {
-    tokio::spawn(async move {
-        let result = async {
-            let api = session
-                .bykc_api
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
-            let courses = api.get_courses(include_all).await?;
-            let chosen_courses = api.get_chosen_courses().await?;
-            let detail_target = detail_course_id
-                .or_else(|| courses.first().map(|course| course.id))
-                .or_else(|| chosen_courses.first().map(|course| course.course_id));
-            let detail = if let Some(course_id) = detail_target {
-                Some(api.get_course_detail(course_id).await?)
-            } else {
-                None
-            };
-            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
-                courses,
-                chosen_courses,
-                detail,
-                message,
-                open_detail_popup,
-            })
-        }
-        .await
-        .map_err(|error| error.to_string());
-
-        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
-    });
+    let detail_target =
+        detail_course_id.map_or(BykcDetailTarget::Auto, BykcDetailTarget::CourseFirst);
+    spawn_bykc_task(
+        session,
+        include_all,
+        detail_target,
+        open_detail_popup,
+        true,
+        tx,
+        |_| async move { Ok(message) },
+    );
 }
 
 fn spawn_bykc_select(
@@ -1247,45 +1239,15 @@ fn spawn_bykc_select(
     course_id: i64,
     tx: UnboundedSender<AsyncEvent>,
 ) {
-    tokio::spawn(async move {
-        let result = async {
-            let api = session
-                .bykc_api
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
-            let message = api.select_course(course_id).await?;
-            let courses = api.get_courses(include_all).await?;
-            let chosen_courses = api.get_chosen_courses().await?;
-            let detail_target = courses
-                .iter()
-                .find(|course| course.id == course_id)
-                .map(|course| course.id)
-                .or_else(|| {
-                    chosen_courses
-                        .iter()
-                        .find(|course| course.course_id == course_id)
-                        .map(|course| course.course_id)
-                })
-                .or_else(|| courses.first().map(|course| course.id))
-                .or_else(|| chosen_courses.first().map(|course| course.course_id));
-            let detail = if let Some(detail_target) = detail_target {
-                api.get_course_detail(detail_target).await.ok()
-            } else {
-                None
-            };
-            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
-                courses,
-                chosen_courses,
-                detail,
-                message: Some(message),
-                open_detail_popup: false,
-            })
-        }
-        .await
-        .map_err(|error| error.to_string());
-
-        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
-    });
+    spawn_bykc_task(
+        session,
+        include_all,
+        BykcDetailTarget::CourseFirst(course_id),
+        false,
+        false,
+        tx,
+        move |api| async move { api.select_course(course_id).await.map(Some) },
+    );
 }
 
 fn spawn_bykc_deselect(
@@ -1294,39 +1256,15 @@ fn spawn_bykc_deselect(
     course_id: i64,
     tx: UnboundedSender<AsyncEvent>,
 ) {
-    tokio::spawn(async move {
-        let result = async {
-            let api = session
-                .bykc_api
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
-            let message = api.deselect_course(course_id).await?;
-            let courses = api.get_courses(include_all).await?;
-            let chosen_courses = api.get_chosen_courses().await?;
-            let detail_target = chosen_courses
-                .iter()
-                .find(|course| course.course_id == course_id)
-                .map(|course| course.course_id)
-                .or_else(|| courses.first().map(|course| course.id))
-                .or_else(|| chosen_courses.first().map(|course| course.course_id));
-            let detail = if let Some(detail_target) = detail_target {
-                api.get_course_detail(detail_target).await.ok()
-            } else {
-                None
-            };
-            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
-                courses,
-                chosen_courses,
-                detail,
-                message: Some(message),
-                open_detail_popup: false,
-            })
-        }
-        .await
-        .map_err(|error| error.to_string());
-
-        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
-    });
+    spawn_bykc_task(
+        session,
+        include_all,
+        BykcDetailTarget::ChosenFirst(course_id),
+        false,
+        false,
+        tx,
+        move |api| async move { api.deselect_course(course_id).await.map(Some) },
+    );
 }
 
 fn spawn_bykc_sign(
@@ -1336,43 +1274,113 @@ fn spawn_bykc_sign(
     sign_type: i32,
     tx: UnboundedSender<AsyncEvent>,
 ) {
+    spawn_bykc_task(
+        session,
+        include_all,
+        BykcDetailTarget::ChosenFirst(course_id),
+        false,
+        false,
+        tx,
+        move |api| async move {
+            if sign_type == 1 {
+                api.sign_in(course_id).await.map(Some)
+            } else {
+                api.sign_out(course_id).await.map(Some)
+            }
+        },
+    );
+}
+
+fn spawn_bykc_task<F, Fut>(
+    session: Session,
+    include_all: bool,
+    detail_target: BykcDetailTarget,
+    open_detail_popup: bool,
+    require_detail: bool,
+    tx: UnboundedSender<AsyncEvent>,
+    action: F,
+) where
+    F: FnOnce(BykcApi) -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<Option<String>>> + Send + 'static,
+{
     tokio::spawn(async move {
         let result = async {
             let api = session
                 .bykc_api
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
-            let message = if sign_type == 1 {
-                api.sign_in(course_id).await?
-            } else {
-                api.sign_out(course_id).await?
-            };
-            let courses = api.get_courses(include_all).await?;
-            let chosen_courses = api.get_chosen_courses().await?;
-            let detail_target = chosen_courses
-                .iter()
-                .find(|course| course.course_id == course_id)
-                .map(|course| course.course_id)
-                .or_else(|| courses.first().map(|course| course.id))
-                .or_else(|| chosen_courses.first().map(|course| course.course_id));
-            let detail = if let Some(detail_target) = detail_target {
-                api.get_course_detail(detail_target).await.ok()
-            } else {
-                None
-            };
-            Ok::<BykcSyncSuccess, anyhow::Error>(BykcSyncSuccess {
-                courses,
-                chosen_courses,
-                detail,
-                message: Some(message),
-                open_detail_popup: false,
-            })
+            let message = action(api.clone()).await?;
+            build_bykc_sync_success(
+                &api,
+                include_all,
+                detail_target,
+                message,
+                open_detail_popup,
+                require_detail,
+            )
+            .await
         }
         .await
         .map_err(|error| error.to_string());
 
         let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
     });
+}
+
+async fn build_bykc_sync_success(
+    api: &BykcApi,
+    include_all: bool,
+    detail_target: BykcDetailTarget,
+    message: Option<String>,
+    open_detail_popup: bool,
+    require_detail: bool,
+) -> anyhow::Result<BykcSyncSuccess> {
+    let courses = api.get_courses(include_all).await?;
+    let chosen_courses = api.get_chosen_courses().await?;
+    let detail_target = resolve_bykc_detail_target(detail_target, &courses, &chosen_courses);
+    let detail = if let Some(course_id) = detail_target {
+        if require_detail {
+            Some(api.get_course_detail(course_id).await?)
+        } else {
+            api.get_course_detail(course_id).await.ok()
+        }
+    } else {
+        None
+    };
+
+    Ok(BykcSyncSuccess {
+        courses,
+        chosen_courses,
+        detail,
+        message,
+        open_detail_popup,
+    })
+}
+
+fn resolve_bykc_detail_target(
+    target: BykcDetailTarget,
+    courses: &[BykcCourse],
+    chosen_courses: &[BykcChosenCourse],
+) -> Option<i64> {
+    match target {
+        BykcDetailTarget::Auto => None,
+        BykcDetailTarget::CourseFirst(course_id) => courses
+            .iter()
+            .find(|course| course.id == course_id)
+            .map(|course| course.id)
+            .or_else(|| {
+                chosen_courses
+                    .iter()
+                    .find(|course| course.course_id == course_id)
+                    .map(|course| course.course_id)
+            }),
+        BykcDetailTarget::ChosenFirst(course_id) => chosen_courses
+            .iter()
+            .find(|course| course.course_id == course_id)
+            .map(|course| course.course_id),
+    }
+    .or_else(|| courses.first().map(|course| course.id))
+    .or_else(|| chosen_courses.first().map(|course| course.course_id))
 }
 
 /// Builds Monday-based week buckets from the flat iClass course list.
@@ -1527,15 +1535,4 @@ fn clamp_step(current: usize, len: usize, delta: isize) -> usize {
 
     let next = current as isize + delta;
     next.clamp(0, len.saturating_sub(1) as isize) as usize
-}
-
-fn can_deselect_bykc_course(course_cancel_end_date: &str) -> bool {
-    let value = course_cancel_end_date.trim();
-    if value.is_empty() {
-        return true;
-    }
-
-    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-        .map(|deadline| Local::now().naive_local() <= deadline)
-        .unwrap_or(true)
 }

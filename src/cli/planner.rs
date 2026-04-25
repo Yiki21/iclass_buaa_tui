@@ -321,7 +321,14 @@ async fn fetch_today_targets_with_retry(config: &AutomationConfig) -> Result<Vec
     let mut last_error = None;
 
     for attempt in 1..=retry.max_attempts {
-        match fetch_today_targets(config).await {
+        let result = async {
+            let mut targets = fetch_today_iclass_targets(config).await?;
+            targets.extend(fetch_today_bykc_targets(config).await?);
+            Ok::<Vec<ListedTarget>, anyhow::Error>(targets)
+        }
+        .await;
+
+        match result {
             Ok(courses) => return Ok(courses),
             Err(error) => {
                 let message = error.to_string();
@@ -340,12 +347,6 @@ async fn fetch_today_targets_with_retry(config: &AutomationConfig) -> Result<Vec
     Err(last_error
         .unwrap()
         .context("多次尝试后仍无法获取今日签到目标"))
-}
-
-async fn fetch_today_targets(config: &AutomationConfig) -> Result<Vec<ListedTarget>> {
-    let mut targets = fetch_today_iclass_targets(config).await?;
-    targets.extend(fetch_today_bykc_targets(config).await?);
-    Ok(targets)
 }
 
 /// Computes planner status for every filtered sign target scheduled today.

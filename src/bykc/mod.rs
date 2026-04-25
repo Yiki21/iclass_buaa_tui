@@ -12,4 +12,5 @@ mod raw;
 mod types;
 
 pub use api::BykcApi;
+pub(crate) use helpers::can_deselect_bykc_course;
 pub use types::{BykcChosenCourse, BykcCourse, BykcCourseDetail};

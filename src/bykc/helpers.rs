@@ -268,6 +268,17 @@ pub(super) fn calculate_course_status(course: &BykcCourseRaw) -> BykcCourseStatu
     }
 }
 
+pub(crate) fn can_deselect_bykc_course(course_cancel_end_date: &str) -> bool {
+    let value = course_cancel_end_date.trim();
+    if value.is_empty() {
+        return true;
+    }
+
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map(|deadline| Local::now().naive_local() <= deadline)
+        .unwrap_or(true)
+}
+
 /// Logs into BUAA VPN and establishes the cookie session needed by BYKC.
 ///
 /// Why:

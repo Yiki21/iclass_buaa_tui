@@ -137,7 +137,7 @@ async fn run_app() -> Result<()> {
     let mut app = App::default();
     spawn_version_check(tx.clone());
 
-    let loop_result = event_loop(&mut terminal, &mut app, &tx, &mut rx).await;
+    let loop_result = event_loop(&mut terminal, &mut app, &tx, &mut rx);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -152,7 +152,7 @@ async fn run_app() -> Result<()> {
 /// Each iteration first drains finished background jobs, then updates timer-based
 /// state, renders the latest frame, and only then consumes one key event. That
 /// ordering keeps the UI responsive without a second render thread.
-async fn event_loop(
+fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     tx: &mpsc::UnboundedSender<AsyncEvent>,

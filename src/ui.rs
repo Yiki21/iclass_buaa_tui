@@ -12,6 +12,7 @@ use ratatui::{
 use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
 use crate::app::{App, BykcView, LoginFocus, Screen, WorkspaceTab};
+use crate::bykc::can_deselect_bykc_course;
 
 /// Renders the whole frame, then overlays transient popups in a fixed z-order.
 ///
@@ -430,7 +431,7 @@ fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
                             "可签到"
                         } else if chosen.can_sign_out {
                             "可签退"
-                        } else if can_deselect_bykc_course_label(&chosen.course_cancel_end_date) {
+                        } else if can_deselect_bykc_course(&chosen.course_cancel_end_date) {
                             "已报"
                         } else {
                             "已过退选"
@@ -625,9 +626,7 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
                             app.bykc
                                 .chosen_course_for(course.id)
                                 .map(|chosen| {
-                                    if can_deselect_bykc_course_label(
-                                        &chosen.course_cancel_end_date,
-                                    ) {
+                                    if can_deselect_bykc_course(&chosen.course_cancel_end_date) {
                                         format!(
                                             "可退选，截止 {}",
                                             empty_dash(&chosen.course_cancel_end_date)
@@ -897,9 +896,10 @@ fn render_qr_popup(frame: &mut Frame, app: &App) {
     if let Ok(code) = QrCode::with_error_correction_level(qr.qr_url.as_bytes(), EcLevel::L) {
         let module_count = qr_module_count(&code);
         let qr_area = centered_qr_rect(module_count, sections[0]);
+        let scale = qr_scale(qr_area, module_count);
         let widget = QrCodeWidget::new(code)
             .quiet_zone(QuietZone::Enabled)
-            .scaling(qr_scaling(qr_area, module_count))
+            .scaling(Scaling::Exact(scale, scale))
             .style(Style::default().fg(Color::Black).bg(Color::White));
         frame.render_widget(widget, qr_area);
     } else {
@@ -1013,10 +1013,6 @@ fn centered_qr_rect(module_count: u16, area: Rect) -> Rect {
     }
 }
 
-fn qr_scaling(area: Rect, module_count: u16) -> Scaling {
-    Scaling::Exact(qr_scale(area, module_count), qr_scale(area, module_count))
-}
-
 fn qr_scale(area: Rect, module_count: u16) -> u16 {
     if module_count == 0 {
         return 1;
@@ -1041,15 +1037,4 @@ fn empty_dash(value: &str) -> String {
     } else {
         value.to_string()
     }
-}
-
-fn can_deselect_bykc_course_label(course_cancel_end_date: &str) -> bool {
-    let value = course_cancel_end_date.trim();
-    if value.is_empty() {
-        return true;
-    }
-
-    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-        .map(|deadline| chrono::Local::now().naive_local() <= deadline)
-        .unwrap_or(true)
 }
