@@ -196,5 +196,6 @@ CLI 参数对于登陆只支持配置文件写入!
 
 ## Todo
 - 更多其他功能?
+- 代码库似乎有些膨胀了, a little bit sucks
 
-Inspired By [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa)
+Inspired By [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa) && [UBAA](https://github.com/BUAASubnet/UBAA)
