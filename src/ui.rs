@@ -14,6 +14,8 @@ use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 use crate::app::{App, BykcView, LoginFocus, Screen, WorkspaceTab};
 use crate::bykc::can_deselect_bykc_course;
 
+const QR_MAX_MODULE_SCALE: u16 = 1;
+
 /// Renders the whole frame, then overlays transient popups in a fixed z-order.
 ///
 /// Why:
@@ -1020,7 +1022,10 @@ fn qr_scale(area: Rect, module_count: u16) -> u16 {
 
     let horizontal = area.width / module_count;
     let vertical = area.height.saturating_mul(2) / module_count;
-    horizontal.min(vertical).max(1)
+    horizontal
+        .min(vertical)
+        .max(1)
+        .min(QR_MAX_MODULE_SCALE)
 }
 
 fn qr_module_count(code: &QrCode) -> u16 {
