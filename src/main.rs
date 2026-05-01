@@ -134,7 +134,7 @@ async fn run_app() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AsyncEvent>();
-    let mut app = App::default();
+    let mut app = App::load();
     spawn_version_check(tx.clone());
 
     let loop_result = event_loop(&mut terminal, &mut app, &tx, &mut rx);

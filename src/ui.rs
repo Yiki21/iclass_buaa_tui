@@ -11,7 +11,7 @@ use ratatui::{
 };
 use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
-use crate::app::{App, BykcView, LoginFocus, Screen, WorkspaceTab};
+use crate::app::{App, BykcView, LoginFocus, QrMode, Screen, WorkspaceTab};
 use crate::bykc::can_deselect_bykc_course;
 
 const QR_MAX_MODULE_SCALE: u16 = 1;
@@ -30,7 +30,10 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if app.busy {
         render_busy_popup(frame);
-    } else if app.active_tab == WorkspaceTab::IClass && app.qr_display.is_some() {
+    } else if app.active_tab == WorkspaceTab::IClass
+        && app.qr_display.is_some()
+        && app.qr_mode == QrMode::Terminal
+    {
         render_qr_popup(frame, app);
     } else if app.active_tab == WorkspaceTab::Bykc && app.bykc.show_detail_popup {
         render_bykc_detail_popup(frame, app);
@@ -52,13 +55,14 @@ fn render_login(frame: &mut Frame, app: &App) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let mut constraints = vec![Constraint::Length(3), Constraint::Length(3)];
+    let mut constraints = vec![Constraint::Length(5), Constraint::Length(3)];
     if app.login.use_vpn {
         constraints.push(Constraint::Length(3));
         constraints.push(Constraint::Length(3));
     } else {
         constraints.push(Constraint::Length(3));
     }
+    constraints.push(Constraint::Length(3));
     constraints.push(Constraint::Min(3));
 
     let chunks = Layout::default()
@@ -77,7 +81,7 @@ fn render_login(frame: &mut Frame, app: &App) {
         Line::from(Span::styled(app.version_text(), app.version_style())),
         Line::from("登录后可在 iClass 与 BYKC 间切换"),
         Line::from("VPN 模式下直接使用 VPN 账号登录，不再单独输入学号"),
-        Line::from("tab 切换字段，space 切换 VPN，enter 登录，? 帮助，q 退出"),
+        Line::from("tab 切换字段，space 切换选项，enter 登录，? 帮助，q 退出"),
     ]);
     frame.render_widget(title, chunks[0]);
 
@@ -94,7 +98,7 @@ fn render_login(frame: &mut Frame, app: &App) {
         false,
     );
 
-    let status_index = if app.login.use_vpn {
+    let remember_index = if app.login.use_vpn {
         render_input(
             frame,
             chunks[2],
@@ -123,6 +127,20 @@ fn render_login(frame: &mut Frame, app: &App) {
         );
         3
     };
+
+    render_input(
+        frame,
+        chunks[remember_index],
+        "记住我",
+        if app.login.remember_me {
+            "开启"
+        } else {
+            "关闭"
+        },
+        app.login.current_focus() == LoginFocus::RememberMe,
+        false,
+    );
+    let status_index = remember_index + 1;
 
     let status = Paragraph::new(app.status.as_str())
         .block(Block::default().title("状态").borders(Borders::ALL))
@@ -337,7 +355,9 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw(course.course_sched_id.as_str()),
             ]),
             Line::from(""),
-            Line::from("操作: r 刷新 | s 直接签到 | g 二维码签到 | Shift+X 退出登录"),
+            Line::from(
+                "操作: r 刷新 | s 直接签到 | g 终端二维码 | G 外部二维码 | Shift+X 退出登录",
+            ),
         ]
     } else {
         vec![Line::from("当前没有课程")]
@@ -943,6 +963,16 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("q / esc: 退出程序"),
         Line::from(""),
         Line::from(Span::styled(
+            "登录",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("tab / shift+tab: 切换字段"),
+        Line::from("space: 切换 VPN 模式或记住我"),
+        Line::from("enter: 登录"),
+        Line::from(""),
+        Line::from(Span::styled(
             "iClass",
             Style::default()
                 .fg(Color::Yellow)
@@ -952,7 +982,8 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("[ ] / H L: 切换周"),
         Line::from("r: 刷新课程"),
         Line::from("s: 直接签到"),
-        Line::from("g: 打开或关闭二维码签到"),
+        Line::from("g: 打开或关闭终端二维码签到"),
+        Line::from("G: 打开或关闭外部二维码签到"),
         Line::from(""),
         Line::from(Span::styled(
             "BYKC",
@@ -1022,10 +1053,7 @@ fn qr_scale(area: Rect, module_count: u16) -> u16 {
 
     let horizontal = area.width / module_count;
     let vertical = area.height.saturating_mul(2) / module_count;
-    horizontal
-        .min(vertical)
-        .max(1)
-        .min(QR_MAX_MODULE_SCALE)
+    horizontal.min(vertical).max(1).min(QR_MAX_MODULE_SCALE)
 }
 
 fn qr_module_count(code: &QrCode) -> u16 {

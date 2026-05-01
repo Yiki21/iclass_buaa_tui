@@ -2,9 +2,14 @@
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use qrcode::{EcLevel, QrCode, render::svg};
 use ratatui::style::{Color, Modifier, Style};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -33,6 +38,13 @@ pub struct QrDisplay {
     pub course_sched_id: String,
     pub qr_url: String,
     pub timestamp: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum QrMode {
+    #[default]
+    Terminal,
+    External,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +89,7 @@ pub enum LoginFocus {
     UseVpn,
     VpnUsername,
     VpnPassword,
+    RememberMe,
 }
 
 /// Login form state for the TUI login screen.
@@ -86,20 +99,41 @@ pub struct LoginForm {
     pub use_vpn: bool,
     pub vpn_username: String,
     pub vpn_password: String,
+    pub remember_me: bool,
     pub focus: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RememberedLogin {
+    student_id: String,
+    use_vpn: bool,
+    vpn_username: String,
+    vpn_password: String,
+}
+
 impl LoginForm {
+    fn from_remembered(remembered: RememberedLogin) -> Self {
+        Self {
+            student_id: remembered.student_id,
+            use_vpn: remembered.use_vpn,
+            vpn_username: remembered.vpn_username,
+            vpn_password: remembered.vpn_password,
+            remember_me: true,
+            focus: 0,
+        }
+    }
+
     /// Returns the fields currently visible to the user.
     pub fn visible_focuses(&self) -> Vec<LoginFocus> {
         let mut fields = vec![LoginFocus::UseVpn];
         if !self.use_vpn {
-            fields.insert(0, LoginFocus::StudentId);
+            fields.push(LoginFocus::StudentId);
         }
         if self.use_vpn {
             fields.push(LoginFocus::VpnUsername);
             fields.push(LoginFocus::VpnPassword);
         }
+        fields.push(LoginFocus::RememberMe);
         fields
     }
 
@@ -149,6 +183,18 @@ impl LoginForm {
             use_vpn: self.use_vpn,
             vpn_username: vpn_username.to_string(),
             vpn_password: self.vpn_password.clone(),
+        }
+    }
+}
+
+impl From<&LoginForm> for RememberedLogin {
+    fn from(login: &LoginForm) -> Self {
+        let input = login.to_input();
+        Self {
+            student_id: input.student_id,
+            use_vpn: input.use_vpn,
+            vpn_username: input.vpn_username,
+            vpn_password: input.vpn_password,
         }
     }
 }
@@ -310,6 +356,7 @@ pub struct App {
     pub show_help: bool,
     pub qr_display: Option<QrDisplay>,
     pub qr_refreshing: bool,
+    pub qr_mode: QrMode,
     pub version_info: Option<VersionInfo>,
     pub version_error: Option<String>,
     next_qr_refresh_at: Option<Instant>,
@@ -333,6 +380,7 @@ impl Default for App {
             show_help: false,
             qr_display: None,
             qr_refreshing: false,
+            qr_mode: QrMode::Terminal,
             version_info: None,
             version_error: None,
             next_qr_refresh_at: None,
@@ -341,6 +389,21 @@ impl Default for App {
 }
 
 impl App {
+    pub fn load() -> Self {
+        let mut app = Self::default();
+        match load_remembered_login() {
+            Ok(Some(remembered)) => {
+                app.login = LoginForm::from_remembered(remembered);
+                app.status = "已载入上次登录信息，按 enter 登录；space 可关闭记住我".to_string();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                app.status = format!("读取记住我信息失败: {error}");
+            }
+        }
+        app
+    }
+
     pub fn visible_course_indices(&self) -> &[usize] {
         self.week_groups
             .get(self.selected_week)
@@ -496,7 +559,10 @@ impl App {
                     self.replace_courses(data.courses, None, None);
                     self.bykc = BykcState::default();
                     self.clear_qr();
-                    self.status = "登录成功。tab 切换 iClass / BYKC，iClass 内 h/j/k/l 移动，s 直接签到，g 二维码签到，r 刷新，Shift+X 退出登录".to_string();
+                    let remember_status = self.persist_remembered_login_status();
+                    self.status = format!(
+                        "登录成功。tab 切换 iClass / BYKC，s 直接签到，g 终端二维码，G 外部二维码，r 刷新，Shift+X 退出登录。{remember_status}"
+                    );
                 }
                 Err(error) => {
                     self.status = format!("登录失败: {error}");
@@ -603,6 +669,9 @@ impl App {
                 self.login.use_vpn = !self.login.use_vpn;
                 self.login.reset_focus_bounds();
             }
+            KeyCode::Char(' ') if self.login.current_focus() == LoginFocus::RememberMe => {
+                self.login.remember_me = !self.login.remember_me;
+            }
             KeyCode::Char(ch) => self.push_char(ch),
             KeyCode::Backspace => self.pop_char(),
             _ => {}
@@ -647,6 +716,7 @@ impl App {
             KeyCode::Char('r') => self.refresh_courses(tx),
             KeyCode::Char('s') => self.sign_selected(tx),
             KeyCode::Char('g') => self.toggle_qr(),
+            KeyCode::Char('G') => self.toggle_external_qr(),
             KeyCode::Char('X') => self.logout(),
             _ => {}
         }
@@ -719,6 +789,11 @@ impl App {
                     self.login.reset_focus_bounds();
                 }
             }
+            LoginFocus::RememberMe => {
+                if ch == ' ' {
+                    self.login.remember_me = !self.login.remember_me;
+                }
+            }
         }
     }
 
@@ -733,7 +808,7 @@ impl App {
             LoginFocus::VpnPassword => {
                 self.login.vpn_password.pop();
             }
-            LoginFocus::UseVpn => {}
+            LoginFocus::UseVpn | LoginFocus::RememberMe => {}
         }
     }
 
@@ -751,6 +826,20 @@ impl App {
         self.busy = true;
         self.status = "登录中并拉取课程...".to_string();
         spawn_login(input, tx.clone());
+    }
+
+    fn persist_remembered_login_status(&self) -> String {
+        if self.login.remember_me {
+            match save_remembered_login(&RememberedLogin::from(&self.login)) {
+                Ok(()) => "已记住登录信息。".to_string(),
+                Err(error) => format!("记住登录信息失败: {error}"),
+            }
+        } else {
+            match delete_remembered_login() {
+                Ok(()) => "未启用记住我。".to_string(),
+                Err(error) => format!("清理记住我信息失败: {error}"),
+            }
+        }
     }
 
     fn refresh_courses(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -977,7 +1066,7 @@ impl App {
     }
 
     fn toggle_qr(&mut self) {
-        if self.qr_refreshing {
+        if self.qr_refreshing && self.qr_mode == QrMode::Terminal {
             self.clear_qr();
             self.status = "已关闭二维码刷新".to_string();
             return;
@@ -986,8 +1075,38 @@ impl App {
         match self.refresh_qr_inline() {
             Ok(()) => {
                 self.qr_refreshing = true;
+                self.qr_mode = QrMode::Terminal;
                 self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
                 self.status = "二维码刷新中，按 g 关闭".to_string();
+            }
+            Err(error) => {
+                self.status = format!("二维码生成失败: {error}");
+                self.clear_qr();
+            }
+        }
+    }
+
+    fn toggle_external_qr(&mut self) {
+        if self.qr_refreshing && self.qr_mode == QrMode::External {
+            self.clear_qr();
+            self.status = "已关闭外部二维码刷新，浏览器页面可手动关闭".to_string();
+            return;
+        }
+
+        match self.refresh_qr_inline() {
+            Ok(()) => {
+                self.qr_refreshing = true;
+                self.qr_mode = QrMode::External;
+                self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
+                match self.open_external_qr_viewer() {
+                    Ok(()) => {
+                        self.status = "外部二维码刷新中，按 G 关闭刷新".to_string();
+                    }
+                    Err(error) => {
+                        self.status = format!("外部二维码打开失败: {error}");
+                        self.clear_qr();
+                    }
+                }
             }
             Err(error) => {
                 self.status = format!("二维码生成失败: {error}");
@@ -1019,12 +1138,104 @@ impl App {
             timestamp: qr.timestamp,
         });
 
+        if self.qr_mode == QrMode::External {
+            self.write_external_qr_svg()?;
+        }
+
         Ok(())
+    }
+
+    fn open_external_qr_viewer(&self) -> Result<(), String> {
+        self.write_external_qr_svg()?;
+        let html_path = self.write_external_qr_html()?;
+        open_path_with_system(&html_path)
+    }
+
+    fn write_external_qr_svg(&self) -> Result<(), String> {
+        let Some(qr) = &self.qr_display else {
+            return Err("当前没有二维码".to_string());
+        };
+
+        let code = QrCode::with_error_correction_level(qr.qr_url.as_bytes(), EcLevel::L)
+            .map_err(|error| error.to_string())?;
+        let image = code
+            .render::<svg::Color>()
+            .min_dimensions(360, 360)
+            .dark_color(svg::Color("#000000"))
+            .light_color(svg::Color("#ffffff"))
+            .build();
+
+        let path = external_qr_svg_path()?;
+        fs::write(&path, image).map_err(|error| format!("写入 {} 失败: {error}", path.display()))
+    }
+
+    fn write_external_qr_html(&self) -> Result<PathBuf, String> {
+        let dir = external_qr_dir()?;
+        let path = dir.join("index.html");
+        let html = r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iClass 签到二维码</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #f3f4f6;
+      color: #111827;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body {
+      display: grid;
+      place-items: center;
+    }
+    main {
+      display: grid;
+      gap: 14px;
+      justify-items: center;
+    }
+    img {
+      width: min(76vw, 420px);
+      height: min(76vw, 420px);
+      background: #ffffff;
+      border: 18px solid #ffffff;
+      box-shadow: 0 12px 30px rgba(17, 24, 39, 0.16);
+      image-rendering: pixelated;
+    }
+    .meta {
+      font-size: 14px;
+      color: #4b5563;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <img id="qr" src="iclass-buaa-tui-qr.svg" alt="签到二维码">
+    <div class="meta" id="meta">自动刷新中</div>
+  </main>
+  <script>
+    const img = document.getElementById("qr");
+    const meta = document.getElementById("meta");
+    function refreshQr() {
+      const now = new Date();
+      img.src = "iclass-buaa-tui-qr.svg?t=" + now.getTime();
+      meta.textContent = "刷新时间 " + now.toLocaleTimeString();
+    }
+    refreshQr();
+    setInterval(refreshQr, 1000);
+  </script>
+</body>
+</html>
+"#;
+        fs::write(&path, html).map_err(|error| format!("写入 {} 失败: {error}", path.display()))?;
+        Ok(path)
     }
 
     fn clear_qr(&mut self) {
         self.qr_display = None;
         self.qr_refreshing = false;
+        self.qr_mode = QrMode::Terminal;
         self.next_qr_refresh_at = None;
     }
 
@@ -1526,6 +1737,97 @@ async fn fetch_tag(current: &str) -> anyhow::Result<(String, String)> {
         .ok_or_else(|| anyhow::anyhow!("GitHub releases/latest 未跳转到 tag 页面: {latest_url}"))?
         .to_string();
     Ok((latest, latest_url))
+}
+
+fn external_qr_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("iclass-buaa-tui-qr");
+    fs::create_dir_all(&dir).map_err(|error| format!("创建 {} 失败: {error}", dir.display()))?;
+    Ok(dir)
+}
+
+fn external_qr_svg_path() -> Result<PathBuf, String> {
+    Ok(external_qr_dir()?.join("iclass-buaa-tui-qr.svg"))
+}
+
+fn open_path_with_system(path: &Path) -> Result<(), String> {
+    let result = if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).spawn()
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+    } else {
+        Command::new("xdg-open").arg(path).spawn()
+    };
+
+    result
+        .map(|_| ())
+        .map_err(|error| format!("启动外部查看器失败: {error}"))
+}
+
+fn remembered_login_path() -> Result<PathBuf, String> {
+    Ok(user_config_dir()?
+        .join("iclass-buaa")
+        .join("tui-login.toml"))
+}
+
+fn user_config_dir() -> Result<PathBuf, String> {
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(base));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(base) = std::env::var_os("APPDATA") {
+            return Ok(PathBuf::from(base));
+        }
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| "找不到 HOME 目录".to_string())?;
+    Ok(PathBuf::from(home).join(".config"))
+}
+
+fn load_remembered_login() -> Result<Option<RememberedLogin>, String> {
+    let path = remembered_login_path()?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
+    let remembered =
+        toml::from_str(&raw).map_err(|error| format!("解析 {} 失败: {error}", path.display()))?;
+    Ok(Some(remembered))
+}
+
+fn save_remembered_login(remembered: &RememberedLogin) -> Result<(), String> {
+    let path = remembered_login_path()?;
+    let Some(dir) = path.parent() else {
+        return Err("无法解析记住我配置目录".to_string());
+    };
+    fs::create_dir_all(dir).map_err(|error| format!("创建 {} 失败: {error}", dir.display()))?;
+    let raw =
+        toml::to_string(remembered).map_err(|error| format!("序列化记住我信息失败: {error}"))?;
+    fs::write(&path, raw).map_err(|error| format!("写入 {} 失败: {error}", path.display()))?;
+    restrict_owner_only(&path)?;
+    Ok(())
+}
+
+fn delete_remembered_login() -> Result<(), String> {
+    let path = remembered_login_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path).map_err(|error| format!("删除 {} 失败: {error}", path.display()))
+}
+
+fn restrict_owner_only(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("设置 {} 权限失败: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn clamp_step(current: usize, len: usize, delta: isize) -> usize {
