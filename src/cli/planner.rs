@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    bykc::BykcChosenCourse,
+    bykc::{BykcChosenCourse, BykcSignAction},
     constants::network_urls,
     iclass::IClassApi,
     model::{CourseDetailItem, SignOutcome},
@@ -20,6 +20,15 @@ use super::config::{AutomationConfig, load_config, parse_planner_time};
 use super::core::{
     EvaluatedCourse, ListedTarget, PollStatusKind, RetryPolicy, SignAction, SignSource,
 };
+
+impl From<SignAction> for BykcSignAction {
+    fn from(value: SignAction) -> Self {
+        match value {
+            SignAction::SignIn => Self::SignIn,
+            SignAction::SignOut => Self::SignOut,
+        }
+    }
+}
 
 // Command entry points
 
@@ -87,7 +96,7 @@ pub(crate) async fn list_today(args: ListTodayArgs) -> Result<()> {
 pub(crate) async fn sign_command(args: SignArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
     let retry = RetryPolicy {
-        max_attempts: args.retry_count.unwrap_or(config.retry_count),
+        max_attempts:     args.retry_count.unwrap_or(config.retry_count),
         interval_seconds: args
             .retry_interval_seconds
             .unwrap_or(config.retry_interval_seconds),
@@ -199,7 +208,7 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
     print_evaluated_summary(&evaluated);
 
     let retry = RetryPolicy {
-        max_attempts: config.retry_count,
+        max_attempts:     config.retry_count,
         interval_seconds: config.retry_interval_seconds,
     };
     let mut failures = Vec::new();
@@ -315,7 +324,7 @@ async fn fetch_today_bykc_targets(config: &AutomationConfig) -> Result<Vec<Liste
 /// Fetches today's sign targets, retrying login and API calls on transient failures.
 async fn fetch_today_targets_with_retry(config: &AutomationConfig) -> Result<Vec<ListedTarget>> {
     let retry = RetryPolicy {
-        max_attempts: config.retry_count,
+        max_attempts:     config.retry_count,
         interval_seconds: config.retry_interval_seconds,
     };
     let mut last_error = None;
@@ -481,15 +490,15 @@ fn map_bykc_targets(course: BykcChosenCourse, today: NaiveDate) -> Vec<ListedTar
         && start_at.date_naive() <= today
     {
         targets.push(ListedTarget {
-            source: SignSource::Bykc,
-            action: SignAction::SignIn,
-            name: course.course_name.clone(),
-            course_id: course.course_id.to_string(),
-            target_id: course.course_id.to_string(),
-            date: start_at.date_naive().format("%Y-%m-%d").to_string(),
+            source:     SignSource::Bykc,
+            action:     SignAction::SignIn,
+            name:       course.course_name.clone(),
+            course_id:  course.course_id.to_string(),
+            target_id:  course.course_id.to_string(),
+            date:       start_at.date_naive().format("%Y-%m-%d").to_string(),
             start_time: start_at.format("%H:%M").to_string(),
-            end_time: end_at.format("%H:%M").to_string(),
-            signed: course.pass == Some(1),
+            end_time:   end_at.format("%H:%M").to_string(),
+            signed:     course.pass == Some(1),
         });
     }
 
@@ -502,15 +511,15 @@ fn map_bykc_targets(course: BykcChosenCourse, today: NaiveDate) -> Vec<ListedTar
         && start_at.date_naive() <= today
     {
         targets.push(ListedTarget {
-            source: SignSource::Bykc,
-            action: SignAction::SignOut,
-            name: course.course_name,
-            course_id: course.course_id.to_string(),
-            target_id: course.course_id.to_string(),
-            date: start_at.date_naive().format("%Y-%m-%d").to_string(),
+            source:     SignSource::Bykc,
+            action:     SignAction::SignOut,
+            name:       course.course_name,
+            course_id:  course.course_id.to_string(),
+            target_id:  course.course_id.to_string(),
+            date:       start_at.date_naive().format("%Y-%m-%d").to_string(),
             start_time: start_at.format("%H:%M").to_string(),
-            end_time: end_at.format("%H:%M").to_string(),
-            signed: course.pass == Some(1),
+            end_time:   end_at.format("%H:%M").to_string(),
+            signed:     course.pass == Some(1),
         });
     }
 
@@ -649,10 +658,9 @@ async fn sign_bykc_with_retry(
                 let bykc_api = session
                     .bykc_api
                     .ok_or_else(|| anyhow!("BYKC 自动签到需要 VPN 模式登录"))?;
-                let result = match action {
-                    SignAction::SignIn => bykc_api.sign_in(course_id).await,
-                    SignAction::SignOut => bykc_api.sign_out(course_id).await,
-                };
+                let result = bykc_api
+                    .sign_course(course_id, BykcSignAction::from(action))
+                    .await;
 
                 match result {
                     Ok(message) => {

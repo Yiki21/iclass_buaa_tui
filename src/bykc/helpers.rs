@@ -106,16 +106,16 @@ pub(super) fn parse_sign_config(config_json: Option<&str>) -> Option<BykcSignCon
 
     let config = serde_json::from_str::<BykcSignConfigRaw>(raw).ok()?;
     Some(BykcSignConfig {
-        sign_start_date: config.sign_start_date.unwrap_or_default(),
-        sign_end_date: config.sign_end_date.unwrap_or_default(),
+        sign_start_date:     config.sign_start_date.unwrap_or_default(),
+        sign_end_date:       config.sign_end_date.unwrap_or_default(),
         sign_out_start_date: config.sign_out_start_date.unwrap_or_default(),
-        sign_out_end_date: config.sign_out_end_date.unwrap_or_default(),
-        sign_points: config
+        sign_out_end_date:   config.sign_out_end_date.unwrap_or_default(),
+        sign_points:         config
             .sign_point_list
             .into_iter()
             .map(|point| BykcSignPoint {
-                lat: point.lat,
-                lng: point.lng,
+                lat:    point.lat,
+                lng:    point.lng,
                 radius: point.radius,
             })
             .collect(),
@@ -135,7 +135,7 @@ pub(super) fn resolve_attendance_availability(
     now: NaiveDateTime,
 ) -> AttendanceAvailability {
     AttendanceAvailability {
-        can_sign: pass != Some(1)
+        can_sign:     pass != Some(1)
             && is_unsigned_checkin(checkin)
             && is_within_window(
                 sign_config.map(|item| item.sign_start_date.as_str()),
@@ -370,7 +370,7 @@ impl BykcCourseStatus {
 /// Computed attendance availability for a chosen course at the current time.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct AttendanceAvailability {
-    pub(super) can_sign: bool,
+    pub(super) can_sign:     bool,
     pub(super) can_sign_out: bool,
 }
 
@@ -378,10 +378,10 @@ pub(super) struct AttendanceAvailability {
 #[derive(Clone)]
 pub(super) struct EncryptedRequest {
     pub(super) encrypted_data: String,
-    pub(super) ak: String,
-    pub(super) sk: String,
-    pub(super) ts: String,
-    pub(super) aes_key: Vec<u8>,
+    pub(super) ak:             String,
+    pub(super) sk:             String,
+    pub(super) ts:             String,
+    pub(super) aes_key:        Vec<u8>,
 }
 
 /// Generates the 16-byte AES key format accepted by BYKC's frontend protocol.

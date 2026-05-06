@@ -8,7 +8,7 @@ use serde::Deserialize;
 pub(super) struct BykcApiResponse<T> {
     pub(super) status: String,
     #[serde(default)]
-    pub(super) data: Option<T>,
+    pub(super) data:   Option<T>,
     #[serde(default)]
     pub(super) errmsg: String,
 }
@@ -24,7 +24,7 @@ impl<T> BykcApiResponse<T> {
 #[serde(rename_all = "camelCase")]
 pub(super) struct BykcCoursePageResult {
     #[serde(default)]
-    pub(super) content: Vec<BykcCourseRaw>,
+    pub(super) content:     Vec<BykcCourseRaw>,
     #[serde(default)]
     pub(super) total_pages: i32,
 }
@@ -47,7 +47,7 @@ pub(super) struct BykcSemester {
     #[serde(default)]
     pub(super) semester_start_date: Option<String>,
     #[serde(default)]
-    pub(super) semester_end_date: Option<String>,
+    pub(super) semester_end_date:   Option<String>,
 }
 
 /// Payload wrapper around the chosen-course list.
@@ -111,19 +111,19 @@ pub(super) struct BykcCourseKind {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct BykcChosenCourseRaw {
-    pub(super) id: i64,
+    pub(super) id:          i64,
     #[serde(default)]
     pub(super) select_date: Option<String>,
     #[serde(default)]
     pub(super) course_info: Option<BykcCourseRaw>,
     #[serde(default)]
-    pub(super) checkin: Option<i32>,
+    pub(super) checkin:     Option<i32>,
     #[serde(default)]
-    pub(super) score: Option<i32>,
+    pub(super) score:       Option<i32>,
     #[serde(default)]
-    pub(super) pass: Option<i32>,
+    pub(super) pass:        Option<i32>,
     #[serde(default)]
-    pub(super) sign_info: Option<String>,
+    pub(super) sign_info:   Option<String>,
 }
 
 /// Raw JSON structure stored inside `courseSignConfig`.
@@ -131,23 +131,23 @@ pub(super) struct BykcChosenCourseRaw {
 #[serde(rename_all = "camelCase")]
 pub(super) struct BykcSignConfigRaw {
     #[serde(default)]
-    pub(super) sign_start_date: Option<String>,
+    pub(super) sign_start_date:     Option<String>,
     #[serde(default)]
-    pub(super) sign_end_date: Option<String>,
+    pub(super) sign_end_date:       Option<String>,
     #[serde(default)]
     pub(super) sign_out_start_date: Option<String>,
     #[serde(default)]
-    pub(super) sign_out_end_date: Option<String>,
+    pub(super) sign_out_end_date:   Option<String>,
     #[serde(default)]
-    pub(super) sign_point_list: Vec<BykcSignPointRaw>,
+    pub(super) sign_point_list:     Vec<BykcSignPointRaw>,
 }
 
 /// Raw sign-point entry embedded in the sign config JSON.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct BykcSignPointRaw {
-    pub(super) lat: f64,
-    pub(super) lng: f64,
+    pub(super) lat:    f64,
+    pub(super) lng:    f64,
     #[serde(default)]
     pub(super) radius: f64,
 }

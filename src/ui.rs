@@ -1053,7 +1053,7 @@ fn qr_scale(area: Rect, module_count: u16) -> u16 {
 
     let horizontal = area.width / module_count;
     let vertical = area.height.saturating_mul(2) / module_count;
-    horizontal.min(vertical).max(1).min(QR_MAX_MODULE_SCALE)
+    horizontal.min(vertical).clamp(1, QR_MAX_MODULE_SCALE)
 }
 
 fn qr_module_count(code: &QrCode) -> u16 {

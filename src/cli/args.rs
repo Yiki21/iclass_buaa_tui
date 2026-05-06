@@ -37,67 +37,67 @@ pub(crate) struct ListTodayArgs {
     pub(crate) config: Option<PathBuf>,
     /// Print JSON instead of tab-separated text.
     #[arg(long)]
-    pub(crate) json: bool,
+    pub(crate) json:   bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SignArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
-    pub(crate) config: Option<PathBuf>,
+    pub(crate) config:                 Option<PathBuf>,
     /// Sign target source.
     #[arg(long, value_enum, default_value_t = SignSourceArg::Iclass)]
-    pub(crate) source: SignSourceArg,
+    pub(crate) source:                 SignSourceArg,
     /// The course_sched_id to sign.
     #[arg(long, default_value = "")]
-    pub(crate) course_sched_id: String,
+    pub(crate) course_sched_id:        String,
     /// BYKC course id used for VPN-mode sign-in/sign-out.
     #[arg(long)]
-    pub(crate) bykc_course_id: Option<i64>,
+    pub(crate) bykc_course_id:         Option<i64>,
     /// Sign action for the selected source.
     #[arg(long, value_enum, default_value_t = SignActionArg::SignIn)]
-    pub(crate) action: SignActionArg,
+    pub(crate) action:                 SignActionArg,
     /// Optional course name shown in logs/output.
     #[arg(long)]
-    pub(crate) course_name: Option<String>,
+    pub(crate) course_name:            Option<String>,
     /// Override retry_count from config.
     #[arg(long)]
-    pub(crate) retry_count: Option<u32>,
+    pub(crate) retry_count:            Option<u32>,
     /// Override retry_interval_seconds from config.
     #[arg(long)]
     pub(crate) retry_interval_seconds: Option<u64>,
     /// Print server raw response and local timing diagnostics.
     #[arg(long)]
-    pub(crate) debug: bool,
+    pub(crate) debug:                  bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct PlanArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
-    pub(crate) config: Option<PathBuf>,
+    pub(crate) config:      Option<PathBuf>,
     /// Prefix for generated scheduler task names. Kept for compatibility.
     #[arg(long)]
     pub(crate) unit_prefix: Option<String>,
     /// Only print today's evaluation without attempting sign.
     #[arg(long)]
-    pub(crate) dry_run: bool,
+    pub(crate) dry_run:     bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct InstallAutologinArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
-    pub(crate) config: Option<PathBuf>,
+    pub(crate) config:                   Option<PathBuf>,
     /// Target directory for generated scheduler files when applicable.
     #[arg(long)]
-    pub(crate) output_dir: Option<PathBuf>,
+    pub(crate) output_dir:               Option<PathBuf>,
     /// Prefix for generated scheduler task names.
     #[arg(long)]
-    pub(crate) unit_prefix: Option<String>,
+    pub(crate) unit_prefix:              Option<String>,
     /// Override planner_time from config when generating the scheduler entry.
     #[arg(long)]
-    pub(crate) planner_time: Option<String>,
+    pub(crate) planner_time:             Option<String>,
     /// Override planner_interval_minutes from config when generating the scheduler entry.
     #[arg(long)]
     pub(crate) planner_interval_minutes: Option<u32>,
@@ -107,7 +107,7 @@ pub(crate) struct InstallAutologinArgs {
 pub(crate) struct UninstallAutologinArgs {
     /// Target directory containing generated scheduler files when applicable.
     #[arg(long)]
-    pub(crate) output_dir: Option<PathBuf>,
+    pub(crate) output_dir:  Option<PathBuf>,
     /// Prefix for generated scheduler task names.
     #[arg(long)]
     pub(crate) unit_prefix: Option<String>,

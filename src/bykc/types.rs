@@ -55,40 +55,40 @@ pub struct BykcCourseDetail {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 pub struct BykcChosenCourse {
-    pub id: i64,
-    pub course_id: i64,
-    pub course_name: String,
-    pub course_position: String,
-    pub course_teacher: String,
-    pub course_start_date: String,
-    pub course_end_date: String,
-    pub select_date: String,
+    pub id:                     i64,
+    pub course_id:              i64,
+    pub course_name:            String,
+    pub course_position:        String,
+    pub course_teacher:         String,
+    pub course_start_date:      String,
+    pub course_end_date:        String,
+    pub select_date:            String,
     pub course_cancel_end_date: String,
-    pub category: String,
-    pub sub_category: String,
-    pub checkin: i32,
-    pub score: Option<i32>,
-    pub pass: Option<i32>,
-    pub can_sign: bool,
-    pub can_sign_out: bool,
-    pub sign_config: Option<BykcSignConfig>,
-    pub sign_info: String,
+    pub category:               String,
+    pub sub_category:           String,
+    pub checkin:                i32,
+    pub score:                  Option<i32>,
+    pub pass:                   Option<i32>,
+    pub can_sign:               bool,
+    pub can_sign_out:           bool,
+    pub sign_config:            Option<BykcSignConfig>,
+    pub sign_info:              String,
 }
 
 /// Attendance time window and allowed sign points from BYKC.
 #[derive(Clone, Debug, Default)]
 pub struct BykcSignConfig {
-    pub sign_start_date: String,
-    pub sign_end_date: String,
+    pub sign_start_date:     String,
+    pub sign_end_date:       String,
     pub sign_out_start_date: String,
-    pub sign_out_end_date: String,
-    pub sign_points: Vec<BykcSignPoint>,
+    pub sign_out_end_date:   String,
+    pub sign_points:         Vec<BykcSignPoint>,
 }
 
 /// BYKC sign-point definition used to construct a valid check-in location.
 #[derive(Clone, Debug, Default)]
 pub struct BykcSignPoint {
-    pub lat: f64,
-    pub lng: f64,
+    pub lat:    f64,
+    pub lng:    f64,
     pub radius: f64,
 }

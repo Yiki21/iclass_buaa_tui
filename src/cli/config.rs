@@ -18,37 +18,37 @@ const APP_CONFIG_RELATIVE_PATH: &str = "iclass-buaa/config.toml";
 /// Automation settings loaded from the CLI config file.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AutomationConfig {
-    pub(crate) student_id: String,
+    pub(crate) student_id:               String,
     #[serde(default)]
-    pub(crate) use_vpn: bool,
+    pub(crate) use_vpn:                  bool,
     #[serde(default)]
-    pub(crate) vpn_username: String,
+    pub(crate) vpn_username:             String,
     #[serde(default)]
-    pub(crate) vpn_password: String,
+    pub(crate) vpn_password:             String,
     #[serde(default = "default_enable_iclass")]
-    pub(crate) enable_iclass: bool,
+    pub(crate) enable_iclass:            bool,
     #[serde(default)]
-    pub(crate) enable_bykc: bool,
+    pub(crate) enable_bykc:              bool,
     #[serde(default = "default_advance_minutes")]
-    pub(crate) advance_minutes: i64,
+    pub(crate) advance_minutes:          i64,
     #[serde(default = "default_retry_count")]
-    pub(crate) retry_count: u32,
+    pub(crate) retry_count:              u32,
     #[serde(default = "default_retry_interval_seconds")]
-    pub(crate) retry_interval_seconds: u64,
+    pub(crate) retry_interval_seconds:   u64,
     #[serde(default = "default_include_courses")]
-    pub(crate) include_courses: Vec<String>,
+    pub(crate) include_courses:          Vec<String>,
     #[serde(default)]
-    pub(crate) exclude_courses: Vec<String>,
+    pub(crate) exclude_courses:          Vec<String>,
     #[serde(default)]
-    pub(crate) iclass_include_courses: Vec<String>,
+    pub(crate) iclass_include_courses:   Vec<String>,
     #[serde(default)]
-    pub(crate) iclass_exclude_courses: Vec<String>,
+    pub(crate) iclass_exclude_courses:   Vec<String>,
     #[serde(default)]
-    pub(crate) bykc_include_courses: Vec<String>,
+    pub(crate) bykc_include_courses:     Vec<String>,
     #[serde(default)]
-    pub(crate) bykc_exclude_courses: Vec<String>,
+    pub(crate) bykc_exclude_courses:     Vec<String>,
     #[serde(default = "default_planner_time")]
-    pub(crate) planner_time: String,
+    pub(crate) planner_time:             String,
     #[serde(default = "default_planner_interval_minutes")]
     pub(crate) planner_interval_minutes: u32,
 }
@@ -208,8 +208,8 @@ impl AutomationConfig {
 
     pub(crate) fn login_input(&self) -> LoginInput {
         LoginInput {
-            student_id: self.student_id.clone(),
-            use_vpn: self.use_vpn,
+            student_id:   self.student_id.clone(),
+            use_vpn:      self.use_vpn,
             vpn_username: self.vpn_username.clone(),
             vpn_password: self.vpn_password.clone(),
         }

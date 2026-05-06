@@ -1,0 +1,8 @@
+#:tombi schema.strict = false
+
+unstable_features = true
+struct_field_align_threshold = 20
+enum_discrim_align_threshold = 20
+blank_lines_lower_bound = 1
+force_multiline_blocks = true
+format_strings = true

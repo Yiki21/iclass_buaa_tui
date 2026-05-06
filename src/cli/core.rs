@@ -5,15 +5,15 @@ use chrono::{DateTime, Local};
 /// A normalized sign target used by the planner and retry logic.
 #[derive(Debug, Clone)]
 pub(crate) struct ListedTarget {
-    pub(crate) source: SignSource,
-    pub(crate) action: SignAction,
-    pub(crate) name: String,
-    pub(crate) course_id: String,
-    pub(crate) target_id: String,
-    pub(crate) date: String,
+    pub(crate) source:     SignSource,
+    pub(crate) action:     SignAction,
+    pub(crate) name:       String,
+    pub(crate) course_id:  String,
+    pub(crate) target_id:  String,
+    pub(crate) date:       String,
     pub(crate) start_time: String,
-    pub(crate) end_time: String,
-    pub(crate) signed: bool,
+    pub(crate) end_time:   String,
+    pub(crate) signed:     bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl SignAction {
 /// Retry behavior shared by course fetch and sign operations.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryPolicy {
-    pub(crate) max_attempts: u32,
+    pub(crate) max_attempts:     u32,
     pub(crate) interval_seconds: u64,
 }
 
@@ -73,7 +73,7 @@ pub(crate) enum PollStatusKind {
 /// A sign target plus its computed planner state and first eligible sign time.
 #[derive(Debug, Clone)]
 pub(crate) struct EvaluatedCourse {
-    pub(crate) course: ListedTarget,
-    pub(crate) status: PollStatusKind,
+    pub(crate) course:       ListedTarget,
+    pub(crate) status:       PollStatusKind,
     pub(crate) available_at: Option<DateTime<Local>>,
 }

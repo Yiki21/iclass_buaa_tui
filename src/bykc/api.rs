@@ -23,13 +23,35 @@ use super::raw::{
 };
 use super::types::{BykcChosenCourse, BykcCourse, BykcCourseDetail};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BykcSignAction {
+    SignIn,
+    SignOut,
+}
+
+impl BykcSignAction {
+    pub fn success_message(self) -> &'static str {
+        match self {
+            Self::SignIn => "签到成功",
+            Self::SignOut => "签退成功",
+        }
+    }
+
+    fn sign_type(self) -> i32 {
+        match self {
+            Self::SignIn => 1,
+            Self::SignOut => 2,
+        }
+    }
+}
+
 /// BYKC client responsible for login, encrypted API calls, and course operations.
 #[derive(Clone, Debug)]
 pub struct BykcApi {
-    client: reqwest::Client,
-    login_client: reqwest::Client,
-    login_input: LoginInput,
-    auth_token: Arc<Mutex<Option<String>>>,
+    client:                 reqwest::Client,
+    login_client:           reqwest::Client,
+    login_input:            LoginInput,
+    auth_token:             Arc<Mutex<Option<String>>>,
     current_semester_dates: Arc<Mutex<Option<(String, String)>>>,
 }
 
@@ -271,21 +293,8 @@ impl BykcApi {
         Ok("退选成功".to_string())
     }
 
-    /// Performs BYKC sign-in after resolving the configured sign window and location.
-    pub async fn sign_in(&self, course_id: i64) -> Result<String> {
-        self.sign_course(course_id, 1)
-            .await
-            .map(|_| "签到成功".to_string())
-    }
-
-    /// Performs BYKC sign-out after resolving the configured sign window and location.
-    pub async fn sign_out(&self, course_id: i64) -> Result<String> {
-        self.sign_course(course_id, 2)
-            .await
-            .map(|_| "签退成功".to_string())
-    }
-
-    async fn sign_course(&self, course_id: i64, sign_type: i32) -> Result<()> {
+    /// Performs BYKC sign-in/sign-out after resolving the configured window and location.
+    pub async fn sign_course(&self, course_id: i64, action: BykcSignAction) -> Result<String> {
         self.ensure_login(false).await?;
         let chosen = self
             .find_chosen_course_for_current_semester(course_id)
@@ -309,13 +318,13 @@ impl BykcApi {
             chosen.pass,
             Local::now().naive_local(),
         );
-        if sign_type == 1 && !availability.can_sign {
+        if action == BykcSignAction::SignIn && !availability.can_sign {
             bail!(resolve_sign_in_unavailable_reason(
                 chosen.checkin,
                 chosen.pass
             ));
         }
-        if sign_type == 2 && !availability.can_sign_out {
+        if action == BykcSignAction::SignOut && !availability.can_sign_out {
             bail!(resolve_sign_out_unavailable_reason(
                 chosen.checkin,
                 chosen.pass
@@ -323,6 +332,7 @@ impl BykcApi {
         }
 
         let (lat, lng) = random_sign_location(sign_config.as_ref())?;
+        let sign_type = action.sign_type();
         let request = format!(
             r#"{{"courseId":{course_id},"signLat":{lat},"signLng":{lng},"signType":{sign_type}}}"#
         );
@@ -330,7 +340,7 @@ impl BykcApi {
         if !response.is_success() {
             bail!(sanitize_bykc_error_message(&response.errmsg, "签到失败"));
         }
-        Ok(())
+        Ok(action.success_message().to_string())
     }
 
     /// Ensures the BYKC auth token exists and refreshes it when the session expires.

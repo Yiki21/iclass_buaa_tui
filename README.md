@@ -18,6 +18,18 @@
 - 打开 `.dmg` 后，把 `iClass BUAA TUI.app` 拖到 `Applications`
 - 不要直接从桌面上的磁盘映像图标运行，也不要停留在挂载出来的 DMG 里直接启动
 - 这是终端 TUI 程序；新版本会在双击 `.app` 时自动拉起 `Terminal.app`
+- 如果 macOS 提示“磁盘映像损坏”或 App 已损坏，通常是因为当前 release 未做 Apple Developer ID 签名和公证，被 Gatekeeper 加了隔离标记。确认文件来自本项目 Releases 后，可在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine ~/Downloads/iclass_buaa_tui-macos-arm64.dmg
+```
+
+Intel 版本请把文件名改成 `iclass_buaa_tui-macos-x64.dmg`。如果已经拖入 Applications 后仍打不开，再执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/iClass\ BUAA\ TUI.app
+```
+
 - 如果你使用的是旧版本，双击没有反应时，请在终端手动运行：
 
 ```bash

@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bykc::{
-    BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, can_deselect_bykc_course,
+    BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcSignAction,
+    can_deselect_bykc_course,
 };
 use crate::model::{CourseDetailItem, LoginInput, Session, SignOutcome};
 
@@ -36,8 +37,8 @@ pub struct LoginSuccess {
 #[derive(Clone, Debug)]
 pub struct QrDisplay {
     pub course_sched_id: String,
-    pub qr_url: String,
-    pub timestamp: i64,
+    pub qr_url:          String,
+    pub timestamp:       i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49,18 +50,18 @@ pub enum QrMode {
 
 #[derive(Clone, Debug)]
 pub struct VersionInfo {
-    pub current: String,
-    pub latest: String,
+    pub current:    String,
+    pub latest:     String,
     pub latest_url: String,
-    pub is_latest: bool,
+    pub is_latest:  bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct WeekGroup {
-    pub key: String,
-    pub label: String,
-    pub start_date: String,
-    pub end_date: String,
+    pub key:            String,
+    pub label:          String,
+    pub start_date:     String,
+    pub end_date:       String,
     pub course_indices: Vec<usize>,
 }
 
@@ -95,18 +96,18 @@ pub enum LoginFocus {
 /// Login form state for the TUI login screen.
 #[derive(Clone, Debug, Default)]
 pub struct LoginForm {
-    pub student_id: String,
-    pub use_vpn: bool,
+    pub student_id:   String,
+    pub use_vpn:      bool,
     pub vpn_username: String,
     pub vpn_password: String,
-    pub remember_me: bool,
-    pub focus: usize,
+    pub remember_me:  bool,
+    pub focus:        usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RememberedLogin {
-    student_id: String,
-    use_vpn: bool,
+    student_id:   String,
+    use_vpn:      bool,
     vpn_username: String,
     vpn_password: String,
 }
@@ -114,12 +115,12 @@ struct RememberedLogin {
 impl LoginForm {
     fn from_remembered(remembered: RememberedLogin) -> Self {
         Self {
-            student_id: remembered.student_id,
-            use_vpn: remembered.use_vpn,
+            student_id:   remembered.student_id,
+            use_vpn:      remembered.use_vpn,
             vpn_username: remembered.vpn_username,
             vpn_password: remembered.vpn_password,
-            remember_me: true,
-            focus: 0,
+            remember_me:  true,
+            focus:        0,
         }
     }
 
@@ -175,12 +176,12 @@ impl LoginForm {
         let student_id = self.student_id.trim();
         let vpn_username = self.vpn_username.trim();
         LoginInput {
-            student_id: if self.use_vpn && student_id.is_empty() {
+            student_id:   if self.use_vpn && student_id.is_empty() {
                 vpn_username.to_string()
             } else {
                 student_id.to_string()
             },
-            use_vpn: self.use_vpn,
+            use_vpn:      self.use_vpn,
             vpn_username: vpn_username.to_string(),
             vpn_password: self.vpn_password.clone(),
         }
@@ -191,8 +192,8 @@ impl From<&LoginForm> for RememberedLogin {
     fn from(login: &LoginForm) -> Self {
         let input = login.to_input();
         Self {
-            student_id: input.student_id,
-            use_vpn: input.use_vpn,
+            student_id:   input.student_id,
+            use_vpn:      input.use_vpn,
             vpn_username: input.vpn_username,
             vpn_password: input.vpn_password,
         }
@@ -201,16 +202,16 @@ impl From<&LoginForm> for RememberedLogin {
 
 #[derive(Clone, Debug, Default)]
 pub struct BykcState {
-    pub view: BykcView,
-    pub include_all: bool,
-    pub loaded: bool,
-    pub courses: Vec<BykcCourse>,
-    pub selected_course: usize,
-    pub chosen_courses: Vec<BykcChosenCourse>,
-    pub selected_chosen: usize,
-    pub detail: Option<BykcCourseDetail>,
-    pub detail_cache: HashMap<i64, BykcCourseDetail>,
-    pub detail_course_id: Option<i64>,
+    pub view:              BykcView,
+    pub include_all:       bool,
+    pub loaded:            bool,
+    pub courses:           Vec<BykcCourse>,
+    pub selected_course:   usize,
+    pub chosen_courses:    Vec<BykcChosenCourse>,
+    pub selected_chosen:   usize,
+    pub detail:            Option<BykcCourseDetail>,
+    pub detail_cache:      HashMap<i64, BykcCourseDetail>,
+    pub detail_course_id:  Option<i64>,
     pub show_detail_popup: bool,
 }
 
@@ -325,10 +326,10 @@ impl BykcState {
 
 #[derive(Clone, Debug)]
 pub struct BykcSyncSuccess {
-    pub courses: Vec<BykcCourse>,
-    pub chosen_courses: Vec<BykcChosenCourse>,
-    pub detail: Option<BykcCourseDetail>,
-    pub message: Option<String>,
+    pub courses:           Vec<BykcCourse>,
+    pub chosen_courses:    Vec<BykcChosenCourse>,
+    pub detail:            Option<BykcCourseDetail>,
+    pub message:           Option<String>,
     pub open_detail_popup: bool,
 }
 
@@ -341,48 +342,49 @@ enum BykcDetailTarget {
 
 #[derive(Debug)]
 pub struct App {
-    pub screen: Screen,
-    pub active_tab: WorkspaceTab,
-    pub login: LoginForm,
-    pub session: Option<Session>,
-    pub courses: Vec<CourseDetailItem>,
-    pub week_groups: Vec<WeekGroup>,
-    pub selected_week: usize,
-    pub selected: usize,
-    pub bykc: BykcState,
-    pub status: String,
-    pub busy: bool,
-    pub should_quit: bool,
-    pub show_help: bool,
-    pub qr_display: Option<QrDisplay>,
-    pub qr_refreshing: bool,
-    pub qr_mode: QrMode,
-    pub version_info: Option<VersionInfo>,
-    pub version_error: Option<String>,
+    pub screen:         Screen,
+    pub active_tab:     WorkspaceTab,
+    pub login:          LoginForm,
+    pub session:        Option<Session>,
+    pub courses:        Vec<CourseDetailItem>,
+    pub week_groups:    Vec<WeekGroup>,
+    pub selected_week:  usize,
+    pub selected:       usize,
+    pub bykc:           BykcState,
+    pub status:         String,
+    pub busy:           bool,
+    pub should_quit:    bool,
+    pub show_help:      bool,
+    pub qr_display:     Option<QrDisplay>,
+    pub qr_refreshing:  bool,
+    pub qr_mode:        QrMode,
+    pub version_info:   Option<VersionInfo>,
+    pub version_error:  Option<String>,
     next_qr_refresh_at: Option<Instant>,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
-            screen: Screen::Login,
-            active_tab: WorkspaceTab::IClass,
-            login: LoginForm::default(),
-            session: None,
-            courses: Vec::new(),
-            week_groups: Vec::new(),
-            selected_week: 0,
-            selected: 0,
-            bykc: BykcState::default(),
-            status: "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录".to_string(),
-            busy: false,
-            should_quit: false,
-            show_help: false,
-            qr_display: None,
-            qr_refreshing: false,
-            qr_mode: QrMode::Terminal,
-            version_info: None,
-            version_error: None,
+            screen:             Screen::Login,
+            active_tab:         WorkspaceTab::IClass,
+            login:              LoginForm::default(),
+            session:            None,
+            courses:            Vec::new(),
+            week_groups:        Vec::new(),
+            selected_week:      0,
+            selected:           0,
+            bykc:               BykcState::default(),
+            status:             "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
+                .to_string(),
+            busy:               false,
+            should_quit:        false,
+            show_help:          false,
+            qr_display:         None,
+            qr_refreshing:      false,
+            qr_mode:            QrMode::Terminal,
+            version_info:       None,
+            version_error:      None,
             next_qr_refresh_at: None,
         }
     }
@@ -749,10 +751,10 @@ impl App {
                 self.deselect_bykc_course(tx)
             }
             KeyCode::Char('s') if self.bykc.view == BykcView::Chosen => {
-                self.sign_in_bykc_course(tx)
+                self.sign_selected_bykc_course(BykcSignAction::SignIn, tx)
             }
             KeyCode::Char('u') if self.bykc.view == BykcView::Chosen => {
-                self.sign_out_bykc_course(tx)
+                self.sign_selected_bykc_course(BykcSignAction::SignOut, tx)
             }
             KeyCode::Char('X') => self.logout(),
             _ => {}
@@ -924,7 +926,15 @@ impl App {
 
         self.busy = true;
         self.status = format!("报名中: {}", course.course_name);
-        spawn_bykc_select(session, self.bykc.include_all, course.id, tx.clone());
+        spawn_bykc_task(
+            session,
+            self.bykc.include_all,
+            BykcDetailTarget::CourseFirst(course.id),
+            false,
+            false,
+            tx.clone(),
+            move |api| async move { api.select_course(course.id).await.map(Some) },
+        );
     }
 
     fn deselect_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -944,7 +954,16 @@ impl App {
 
         self.busy = true;
         self.status = format!("退选中: {}", course.course_name);
-        spawn_bykc_deselect(session, self.bykc.include_all, course.course_id, tx.clone());
+        let course_id = course.course_id;
+        spawn_bykc_task(
+            session,
+            self.bykc.include_all,
+            BykcDetailTarget::ChosenFirst(course_id),
+            false,
+            false,
+            tx.clone(),
+            move |api| async move { api.deselect_course(course_id).await.map(Some) },
+        );
     }
 
     fn deselect_selected_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -972,58 +991,56 @@ impl App {
 
         self.busy = true;
         self.status = format!("退选中: {}", course.course_name);
-        spawn_bykc_deselect(session, self.bykc.include_all, course.id, tx.clone());
-    }
-
-    fn sign_in_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
-        let Some(session) = self.session.clone() else {
-            self.status = "当前未登录".to_string();
-            self.screen = Screen::Login;
-            return;
-        };
-        let Some(course) = self.bykc.selected_chosen_course().cloned() else {
-            self.status = "当前没有可签到的博雅课程".to_string();
-            return;
-        };
-        if !course.can_sign {
-            self.status = "当前课程不在可签到状态".to_string();
-            return;
-        }
-
-        self.busy = true;
-        self.status = format!("博雅签到中: {}", course.course_name);
-        spawn_bykc_sign(
+        let course_id = course.id;
+        spawn_bykc_task(
             session,
             self.bykc.include_all,
-            course.course_id,
-            1,
+            BykcDetailTarget::ChosenFirst(course_id),
+            false,
+            false,
             tx.clone(),
+            move |api| async move { api.deselect_course(course_id).await.map(Some) },
         );
     }
 
-    fn sign_out_bykc_course(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+    fn sign_selected_bykc_course(
+        &mut self,
+        action: BykcSignAction,
+        tx: &UnboundedSender<AsyncEvent>,
+    ) {
         let Some(session) = self.session.clone() else {
             self.status = "当前未登录".to_string();
             self.screen = Screen::Login;
             return;
         };
+        let action_label = if action == BykcSignAction::SignIn {
+            "签到"
+        } else {
+            "签退"
+        };
         let Some(course) = self.bykc.selected_chosen_course().cloned() else {
-            self.status = "当前没有可签退的博雅课程".to_string();
+            self.status = format!("当前没有可{action_label}的博雅课程");
             return;
         };
-        if !course.can_sign_out {
-            self.status = "当前课程不在可签退状态".to_string();
+        let (allowed, pending_status) = match action {
+            BykcSignAction::SignIn => (course.can_sign, "当前课程不在可签到状态"),
+            BykcSignAction::SignOut => (course.can_sign_out, "当前课程不在可签退状态"),
+        };
+        if !allowed {
+            self.status = pending_status.to_string();
             return;
         }
 
         self.busy = true;
-        self.status = format!("博雅签退中: {}", course.course_name);
-        spawn_bykc_sign(
+        self.status = format!("博雅{action_label}中: {}", course.course_name);
+        spawn_bykc_task(
             session,
             self.bykc.include_all,
-            course.course_id,
-            2,
+            BykcDetailTarget::ChosenFirst(course.course_id),
+            false,
+            false,
             tx.clone(),
+            move |api| async move { api.sign_course(course.course_id, action).await.map(Some) },
         );
     }
 
@@ -1134,8 +1151,8 @@ impl App {
 
         self.qr_display = Some(QrDisplay {
             course_sched_id: qr.course_sched_id,
-            qr_url: qr.qr_url,
-            timestamp: qr.timestamp,
+            qr_url:          qr.qr_url,
+            timestamp:       qr.timestamp,
         });
 
         if self.qr_mode == QrMode::External {
@@ -1277,19 +1294,24 @@ impl App {
             .position(|index| *index == current_abs)
             .unwrap_or(0);
 
-        let target_date = current_date + ChronoDuration::days(delta_days);
-        if target_date < week_start || target_date > week_start + ChronoDuration::days(6) {
+        let step = delta_days.signum();
+        if step == 0 {
             return;
         }
 
-        let target_key = target_date.format("%Y-%m-%d").to_string();
-        let target_courses = self.day_course_absolute_indices(&target_key);
-        if target_courses.is_empty() {
-            return;
-        }
+        let week_end = week_start + ChronoDuration::days(6);
+        let mut target_date = current_date + ChronoDuration::days(step);
+        while target_date >= week_start && target_date <= week_end {
+            let target_key = target_date.format("%Y-%m-%d").to_string();
+            let target_courses = self.day_course_absolute_indices(&target_key);
+            if !target_courses.is_empty() {
+                let target_row = current_row.min(target_courses.len().saturating_sub(1));
+                self.set_selected_absolute(target_courses[target_row]);
+                return;
+            }
 
-        let target_row = current_row.min(target_courses.len().saturating_sub(1));
-        self.set_selected_absolute(target_courses[target_row]);
+            target_date += ChronoDuration::days(step);
+        }
     }
 
     fn day_course_absolute_indices(&self, date: &str) -> Vec<usize> {
@@ -1441,64 +1463,6 @@ fn spawn_bykc_sync(
         true,
         tx,
         |_| async move { Ok(message) },
-    );
-}
-
-fn spawn_bykc_select(
-    session: Session,
-    include_all: bool,
-    course_id: i64,
-    tx: UnboundedSender<AsyncEvent>,
-) {
-    spawn_bykc_task(
-        session,
-        include_all,
-        BykcDetailTarget::CourseFirst(course_id),
-        false,
-        false,
-        tx,
-        move |api| async move { api.select_course(course_id).await.map(Some) },
-    );
-}
-
-fn spawn_bykc_deselect(
-    session: Session,
-    include_all: bool,
-    course_id: i64,
-    tx: UnboundedSender<AsyncEvent>,
-) {
-    spawn_bykc_task(
-        session,
-        include_all,
-        BykcDetailTarget::ChosenFirst(course_id),
-        false,
-        false,
-        tx,
-        move |api| async move { api.deselect_course(course_id).await.map(Some) },
-    );
-}
-
-fn spawn_bykc_sign(
-    session: Session,
-    include_all: bool,
-    course_id: i64,
-    sign_type: i32,
-    tx: UnboundedSender<AsyncEvent>,
-) {
-    spawn_bykc_task(
-        session,
-        include_all,
-        BykcDetailTarget::ChosenFirst(course_id),
-        false,
-        false,
-        tx,
-        move |api| async move {
-            if sign_type == 1 {
-                api.sign_in(course_id).await.map(Some)
-            } else {
-                api.sign_out(course_id).await.map(Some)
-            }
-        },
     );
 }
 
@@ -1714,10 +1678,10 @@ fn parse_version_parts(version: &str) -> Vec<u32> {
 
 fn make_version_info(current: &str, latest: &str, latest_url: &str) -> VersionInfo {
     VersionInfo {
-        current: current.to_string(),
-        latest: normalize_version(latest).to_string(),
+        current:    current.to_string(),
+        latest:     normalize_version(latest).to_string(),
         latest_url: latest_url.to_string(),
-        is_latest: compare_version(current, latest) >= 0,
+        is_latest:  compare_version(current, latest) >= 0,
     }
 }
 

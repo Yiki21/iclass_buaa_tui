@@ -16,7 +16,7 @@ use crate::model::{CourseDetailItem, CourseItem, LoginInput, Session, SignOutcom
 
 #[derive(Clone, Debug)]
 pub struct IClassApi {
-    client: reqwest::Client,
+    client:  reqwest::Client,
     use_vpn: bool,
 }
 
@@ -558,17 +558,19 @@ impl IClassApi {
                 let mut details = Vec::with_capacity(records.len());
                 for record in records {
                     details.push(CourseDetailItem {
-                        name: course.name.clone(),
-                        id: course.id.clone(),
+                        name:            course.name.clone(),
+                        id:              course.id.clone(),
                         course_sched_id: value_to_string(record.get("courseSchedId")),
-                        date: normalize_date_display(&value_to_string(record.get("teachTime"))),
-                        start_time: normalize_time_display(&value_to_string(
+                        date:            normalize_date_display(&value_to_string(
+                            record.get("teachTime"),
+                        )),
+                        start_time:      normalize_time_display(&value_to_string(
                             record.get("classBeginTime"),
                         )),
-                        end_time: normalize_time_display(&value_to_string(
+                        end_time:        normalize_time_display(&value_to_string(
                             record.get("classEndTime"),
                         )),
-                        sign_status: value_to_string(record.get("signStatus")),
+                        sign_status:     value_to_string(record.get("signStatus")),
                     });
                 }
 
@@ -643,21 +645,25 @@ impl IClassApi {
             let course_name = value_to_string(record.get("courseName"));
             let teach_time = value_to_string(record.get("teachTime"));
             details.push(CourseDetailItem {
-                name: if course_name.trim().is_empty() {
+                name:            if course_name.trim().is_empty() {
                     "未知课程".to_string()
                 } else {
                     course_name
                 },
-                id: value_to_string(record.get("courseId")),
+                id:              value_to_string(record.get("courseId")),
                 course_sched_id: value_to_string(record.get("id")),
-                date: normalize_date_display(if teach_time.trim().is_empty() {
+                date:            normalize_date_display(if teach_time.trim().is_empty() {
                     date_str
                 } else {
                     teach_time.as_str()
                 }),
-                start_time: normalize_time_display(&value_to_string(record.get("classBeginTime"))),
-                end_time: normalize_time_display(&value_to_string(record.get("classEndTime"))),
-                sign_status: value_to_string(record.get("signStatus")),
+                start_time:      normalize_time_display(&value_to_string(
+                    record.get("classBeginTime"),
+                )),
+                end_time:        normalize_time_display(&value_to_string(
+                    record.get("classEndTime"),
+                )),
+                sign_status:     value_to_string(record.get("signStatus")),
             });
         }
 

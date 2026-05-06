@@ -6,8 +6,8 @@ use crate::iclass::IClassApi;
 /// Login credentials normalized from either the TUI form or the CLI config file.
 #[derive(Clone, Debug, Default)]
 pub struct LoginInput {
-    pub student_id: String,
-    pub use_vpn: bool,
+    pub student_id:   String,
+    pub use_vpn:      bool,
     pub vpn_username: String,
     pub vpn_password: String,
 }
@@ -15,48 +15,48 @@ pub struct LoginInput {
 /// Login session shared across TUI and CLI operations.
 #[derive(Clone, Debug)]
 pub struct Session {
-    pub api: IClassApi,
-    pub bykc_api: Option<BykcApi>,
-    pub user_id: String,
-    pub user_name: String,
-    pub session_id: String,
+    pub api:                   IClassApi,
+    pub bykc_api:              Option<BykcApi>,
+    pub user_id:               String,
+    pub user_name:             String,
+    pub session_id:            String,
     // iclass need this
     pub server_time_offset_ms: i64,
-    pub use_vpn: bool,
+    pub use_vpn:               bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct CourseItem {
     pub name: String,
-    pub id: String,
+    pub id:   String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CourseDetailItem {
-    pub name: String,
-    pub id: String,
+    pub name:            String,
+    pub id:              String,
     pub course_sched_id: String,
-    pub date: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub sign_status: String,
+    pub date:            String,
+    pub start_time:      String,
+    pub end_time:        String,
+    pub sign_status:     String,
 }
 
 #[derive(Clone, Debug)]
 pub struct SignOutcome {
-    pub message: String,
-    pub success_like: bool,
-    pub http_status: u16,
+    pub message:       String,
+    pub success_like:  bool,
+    pub http_status:   u16,
     pub server_status: String,
     /// Raw server payload retained for CLI debug output and future diagnostics.
-    pub raw_response: serde_json::value::Value,
+    pub raw_response:  serde_json::value::Value,
 }
 
 #[derive(Clone, Debug)]
 pub struct SignQrData {
-    pub qr_url: String,
+    pub qr_url:          String,
     pub course_sched_id: String,
-    pub timestamp: i64,
+    pub timestamp:       i64,
 }
 
 impl CourseDetailItem {
