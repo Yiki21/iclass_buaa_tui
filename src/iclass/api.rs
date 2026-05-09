@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Local, Utc};
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -282,10 +282,11 @@ impl IClassApi {
             bail!("VPN 模式需要输入账号和密码");
         }
 
-        let (login_url, execution) = self.fetch_execution().await?;
+        let (login_url, action_url, execution) = self.fetch_execution().await?;
         let response = self
             .client
-            .post(&login_url)
+            .post(&action_url)
+            .header(ORIGIN, "https://d.buaa.edu.cn")
             .header(REFERER, &login_url)
             .form(&[
                 ("username", username.trim()),
@@ -334,7 +335,7 @@ impl IClassApi {
     /// The login form is stateful and rejects submissions without the current
     /// hidden token, so this remains a dedicated pre-step instead of being
     /// inlined into the larger VPN login flow.
-    async fn fetch_execution(&self) -> Result<(String, String)> {
+    async fn fetch_execution(&self) -> Result<(String, String, String)> {
         let response = self
             .client
             .get(SSO_VPN_ENTRY)
@@ -348,14 +349,21 @@ impl IClassApi {
         let selector = Selector::parse(r#"input[name="execution"]"#)
             .map_err(|_| anyhow!("SSO 页面选择器构造失败"))?;
 
+        let action_url = resolve_login_form_action(&login_url, &document)?;
         let execution = document
             .select(&selector)
             .next()
             .and_then(|node| node.value().attr("value"))
             .map(str::to_string)
-            .ok_or_else(|| anyhow!("无法从 SSO 登录页面解析 execution 参数"))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "无法从 SSO 登录页面解析 execution 参数，最终 URL: {}, 页面线索: {}",
+                    login_url,
+                    summarize_login_page(&body)
+                )
+            })?;
 
-        Ok((login_url, execution))
+        Ok((login_url, action_url, execution))
     }
 
     /// Fetches user info and derives `server_time_offset_ms` from the HTTP `Date` header.
@@ -717,6 +725,52 @@ fn looks_like_bad_vpn_credentials(body: &str) -> bool {
     ]
     .iter()
     .any(|marker| body.contains(marker))
+}
+
+fn resolve_login_form_action(login_url: &str, document: &Html) -> Result<String> {
+    let selector =
+        Selector::parse(r#"form#loginForm"#).map_err(|_| anyhow!("SSO 表单选择器构造失败"))?;
+    let Some(action) = document
+        .select(&selector)
+        .next()
+        .and_then(|node| node.value().attr("action"))
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(login_url.to_string());
+    };
+
+    reqwest::Url::parse(login_url)
+        .and_then(|base| base.join(action))
+        .map(|url| url.to_string())
+        .with_context(|| format!("解析 SSO 登录表单提交地址失败: {action}"))
+}
+
+fn summarize_login_page(body: &str) -> String {
+    let title = Html::parse_document(body)
+        .select(&Selector::parse("title").expect("valid title selector"))
+        .next()
+        .map(|node| node.text().collect::<String>().trim().to_string())
+        .filter(|value| !value.is_empty());
+    let markers = [
+        ("captcha", needs_vpn_captcha(body)),
+        ("bad_credentials", looks_like_bad_vpn_credentials(body)),
+        ("cas_form", body.contains("loginForm") || body.contains("统一身份认证")),
+        ("portal", body.contains("wengine-vpn") || body.contains("免客户端VPN")),
+    ]
+    .into_iter()
+    .filter_map(|(name, present)| present.then_some(name))
+    .collect::<Vec<_>>()
+    .join(",");
+
+    format!(
+        "title={}, markers={}, body_prefix={}",
+        title.unwrap_or_else(|| "<none>".to_string()),
+        if markers.is_empty() { "<none>" } else { &markers },
+        body.chars()
+            .take(120)
+            .collect::<String>()
+            .replace(char::is_whitespace, " ")
+    )
 }
 
 fn vpn_login_error(final_url: &str, body: &str) -> Result<()> {

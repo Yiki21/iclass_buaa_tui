@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Local, NaiveDateTime};
 use ecb::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyInit, block_padding::Pkcs7};
 use rand::{RngExt, prelude::IndexedRandom, rng};
-use reqwest::header::REFERER;
+use reqwest::header::{ORIGIN, REFERER};
 use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
 use scraper::{Html, Selector};
 use sha1::{Digest, Sha1};
@@ -301,20 +301,23 @@ pub(super) async fn vpn_login(
         .context("获取 SSO 登录页失败")?;
     let login_url = response.url().to_string();
     let body = response.text().await.context("读取 SSO 登录页失败")?;
-    let execution = {
+    let (action_url, execution) = {
         let document = Html::parse_document(&body);
+        let action_url = resolve_login_form_action(&login_url, &document)?;
         let selector = Selector::parse(r#"input[name="execution"]"#)
             .map_err(|_| anyhow!("SSO 页面选择器构造失败"))?;
-        document
+        let execution = document
             .select(&selector)
             .next()
             .and_then(|node| node.value().attr("value"))
             .map(|value| value.to_string())
-            .ok_or_else(|| anyhow!("无法从 SSO 登录页面解析 execution 参数"))?
+            .ok_or_else(|| anyhow!("无法从 SSO 登录页面解析 execution 参数"))?;
+        (action_url, execution)
     };
 
     let response = client
-        .post(&login_url)
+        .post(&action_url)
+        .header(ORIGIN, "https://d.buaa.edu.cn")
         .header(REFERER, &login_url)
         .form(&[
             ("username", username.trim()),
@@ -341,6 +344,24 @@ pub(super) async fn vpn_login(
         bail!("VPN 登录失败，仍停留在统一认证页面");
     }
     Ok(())
+}
+
+fn resolve_login_form_action(login_url: &str, document: &Html) -> Result<String> {
+    let selector =
+        Selector::parse(r#"form#loginForm"#).map_err(|_| anyhow!("SSO 表单选择器构造失败"))?;
+    let Some(action) = document
+        .select(&selector)
+        .next()
+        .and_then(|node| node.value().attr("action"))
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(login_url.to_string());
+    };
+
+    reqwest::Url::parse(login_url)
+        .and_then(|base| base.join(action))
+        .map(|url| url.to_string())
+        .with_context(|| format!("解析 SSO 登录表单提交地址失败: {action}"))
 }
 
 /// Course status shown in the selectable-course list.
