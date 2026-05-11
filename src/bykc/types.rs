@@ -16,6 +16,7 @@ pub struct BykcCourse {
     pub course_current_count: i32,
     pub category: String,
     pub sub_category: String,
+    pub course_sign_type: Option<i32>,
     pub has_sign_points: bool,
     pub status: String,
     pub selected: bool,
@@ -44,6 +45,7 @@ pub struct BykcCourseDetail {
     pub status: String,
     pub selected: bool,
     pub course_desc: String,
+    pub course_sign_type: Option<i32>,
     pub sign_config: Option<BykcSignConfig>,
     pub checkin: Option<i32>,
     pub pass: Option<i32>,
@@ -71,8 +73,28 @@ pub struct BykcChosenCourse {
     pub pass:                   Option<i32>,
     pub can_sign:               bool,
     pub can_sign_out:           bool,
+    pub course_sign_type:       Option<i32>,
     pub sign_config:            Option<BykcSignConfig>,
     pub sign_info:              String,
+}
+
+/// BYKC course completion statistics shown in the workspace header.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default)]
+pub struct BykcStatistics {
+    pub total_valid_count: i32,
+    pub categories:        Vec<BykcCategoryStatistics>,
+}
+
+/// One BYKC category/sub-category completion row.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default)]
+pub struct BykcCategoryStatistics {
+    pub category_name:  String,
+    pub sub_category:   String,
+    pub required_count: i32,
+    pub passed_count:   i32,
+    pub is_qualified:   bool,
 }
 
 /// Attendance time window and allowed sign points from BYKC.

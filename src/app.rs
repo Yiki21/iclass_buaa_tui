@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bykc::{
-    BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcSignAction,
+    BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcSignAction, BykcStatistics,
     can_deselect_bykc_course,
 };
 use crate::model::{CourseDetailItem, LoginInput, Session, SignOutcome};
@@ -209,6 +209,8 @@ pub struct BykcState {
     pub selected_course:   usize,
     pub chosen_courses:    Vec<BykcChosenCourse>,
     pub selected_chosen:   usize,
+    pub statistics:        Option<BykcStatistics>,
+    pub statistics_error:  Option<String>,
     pub detail:            Option<BykcCourseDetail>,
     pub detail_cache:      HashMap<i64, BykcCourseDetail>,
     pub detail_course_id:  Option<i64>,
@@ -270,6 +272,8 @@ impl BykcState {
         &mut self,
         courses: Vec<BykcCourse>,
         chosen_courses: Vec<BykcChosenCourse>,
+        statistics: Option<BykcStatistics>,
+        statistics_error: Option<String>,
         detail: Option<BykcCourseDetail>,
     ) {
         let previous_course_id = self.selected_course().map(|course| course.id);
@@ -296,6 +300,8 @@ impl BykcState {
         }
 
         self.loaded = true;
+        self.statistics = statistics;
+        self.statistics_error = statistics_error;
         if let Some(detail) = detail {
             self.detail_course_id = Some(detail.id);
             self.detail_cache.insert(detail.id, detail.clone());
@@ -328,6 +334,8 @@ impl BykcState {
 pub struct BykcSyncSuccess {
     pub courses:           Vec<BykcCourse>,
     pub chosen_courses:    Vec<BykcChosenCourse>,
+    pub statistics:        Option<BykcStatistics>,
+    pub statistics_error:  Option<String>,
     pub detail:            Option<BykcCourseDetail>,
     pub message:           Option<String>,
     pub open_detail_popup: bool,
@@ -608,7 +616,7 @@ impl App {
                     self.status = if outcome.success_like {
                         "签到成功".to_string()
                     } else {
-                        format!("签到结果: {}", outcome.message)
+                        format!("签到失败: {}", outcome.message)
                     };
 
                     if outcome.success_like
@@ -633,7 +641,13 @@ impl App {
                         )
                     });
                     self.bykc
-                        .replace_data(data.courses, data.chosen_courses, data.detail);
+                        .replace_data(
+                            data.courses,
+                            data.chosen_courses,
+                            data.statistics,
+                            data.statistics_error,
+                            data.detail,
+                        );
                     self.bykc.show_detail_popup = data.open_detail_popup;
                     self.status = message;
                 }
@@ -1512,6 +1526,10 @@ async fn build_bykc_sync_success(
 ) -> anyhow::Result<BykcSyncSuccess> {
     let courses = api.get_courses(include_all).await?;
     let chosen_courses = api.get_chosen_courses().await?;
+    let (statistics, statistics_error) = match api.get_statistics().await {
+        Ok(statistics) => (Some(statistics), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
     let detail_target = resolve_bykc_detail_target(detail_target, &courses, &chosen_courses);
     let detail = if let Some(course_id) = detail_target {
         if require_detail {
@@ -1526,6 +1544,8 @@ async fn build_bykc_sync_success(
     Ok(BykcSyncSuccess {
         courses,
         chosen_courses,
+        statistics,
+        statistics_error,
         detail,
         message,
         open_detail_popup,

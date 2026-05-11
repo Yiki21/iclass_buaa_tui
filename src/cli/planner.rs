@@ -260,6 +260,16 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
                     target.name,
                     outcome.message
                 );
+                if !outcome.success_like {
+                    failures.push(format!(
+                        "[{}:{}] {} ({}) -> {}",
+                        target.source.label(),
+                        target.action.label(),
+                        target.name,
+                        target.target_id,
+                        outcome.message
+                    ));
+                }
             }
             Err(error) => {
                 failures.push(format!(

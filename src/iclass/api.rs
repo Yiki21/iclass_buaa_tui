@@ -214,23 +214,29 @@ impl IClassApi {
 
         let http_status = response.status().as_u16();
         let raw_response = parse_json(response).await.context("签到响应解析失败")?;
-        ensure_status_ok(&raw_response).context("签到失败")?;
 
         let server_status = raw_response
             .get("STATUS")
             .map(|value| value_to_string(Some(value)))
             .unwrap_or_default();
-        let message = raw_response
-            .get("ERRMSG")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .or_else(|| raw_response.get("MSG").and_then(Value::as_str))
-            .unwrap_or("已提交")
-            .to_string();
+        let stu_sign_status = raw_response
+            .get("result")
+            .and_then(|value| value.get("stuSignStatus"))
+            .map(|value| value_to_string(Some(value)));
+        let success_like = (200..300).contains(&http_status)
+            && server_status == "0"
+            && stu_sign_status.as_deref().is_none_or(|status| status == "1");
+        let message = sign_response_message(
+            &raw_response,
+            success_like,
+            http_status,
+            &server_status,
+            stu_sign_status.as_deref(),
+        );
 
         Ok(SignOutcome {
             message,
-            success_like: true,
+            success_like,
             http_status,
             server_status,
             raw_response,
@@ -839,6 +845,63 @@ fn ensure_status_ok(data: &Value) -> Result<()> {
     bail!("iClass API 返回错误: {}", data);
 }
 
+/// Builds a user-facing explanation for iClass sign responses.
+fn sign_response_message(
+    data: &Value,
+    success: bool,
+    http_status: u16,
+    server_status: &str,
+    stu_sign_status: Option<&str>,
+) -> String {
+    let raw_message = data
+        .get("ERRMSG")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            data.get("MSG")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            data.get("message")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+
+    if success {
+        return raw_message.unwrap_or("签到成功").to_string();
+    }
+
+    let raw_message = raw_message.unwrap_or_default().trim();
+    if raw_message.contains("已签到") {
+        return "您今天已经签到过了".to_string();
+    }
+    if raw_message.contains("未开始") {
+        return "当前还未到签到时间".to_string();
+    }
+    if raw_message.contains("不是上课时间") {
+        return "当前不是上课时间，无法签到".to_string();
+    }
+    if raw_message.contains("已结束") {
+        return "本次签到已结束".to_string();
+    }
+    if raw_message.contains("范围") {
+        return "当前不在可签到范围内".to_string();
+    }
+    if raw_message.contains("课程") && raw_message.contains("不存在") {
+        return "未找到对应课程，请刷新后重试".to_string();
+    }
+    if !raw_message.is_empty() {
+        return raw_message.to_string();
+    }
+
+    let server_status = empty_dash(server_status);
+    let stu_sign_status = empty_dash(stu_sign_status.unwrap_or_default());
+    format!(
+        "签到失败，上游未返回具体原因 (HTTP {http_status}, STATUS {server_status}, stuSignStatus {stu_sign_status})"
+    )
+}
+
 /// Normalizes date-like fields into `YYYY-MM-DD` for stable display and merge keys.
 fn normalize_date_display(raw: &str) -> String {
     let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -879,6 +942,10 @@ fn value_to_string(value: Option<&Value>) -> String {
         Some(Value::Bool(v)) => v.to_string(),
         _ => String::new(),
     }
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.trim().is_empty() { "-" } else { value }
 }
 
 /// Percent-encodes one query component for QR URL generation.

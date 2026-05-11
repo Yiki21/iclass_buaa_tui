@@ -388,13 +388,15 @@ fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     let header_text = if let Some(session) = &app.session {
+        let statistics = bykc_statistics_summary(app);
         format!(
-            "用户: {} ({}) | VPN: {} | 可选 {} 门 | 已选 {} 门",
+            "用户: {} ({}) | VPN: {} | 可选 {} 门 | 已选 {} 门 | {}",
             session.user_name,
             session.user_id,
             if session.use_vpn { "开启" } else { "关闭" },
             app.bykc.courses.len(),
             app.bykc.chosen_courses.len(),
+            statistics,
         )
     } else {
         "未登录".to_string()
@@ -465,14 +467,17 @@ fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
                     course.status.as_str()
                 };
                 let label = format!(
-                    "[{}] {} | {} | {}/{}",
+                    "[{}] {} | {} | {} | {} | {} | {}/{}",
                     selected_tag,
                     course.course_name,
+                    empty_dash(&course.sub_category),
                     if course.course_teacher.is_empty() {
                         "未知教师"
                     } else {
                         course.course_teacher.as_str()
                     },
+                    bykc_sign_type_label(course.course_sign_type),
+                    bykc_self_sign_label(course.has_sign_points),
                     course.course_current_count,
                     course.course_max_count,
                 );
@@ -509,9 +514,19 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     "不可操作"
                 };
+                let has_sign_points = course
+                    .sign_config
+                    .as_ref()
+                    .is_some_and(|config| !config.sign_points.is_empty());
                 let label = format!(
-                    "[{}] {} | checkin={} | {}",
-                    attendance, course.course_name, course.checkin, course.sign_info
+                    "[{}] {} | {} | {} | {} | checkin={} | {}",
+                    attendance,
+                    course.course_name,
+                    empty_dash(&course.sub_category),
+                    bykc_sign_type_label(course.course_sign_type),
+                    bykc_self_sign_label(has_sign_points),
+                    course.checkin,
+                    course.sign_info
                 );
                 ListItem::new(label)
             })
@@ -563,6 +578,23 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled("状态: ", Style::default().fg(Color::Yellow)),
                 Span::raw(detail.status.as_str()),
+            ]),
+            Line::from(vec![
+                Span::styled("分类: ", Style::default().fg(Color::Yellow)),
+                Span::raw(bykc_category_label(&detail.category, &detail.sub_category)),
+            ]),
+            Line::from(vec![
+                Span::styled("签到模式: ", Style::default().fg(Color::Yellow)),
+                Span::raw(bykc_sign_type_label(detail.course_sign_type)),
+            ]),
+            Line::from(vec![
+                Span::styled("自主签到: ", Style::default().fg(Color::Yellow)),
+                Span::raw(bykc_self_sign_value(
+                    detail
+                        .sign_config
+                        .as_ref()
+                        .is_some_and(|config| !config.sign_points.is_empty()),
+                )),
             ]),
             Line::from(vec![
                 Span::styled("选课时间: ", Style::default().fg(Color::Yellow)),
@@ -617,6 +649,18 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
                     Line::from(vec![
                         Span::styled("状态: ", Style::default().fg(Color::Yellow)),
                         Span::raw(course.status.as_str()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("分类: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(bykc_category_label(&course.category, &course.sub_category)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("签到模式: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(bykc_sign_type_label(course.course_sign_type)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("自主签到: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(bykc_self_sign_value(course.has_sign_points)),
                     ]),
                     Line::from(vec![
                         Span::styled("教师: ", Style::default().fg(Color::Yellow)),
@@ -685,6 +729,23 @@ fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
                     Line::from(vec![
                         Span::styled("签到状态: ", Style::default().fg(Color::Yellow)),
                         Span::raw(course.checkin.to_string()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("分类: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(bykc_category_label(&course.category, &course.sub_category)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("签到模式: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(bykc_sign_type_label(course.course_sign_type)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("自主签到: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(bykc_self_sign_value(
+                            course
+                                .sign_config
+                                .as_ref()
+                                .is_some_and(|config| !config.sign_points.is_empty()),
+                        )),
                     ]),
                     Line::from(vec![
                         Span::styled("教师: ", Style::default().fg(Color::Yellow)),
@@ -809,6 +870,23 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("状态: ", Style::default().fg(Color::Yellow)),
             Span::raw(detail.status.as_str()),
+        ]),
+        Line::from(vec![
+            Span::styled("分类: ", Style::default().fg(Color::Yellow)),
+            Span::raw(bykc_category_label(&detail.category, &detail.sub_category)),
+        ]),
+        Line::from(vec![
+            Span::styled("签到模式: ", Style::default().fg(Color::Yellow)),
+            Span::raw(bykc_sign_type_label(detail.course_sign_type)),
+        ]),
+        Line::from(vec![
+            Span::styled("自主签到: ", Style::default().fg(Color::Yellow)),
+            Span::raw(bykc_self_sign_value(
+                detail
+                    .sign_config
+                    .as_ref()
+                    .is_some_and(|config| !config.sign_points.is_empty()),
+            )),
         ]),
         Line::from(vec![
             Span::styled("签到窗口: ", Style::default().fg(Color::Yellow)),
@@ -1062,6 +1140,68 @@ fn qr_module_count(code: &QrCode) -> u16 {
 
 fn mask_password(value: &str) -> String {
     "*".repeat(value.chars().count())
+}
+
+fn bykc_sign_type_label(value: Option<i32>) -> &'static str {
+    match value {
+        Some(1) => "仅签到",
+        Some(2) => "签到+签退",
+        Some(_) => "未知签到模式",
+        None => "无签到模式",
+    }
+}
+
+fn bykc_self_sign_label(has_sign_points: bool) -> &'static str {
+    if has_sign_points {
+        "自主签到"
+    } else {
+        "非自主签到"
+    }
+}
+
+fn bykc_self_sign_value(has_sign_points: bool) -> &'static str {
+    if has_sign_points { "是" } else { "否" }
+}
+
+fn bykc_category_label(category: &str, sub_category: &str) -> String {
+    match (category.trim().is_empty(), sub_category.trim().is_empty()) {
+        (false, false) => format!("{category}/{sub_category}"),
+        (false, true) => category.to_string(),
+        (true, false) => sub_category.to_string(),
+        (true, true) => "-".to_string(),
+    }
+}
+
+fn bykc_statistics_summary(app: &App) -> String {
+    if let Some(statistics) = &app.bykc.statistics {
+        let rows = statistics
+            .categories
+            .iter()
+            .map(|item| {
+                let status = if item.is_qualified { "达标" } else { "未达标" };
+                format!(
+                    "{} {}/{} {}",
+                    empty_dash(&item.sub_category),
+                    item.passed_count,
+                    item.required_count,
+                    status
+                )
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            format!("统计: 有效 {}", statistics.total_valid_count)
+        } else {
+            format!(
+                "统计: 有效 {} [{}]",
+                statistics.total_valid_count,
+                rows.join(", ")
+            )
+        }
+    } else if let Some(error) = &app.bykc.statistics_error {
+        format!("统计加载失败: {error}")
+    } else {
+        "统计: 未加载".to_string()
+    }
 }
 
 fn empty_dash(value: &str) -> String {

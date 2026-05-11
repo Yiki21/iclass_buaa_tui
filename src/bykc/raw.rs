@@ -58,6 +58,29 @@ pub(super) struct BykcChosenCoursePayload {
     pub(super) course_list: Vec<BykcChosenCourseRaw>,
 }
 
+/// Raw BYKC completion statistics payload.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct BykcStatisticsRaw {
+    #[serde(default)]
+    pub(super) valid_count: i32,
+    #[serde(default)]
+    pub(super) statistical: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, BykcSubCategoryStatsRaw>,
+    >,
+}
+
+/// Raw BYKC category/sub-category requirement row.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct BykcSubCategoryStatsRaw {
+    #[serde(default)]
+    pub(super) assessment_count:          i32,
+    #[serde(default)]
+    pub(super) complete_assessment_count: i32,
+}
+
 /// Raw course record returned by multiple BYKC APIs.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +118,8 @@ pub(super) struct BykcCourseRaw {
     pub(super) course_contact: Option<String>,
     #[serde(default)]
     pub(super) course_contact_mobile: Option<String>,
+    #[serde(default)]
+    pub(super) course_sign_type: Option<i32>,
     #[serde(default)]
     pub(super) course_sign_config: Option<String>,
 }

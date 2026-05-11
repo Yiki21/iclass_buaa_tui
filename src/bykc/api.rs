@@ -20,8 +20,9 @@ use super::helpers::{
 use super::raw::{
     BykcAllConfig, BykcApiResponse, BykcChosenCoursePayload, BykcChosenCourseRaw,
     BykcCourseActionResult, BykcCourseKind, BykcCoursePageResult, BykcCourseRaw,
+    BykcStatisticsRaw,
 };
-use super::types::{BykcChosenCourse, BykcCourse, BykcCourseDetail};
+use super::types::{BykcCategoryStatistics, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcStatistics};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BykcSignAction {
@@ -149,6 +150,7 @@ impl BykcApi {
                     course_current_count: course.course_current_count.unwrap_or_default(),
                     category,
                     sub_category,
+                    course_sign_type: course.course_sign_type,
                     has_sign_points: sign_config
                         .as_ref()
                         .is_some_and(|item| !item.sign_points.is_empty()),
@@ -198,11 +200,49 @@ impl BykcApi {
                     pass: chosen.pass,
                     can_sign: availability.can_sign,
                     can_sign_out: availability.can_sign_out,
+                    course_sign_type: course.course_sign_type,
                     sign_config,
                     sign_info: chosen.sign_info.unwrap_or_default(),
                 }
             })
             .collect())
+    }
+
+    /// Loads BYKC completion statistics for the current user.
+    pub async fn get_statistics(&self) -> Result<BykcStatistics> {
+        self.ensure_login(false).await?;
+        let data: BykcStatisticsRaw = self.call_api("queryStatisticByUserId", "{}").await?;
+        let mut categories = Vec::new();
+
+        for (category_key, sub_categories) in data.statistical {
+            let category_name = statistics_key_label(&category_key);
+            for (sub_category_key, stats) in sub_categories {
+                categories.push(BykcCategoryStatistics {
+                    category_name: category_name.clone(),
+                    sub_category: statistics_key_label(&sub_category_key),
+                    required_count: stats.assessment_count,
+                    passed_count: stats.complete_assessment_count,
+                    is_qualified: stats.complete_assessment_count >= stats.assessment_count,
+                });
+            }
+        }
+        categories.sort_by(|a, b| {
+            (
+                a.category_name.as_str(),
+                a.sub_category.as_str(),
+                a.required_count,
+            )
+                .cmp(&(
+                    b.category_name.as_str(),
+                    b.sub_category.as_str(),
+                    b.required_count,
+                ))
+        });
+
+        Ok(BykcStatistics {
+            total_valid_count: data.valid_count,
+            categories,
+        })
     }
 
     /// Loads a single course detail and resolves sign-in availability.
@@ -258,6 +298,7 @@ impl BykcApi {
             status: status.display_name().to_string(),
             selected: course.selected.unwrap_or(false),
             course_desc: html_to_text(course.course_desc.as_deref()),
+            course_sign_type: course.course_sign_type,
             sign_config,
             checkin,
             pass,
@@ -606,4 +647,13 @@ fn course_kind_names(course: &BykcCourseRaw) -> (String, String) {
 /// Normalizes an optional BYKC category node into a plain display string.
 fn course_kind_name(kind: Option<&BykcCourseKind>) -> String {
     kind.map(|item| item.kind_name.clone()).unwrap_or_default()
+}
+
+fn statistics_key_label(value: &str) -> String {
+    value
+        .split('|')
+        .next_back()
+        .unwrap_or(value)
+        .trim()
+        .to_string()
 }
