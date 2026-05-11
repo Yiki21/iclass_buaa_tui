@@ -179,17 +179,17 @@ impl IClassApi {
         Ok(merged)
     }
 
-    /// Submits one immediate iClass sign request using the server-aligned timestamp.
+    /// Submits one immediate iClass sign request using iClass' own sign timestamp.
     ///
     /// Why:
-    /// iClass sign requests are sensitive to server time drift. Reusing the
-    /// offset captured at login keeps the CLI and TUI aligned with the server's
-    /// notion of "now" without adding extra round trips before every sign.
+    /// iClass sign requests are sensitive to the timestamp format and clock used
+    /// by the port-8081 sign service. UBAA's backend fetches that timestamp from
+    /// `get_timestamp.action` immediately before posting the sign request, which
+    /// avoids the VPN path sending a locally inferred millisecond value.
     ///
     /// How:
-    /// Reuse the same JSON parsing and business-status check as the other iClass
-    /// endpoints so sign requests fail consistently on malformed responses or
-    /// non-zero `STATUS` codes instead of silently inventing a fallback payload.
+    /// Match the upstream request shape: `courseSchedId` and `timestamp` stay in
+    /// the query string, while `id` is submitted as form data.
     pub async fn sign_now(&self, session: &Session, course_sched_id: &str) -> Result<SignOutcome> {
         let course_sched_id = course_sched_id.trim();
         if course_sched_id.is_empty() {
@@ -197,17 +197,17 @@ impl IClassApi {
         }
 
         let urls = network_urls(self.use_vpn);
-        let timestamp = session.server_now_millis().to_string();
+        let timestamp = self.fetch_sign_timestamp().await?;
 
         let response = self
             .client
             .post(urls.scan_sign)
             .query(&[
-                ("id", session.user_id.as_str()),
                 ("courseSchedId", course_sched_id),
                 ("timestamp", timestamp.as_str()),
             ])
             .header("sessionId", &session.session_id)
+            .form(&[("id", session.user_id.as_str())])
             .send()
             .await
             .context("签到请求失败")?;
@@ -218,9 +218,8 @@ impl IClassApi {
 
         let server_status = raw_response
             .get("STATUS")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+            .map(|value| value_to_string(Some(value)))
+            .unwrap_or_default();
         let message = raw_response
             .get("ERRMSG")
             .and_then(Value::as_str)
@@ -236,6 +235,26 @@ impl IClassApi {
             server_status,
             raw_response,
         })
+    }
+
+    /// Loads the timestamp expected by iClass' port-8081 sign endpoint.
+    async fn fetch_sign_timestamp(&self) -> Result<String> {
+        let urls = network_urls(self.use_vpn);
+        let data = parse_json(
+            self.client
+                .get(urls.sign_timestamp)
+                .send()
+                .await
+                .context("获取 iClass 签到服务器时间失败")?,
+        )
+        .await
+        .context("解析 iClass 签到服务器时间失败")?;
+
+        let timestamp = value_to_string(data.get("timestamp")).trim().to_string();
+        if timestamp.is_empty() {
+            bail!("iClass 签到服务器时间响应格式异常: {data}");
+        }
+        Ok(timestamp)
     }
 
     /// Builds the QR payload that the mobile client would normally scan.
@@ -637,7 +656,12 @@ impl IClassApi {
         )
         .await?;
 
-        if data.get("STATUS").and_then(Value::as_str) == Some("2") {
+        if data
+            .get("STATUS")
+            .map(|value| value_to_string(Some(value)))
+            .as_deref()
+            == Some("2")
+        {
             return Ok(Vec::new());
         }
         ensure_status_ok(&data)?;
@@ -808,7 +832,8 @@ async fn parse_json(response: reqwest::Response) -> Result<Value> {
 /// Many iClass endpoints return HTTP 200 even when the operation failed, so the
 /// JSON `STATUS` field is the real success signal.
 fn ensure_status_ok(data: &Value) -> Result<()> {
-    if data.get("STATUS").and_then(Value::as_str) == Some("0") {
+    let status = data.get("STATUS").map(|value| value_to_string(Some(value)));
+    if status.as_deref() == Some("0") {
         return Ok(());
     }
     bail!("iClass API 返回错误: {}", data);

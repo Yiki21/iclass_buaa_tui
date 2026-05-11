@@ -28,6 +28,7 @@ pub struct NetworkUrls {
     pub course_list:             &'static str,
     pub semester_list:           &'static str,
     pub course_sign_detail:      &'static str,
+    pub sign_timestamp:          &'static str,
     pub scan_sign:               &'static str,
     pub course_schedule_by_date: &'static str,
 }
@@ -40,7 +41,8 @@ pub fn network_urls(use_vpn: bool) -> NetworkUrls {
             course_list:             "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/choosecourse/get_myall_course.action",
             semester_list:           "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/course/get_base_school_year.action",
             course_sign_detail:      "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/my/get_my_course_sign_detail.action",
-            scan_sign:               "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/course/stu_scan_sign.action",
+            sign_timestamp:          "https://d.buaa.edu.cn/http-8081/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/common/get_timestamp.action",
+            scan_sign:               "https://d.buaa.edu.cn/http-8081/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/course/stu_scan_sign.action",
             course_schedule_by_date: "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/course/get_stu_course_sched.action",
         }
     } else {
@@ -50,6 +52,7 @@ pub fn network_urls(use_vpn: bool) -> NetworkUrls {
             course_list:             "https://iclass.buaa.edu.cn:8347/app/choosecourse/get_myall_course.action",
             semester_list:           "https://iclass.buaa.edu.cn:8347/app/course/get_base_school_year.action",
             course_sign_detail:      "https://iclass.buaa.edu.cn:8347/app/my/get_my_course_sign_detail.action",
+            sign_timestamp:          "http://iclass.buaa.edu.cn:8081/app/common/get_timestamp.action",
             scan_sign:               "http://iclass.buaa.edu.cn:8081/app/course/stu_scan_sign.action",
             course_schedule_by_date: "https://iclass.buaa.edu.cn:8347/app/course/get_stu_course_sched.action",
         }
