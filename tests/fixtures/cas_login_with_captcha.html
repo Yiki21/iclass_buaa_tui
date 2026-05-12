@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>北京航空航天大学统一身份认证</title>
+  </head>
+  <body>
+    <main>
+      <form id="fm1" action="/login?service=https%3A%2F%2Ficlass.example.invalid%2Fcas" method="post">
+        <input type="hidden" name="execution" value="e1s1">
+        <input type="hidden" name="lt" value="LT-REDACTED">
+        <input type="hidden" name="_eventId" value="submit">
+        <input type="hidden" name="type" value="username_password">
+        <input name="username" value="">
+        <input type="password" name="password" value="">
+        <input name="captchaResponse" value="">
+        <button type="submit" name="submit" value="登录">登录</button>
+      </form>
+      <img alt="captcha" src="/captcha?captchaId=fixture-captcha-1">
+      <script>
+        window.config = { captcha: { type: "image", id: "fixture-captcha-1" } };
+      </script>
+    </main>
+  </body>
+</html>
