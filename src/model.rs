@@ -2,9 +2,11 @@
 
 use crate::bykc::BykcApi;
 use crate::iclass::IClassApi;
+use serde::Serialize;
 
 /// Login credentials normalized from either the TUI form or the CLI config file.
 #[derive(Clone, Debug, Default)]
+
 pub struct LoginInput {
     pub student_id:   String,
     pub use_vpn:      bool,
@@ -14,6 +16,7 @@ pub struct LoginInput {
 
 /// Login session shared across TUI and CLI operations.
 #[derive(Clone, Debug)]
+
 pub struct Session {
     pub api:                   IClassApi,
     pub bykc_api:              Option<BykcApi>,
@@ -26,12 +29,14 @@ pub struct Session {
 }
 
 #[derive(Clone, Debug)]
+
 pub struct CourseItem {
     pub name: String,
     pub id:   String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+
 pub struct CourseDetailItem {
     pub name:            String,
     pub id:              String,
@@ -43,6 +48,7 @@ pub struct CourseDetailItem {
 }
 
 #[derive(Clone, Debug)]
+
 pub struct SignOutcome {
     pub message:       String,
     pub success_like:  bool,
@@ -53,22 +59,76 @@ pub struct SignOutcome {
 }
 
 #[derive(Clone, Debug)]
+
 pub struct SignQrData {
     pub qr_url:          String,
     pub course_sched_id: String,
     pub timestamp:       i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+
+pub enum LoginFailureKind {
+    Validation,
+    Network,
+    Timeout,
+    Dns,
+    Http,
+    Captcha,
+    Credentials,
+    SsoChanged,
+    IclassApi,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize)]
+
+pub struct LoginDiagnostic {
+    pub kind:        LoginFailureKind,
+    pub stage:       String,
+    pub summary:     String,
+    pub error_chain: Vec<String>,
+    pub final_url:   Option<String>,
+    pub http_status: Option<u16>,
+    pub page_hint:   Option<String>,
+    pub suggestions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+
+pub struct DoctorCheck {
+    pub name:           String,
+    pub target:         String,
+    pub elapsed_ms:     u128,
+    pub ok:             bool,
+    pub status:         String,
+    pub http_status:    Option<u16>,
+    pub final_url:      Option<String>,
+    pub suggestion:     String,
+    pub resolved_addrs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+
+pub struct DoctorReport {
+    pub use_vpn: bool,
+    pub checks:  Vec<DoctorCheck>,
+}
+
 impl CourseDetailItem {
     /// Returns whether iClass already marks this row as signed.
+
     pub fn signed(&self) -> bool {
+
         self.sign_status == "1"
     }
 }
 
 impl Session {
     /// Returns the current server-aligned timestamp in milliseconds.
+
     pub fn server_now_millis(&self) -> i64 {
+
         chrono::Utc::now()
             .timestamp_millis()
             .saturating_add(self.server_time_offset_ms)

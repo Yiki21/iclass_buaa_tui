@@ -4,6 +4,7 @@ use chrono::{DateTime, Local};
 
 /// A normalized sign target used by the planner and retry logic.
 #[derive(Debug, Clone)]
+
 pub(crate) struct ListedTarget {
     pub(crate) source:     SignSource,
     pub(crate) action:     SignAction,
@@ -17,6 +18,7 @@ pub(crate) struct ListedTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+
 pub(crate) enum SignSource {
     IClass,
     Bykc,
@@ -24,6 +26,7 @@ pub(crate) enum SignSource {
 
 impl SignSource {
     pub(crate) fn label(self) -> &'static str {
+
         match self {
             Self::IClass => "iclass",
             Self::Bykc => "bykc",
@@ -32,6 +35,7 @@ impl SignSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+
 pub(crate) enum SignAction {
     SignIn,
     SignOut,
@@ -39,6 +43,7 @@ pub(crate) enum SignAction {
 
 impl SignAction {
     pub(crate) fn label(self) -> &'static str {
+
         match self {
             Self::SignIn => "sign-in",
             Self::SignOut => "sign-out",
@@ -48,6 +53,7 @@ impl SignAction {
 
 /// Retry behavior shared by course fetch and sign operations.
 #[derive(Debug, Clone)]
+
 pub(crate) struct RetryPolicy {
     pub(crate) max_attempts:     u32,
     pub(crate) interval_seconds: u64,
@@ -55,6 +61,7 @@ pub(crate) struct RetryPolicy {
 
 /// Planner state for a course in the current automation cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+
 pub(crate) enum PollStatusKind {
     /// The planner has not reached the configured daily start time yet.
     WaitingForDailyStart,
@@ -72,6 +79,7 @@ pub(crate) enum PollStatusKind {
 
 /// A sign target plus its computed planner state and first eligible sign time.
 #[derive(Debug, Clone)]
+
 pub(crate) struct EvaluatedCourse {
     pub(crate) course:       ListedTarget,
     pub(crate) status:       PollStatusKind,

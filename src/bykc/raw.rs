@@ -5,6 +5,7 @@ use serde::Deserialize;
 /// Generic outer response envelope used by BYKC APIs.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcApiResponse<T> {
     pub(super) status: String,
     #[serde(default)]
@@ -15,6 +16,7 @@ pub(super) struct BykcApiResponse<T> {
 
 impl<T> BykcApiResponse<T> {
     pub(super) fn is_success(&self) -> bool {
+
         self.status == "0"
     }
 }
@@ -22,6 +24,7 @@ impl<T> BykcApiResponse<T> {
 /// Paged payload returned by the course-list query.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcCoursePageResult {
     #[serde(default)]
     pub(super) content:     Vec<BykcCourseRaw>,
@@ -30,11 +33,13 @@ pub(super) struct BykcCoursePageResult {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+
 pub(super) struct BykcCourseActionResult {}
 
 /// Global BYKC configuration containing the active semester range.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcAllConfig {
     #[serde(default)]
     pub(super) semester: Vec<BykcSemester>,
@@ -43,6 +48,7 @@ pub(super) struct BykcAllConfig {
 /// Semester definition extracted from the BYKC config response.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcSemester {
     #[serde(default)]
     pub(super) semester_start_date: Option<String>,
@@ -53,6 +59,7 @@ pub(super) struct BykcSemester {
 /// Payload wrapper around the chosen-course list.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcChosenCoursePayload {
     #[serde(default)]
     pub(super) course_list: Vec<BykcChosenCourseRaw>,
@@ -61,6 +68,7 @@ pub(super) struct BykcChosenCoursePayload {
 /// Raw BYKC completion statistics payload.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcStatisticsRaw {
     #[serde(default)]
     pub(super) valid_count: i32,
@@ -74,6 +82,7 @@ pub(super) struct BykcStatisticsRaw {
 /// Raw BYKC category/sub-category requirement row.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcSubCategoryStatsRaw {
     #[serde(default)]
     pub(super) assessment_count:          i32,
@@ -84,6 +93,7 @@ pub(super) struct BykcSubCategoryStatsRaw {
 /// Raw course record returned by multiple BYKC APIs.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcCourseRaw {
     pub(super) id: i64,
     #[serde(default)]
@@ -127,6 +137,7 @@ pub(super) struct BykcCourseRaw {
 /// Raw category node embedded in a BYKC course record.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcCourseKind {
     #[serde(default)]
     pub(super) kind_name: String,
@@ -135,6 +146,7 @@ pub(super) struct BykcCourseKind {
 /// Raw chosen-course record returned by BYKC.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcChosenCourseRaw {
     pub(super) id:          i64,
     #[serde(default)]
@@ -154,6 +166,7 @@ pub(super) struct BykcChosenCourseRaw {
 /// Raw JSON structure stored inside `courseSignConfig`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcSignConfigRaw {
     #[serde(default)]
     pub(super) sign_start_date:     Option<String>,
@@ -170,6 +183,7 @@ pub(super) struct BykcSignConfigRaw {
 /// Raw sign-point entry embedded in the sign config JSON.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+
 pub(super) struct BykcSignPointRaw {
     pub(super) lat:    f64,
     pub(super) lng:    f64,

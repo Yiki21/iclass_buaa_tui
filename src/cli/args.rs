@@ -9,12 +9,14 @@ use super::core::{SignAction, SignSource};
 /// Top-level CLI parser for automation commands.
 #[derive(Debug, Parser)]
 #[command(author, version, about = "BUAA iClass TUI and automation CLI")]
+
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: CommandKind,
 }
 
 #[derive(Debug, Subcommand)]
+
 pub(crate) enum CommandKind {
     /// Login and print today's filtered sign targets.
     ListToday(ListTodayArgs),
@@ -22,6 +24,8 @@ pub(crate) enum CommandKind {
     Sign(SignArgs),
     /// Run one automation cycle: fetch today's sign targets and sign due ones.
     Plan(PlanArgs),
+    /// Check WebVPN, SSO, iClass, and BYKC connectivity before login.
+    Doctor(DoctorArgs),
     /// Install platform-native scheduled autologin automation.
     #[command(name = "install-autologin", alias = "install-systemd")]
     InstallAutologin(InstallAutologinArgs),
@@ -31,16 +35,21 @@ pub(crate) enum CommandKind {
 }
 
 #[derive(Debug, Args)]
+
 pub(crate) struct ListTodayArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
-    pub(crate) config: Option<PathBuf>,
+    pub(crate) config:      Option<PathBuf>,
     /// Print JSON instead of tab-separated text.
     #[arg(long)]
-    pub(crate) json:   bool,
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
 }
 
 #[derive(Debug, Args)]
+
 pub(crate) struct SignArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
@@ -69,9 +78,13 @@ pub(crate) struct SignArgs {
     /// Print server raw response and local timing diagnostics.
     #[arg(long)]
     pub(crate) debug:                  bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login:            bool,
 }
 
 #[derive(Debug, Args)]
+
 pub(crate) struct PlanArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
@@ -82,9 +95,24 @@ pub(crate) struct PlanArgs {
     /// Only print today's evaluation without attempting sign.
     #[arg(long)]
     pub(crate) dry_run:     bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
 }
 
 #[derive(Debug, Args)]
+
+pub(crate) struct DoctorArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config: Option<PathBuf>,
+    /// Print JSON instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:   bool,
+}
+
+#[derive(Debug, Args)]
+
 pub(crate) struct InstallAutologinArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
@@ -104,6 +132,7 @@ pub(crate) struct InstallAutologinArgs {
 }
 
 #[derive(Debug, Args)]
+
 pub(crate) struct UninstallAutologinArgs {
     /// Target directory containing generated scheduler files when applicable.
     #[arg(long)]
@@ -114,12 +143,14 @@ pub(crate) struct UninstallAutologinArgs {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+
 pub(crate) enum SignSourceArg {
     Iclass,
     Bykc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+
 pub(crate) enum SignActionArg {
     SignIn,
     SignOut,
@@ -127,6 +158,7 @@ pub(crate) enum SignActionArg {
 
 impl From<SignSourceArg> for SignSource {
     fn from(value: SignSourceArg) -> Self {
+
         match value {
             SignSourceArg::Iclass => Self::IClass,
             SignSourceArg::Bykc => Self::Bykc,
@@ -136,6 +168,7 @@ impl From<SignSourceArg> for SignSource {
 
 impl From<SignActionArg> for SignAction {
     fn from(value: SignActionArg) -> Self {
+
         match value {
             SignActionArg::SignIn => Self::SignIn,
             SignActionArg::SignOut => Self::SignOut,

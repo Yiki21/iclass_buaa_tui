@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-use crate::constants::{BYKC_PAGE_SIZE, BYKC_VPN_BASE};
+use crate::constants::BYKC_PAGE_SIZE;
 use crate::model::LoginInput;
 
 use super::helpers::{
@@ -19,12 +19,14 @@ use super::helpers::{
 };
 use super::raw::{
     BykcAllConfig, BykcApiResponse, BykcChosenCoursePayload, BykcChosenCourseRaw,
-    BykcCourseActionResult, BykcCourseKind, BykcCoursePageResult, BykcCourseRaw,
-    BykcStatisticsRaw,
+    BykcCourseActionResult, BykcCourseKind, BykcCoursePageResult, BykcCourseRaw, BykcStatisticsRaw,
 };
-use super::types::{BykcCategoryStatistics, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcStatistics};
+use super::types::{
+    BykcCategoryStatistics, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcStatistics,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+
 pub enum BykcSignAction {
     SignIn,
     SignOut,
@@ -32,6 +34,7 @@ pub enum BykcSignAction {
 
 impl BykcSignAction {
     pub fn success_message(self) -> &'static str {
+
         match self {
             Self::SignIn => "签到成功",
             Self::SignOut => "签退成功",
@@ -39,6 +42,7 @@ impl BykcSignAction {
     }
 
     fn sign_type(self) -> i32 {
+
         match self {
             Self::SignIn => 1,
             Self::SignOut => 2,
@@ -48,6 +52,7 @@ impl BykcSignAction {
 
 /// BYKC client responsible for login, encrypted API calls, and course operations.
 #[derive(Clone, Debug)]
+
 pub struct BykcApi {
     client:                 reqwest::Client,
     login_client:           reqwest::Client,
@@ -58,28 +63,36 @@ pub struct BykcApi {
 
 impl BykcApi {
     /// Creates a BYKC client bound to the login form used by the TUI.
+
     pub fn new(login_input: LoginInput) -> Result<Self> {
+
         let mut headers = HeaderMap::new();
+
         headers.insert(
             USER_AGENT,
             HeaderValue::from_static(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/134.0.0.0 Safari/537.36",
             ),
         );
+
         headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("zh-CN,zh;q=0.9"));
+
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/json, text/plain;q=0.9, */*;q=0.8"),
         );
 
         let cookie_jar = Arc::new(Jar::default());
+
         let default_headers = headers.clone();
+
         let client = reqwest::Client::builder()
             .cookie_provider(cookie_jar.clone())
             .default_headers(headers)
             .build()
             .context("failed to build bykc reqwest client")?;
+
         let login_client = reqwest::Client::builder()
             .cookie_provider(cookie_jar)
             .default_headers(default_headers)
@@ -97,35 +110,50 @@ impl BykcApi {
     }
 
     /// Loads every visible BYKC course page and maps it into the TUI course rows.
+
     pub async fn get_courses(&self, include_all: bool) -> Result<Vec<BykcCourse>> {
+
         self.ensure_login(false).await?;
 
         let mut courses = Vec::new();
+
         let first_page = self
             .query_student_semester_course_by_page(1, BYKC_PAGE_SIZE)
             .await?;
+
         let total_pages = first_page.total_pages.max(1) as usize;
+
         let mut page_results = vec![(1usize, first_page)];
 
         let mut tasks = Vec::with_capacity(total_pages.saturating_sub(1));
+
         for page_number in 2..=total_pages {
+
             let api = self.clone();
+
             tasks.push(tokio::spawn(async move {
+
                 let result = api
                     .query_student_semester_course_by_page(page_number, BYKC_PAGE_SIZE)
                     .await?;
+
                 Ok::<(usize, BykcCoursePageResult), anyhow::Error>((page_number, result))
             }));
         }
 
         for task in tasks {
+
             page_results.push(task.await.context("博雅课程分页任务执行失败")??);
         }
+
         page_results.sort_by_key(|(page_number, _)| *page_number);
 
         for (_, result) in page_results {
+
             for course in result.content {
+
                 let status = calculate_course_status(&course);
+
                 if !include_all
                     && matches!(
                         status,
@@ -133,10 +161,14 @@ impl BykcApi {
                             | super::helpers::BykcCourseStatus::Ended
                     )
                 {
+
                     continue;
                 }
+
                 let sign_config = parse_sign_config(course.course_sign_config.as_deref());
+
                 let (category, sub_category) = course_kind_names(&course);
+
                 courses.push(BykcCourse {
                     id: course.id,
                     course_name: course.course_name,
@@ -165,22 +197,30 @@ impl BykcApi {
     }
 
     /// Loads the current user's chosen BYKC courses for the active semester.
+
     pub async fn get_chosen_courses(&self) -> Result<Vec<BykcChosenCourse>> {
+
         self.ensure_login(false).await?;
+
         let chosen_courses = self.query_current_semester_chosen_courses().await?;
+
         let now = Local::now().naive_local();
 
         Ok(chosen_courses
             .into_iter()
             .map(|chosen| {
+
                 let course = chosen.course_info.unwrap_or_default();
+
                 let sign_config = parse_sign_config(course.course_sign_config.as_deref());
+
                 let availability = resolve_attendance_availability(
                     sign_config.as_ref(),
                     chosen.checkin,
                     chosen.pass,
                     now,
                 );
+
                 let (category, sub_category) = course_kind_names(&course);
 
                 BykcChosenCourse {
@@ -209,24 +249,33 @@ impl BykcApi {
     }
 
     /// Loads BYKC completion statistics for the current user.
+
     pub async fn get_statistics(&self) -> Result<BykcStatistics> {
+
         self.ensure_login(false).await?;
+
         let data: BykcStatisticsRaw = self.call_api("queryStatisticByUserId", "{}").await?;
+
         let mut categories = Vec::new();
 
         for (category_key, sub_categories) in data.statistical {
+
             let category_name = statistics_key_label(&category_key);
+
             for (sub_category_key, stats) in sub_categories {
+
                 categories.push(BykcCategoryStatistics {
-                    category_name: category_name.clone(),
-                    sub_category: statistics_key_label(&sub_category_key),
+                    category_name:  category_name.clone(),
+                    sub_category:   statistics_key_label(&sub_category_key),
                     required_count: stats.assessment_count,
-                    passed_count: stats.complete_assessment_count,
-                    is_qualified: stats.complete_assessment_count >= stats.assessment_count,
+                    passed_count:   stats.complete_assessment_count,
+                    is_qualified:   stats.complete_assessment_count >= stats.assessment_count,
                 });
             }
         }
+
         categories.sort_by(|a, b| {
+
             (
                 a.category_name.as_str(),
                 a.sub_category.as_str(),
@@ -246,12 +295,19 @@ impl BykcApi {
     }
 
     /// Loads a single course detail and resolves sign-in availability.
+
     pub async fn get_course_detail(&self, course_id: i64) -> Result<BykcCourseDetail> {
+
         self.ensure_login(false).await?;
+
         let course = self.query_course_by_id(course_id).await?;
+
         let status = calculate_course_status(&course);
+
         let mut sign_config = parse_sign_config(course.course_sign_config.as_deref());
+
         let mut checkin = None;
+
         let mut pass = None;
 
         if course.selected.unwrap_or(false)
@@ -259,7 +315,9 @@ impl BykcApi {
                 .find_chosen_course_for_current_semester(course_id)
                 .await?
         {
+
             if sign_config.is_none() {
+
                 sign_config = parse_sign_config(
                     chosen
                         .course_info
@@ -267,7 +325,9 @@ impl BykcApi {
                         .and_then(|item| item.course_sign_config.as_deref()),
                 );
             }
+
             checkin = chosen.checkin;
+
             pass = chosen.pass;
         }
 
@@ -277,6 +337,7 @@ impl BykcApi {
             pass,
             Local::now().naive_local(),
         );
+
         let (category, sub_category) = course_kind_names(&course);
 
         Ok(BykcCourseDetail {
@@ -308,35 +369,53 @@ impl BykcApi {
     }
 
     /// Enrolls the user into a course.
+
     pub async fn select_course(&self, course_id: i64) -> Result<String> {
+
         self.ensure_login(false).await?;
+
         let request = format!(r#"{{"courseId":{course_id}}}"#);
+
         let response: BykcApiResponse<BykcCourseActionResult> =
             self.call_api("choseCourse", &request).await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(&response.errmsg, "选课失败"));
         }
+
         Ok("报名成功".to_string())
     }
 
     /// Cancels an existing enrollment for the chosen course.
+
     pub async fn deselect_course(&self, course_id: i64) -> Result<String> {
+
         self.ensure_login(false).await?;
+
         self.find_chosen_course_for_current_semester(course_id)
             .await?
             .ok_or_else(|| anyhow!("该课程未报名，无法退选"))?;
+
         let request = format!(r#"{{"id":{course_id}}}"#);
+
         let response: BykcApiResponse<BykcCourseActionResult> =
             self.call_api("delChosenCourse", &request).await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(&response.errmsg, "退选失败"));
         }
+
         Ok("退选成功".to_string())
     }
 
     /// Performs BYKC sign-in/sign-out after resolving the configured window and location.
+
     pub async fn sign_course(&self, course_id: i64, action: BykcSignAction) -> Result<String> {
+
         self.ensure_login(false).await?;
+
         let chosen = self
             .find_chosen_course_for_current_semester(course_id)
             .await?
@@ -348,8 +427,11 @@ impl BykcApi {
                 .as_ref()
                 .and_then(|item| item.course_sign_config.as_deref()),
         );
+
         if sign_config.is_none() {
+
             let course = self.query_course_by_id(course_id).await?;
+
             sign_config = parse_sign_config(course.course_sign_config.as_deref());
         }
 
@@ -359,13 +441,17 @@ impl BykcApi {
             chosen.pass,
             Local::now().naive_local(),
         );
+
         if action == BykcSignAction::SignIn && !availability.can_sign {
+
             bail!(resolve_sign_in_unavailable_reason(
                 chosen.checkin,
                 chosen.pass
             ));
         }
+
         if action == BykcSignAction::SignOut && !availability.can_sign_out {
+
             bail!(resolve_sign_out_unavailable_reason(
                 chosen.checkin,
                 chosen.pass
@@ -373,20 +459,29 @@ impl BykcApi {
         }
 
         let (lat, lng) = random_sign_location(sign_config.as_ref())?;
+
         let sign_type = action.sign_type();
+
         let request = format!(
             r#"{{"courseId":{course_id},"signLat":{lat},"signLng":{lng},"signType":{sign_type}}}"#
         );
+
         let response: BykcApiResponse<Value> = self.call_api("signCourseByUser", &request).await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(&response.errmsg, "签到失败"));
         }
+
         Ok(action.success_message().to_string())
     }
 
     /// Ensures the BYKC auth token exists and refreshes it when the session expires.
+
     async fn ensure_login(&self, force_refresh: bool) -> Result<()> {
+
         if !self.login_input.use_vpn {
+
             bail!("博雅功能当前仅支持 VPN 模式登录");
         }
 
@@ -397,6 +492,7 @@ impl BykcApi {
                 .expect("token mutex poisoned")
                 .is_some()
         {
+
             return Ok(());
         }
 
@@ -407,172 +503,226 @@ impl BykcApi {
         )
         .await?;
 
-        let login_url = format!("{BYKC_VPN_BASE}/sscv/cas/login");
+        let login_url = format!("{}/sscv/cas/login", bykc_base_url(true));
+
         let response = self
             .login_client
             .get(&login_url)
             .send()
             .await
-            .context("博雅登录请求失败")?;
+            .with_context(|| format!("博雅登录请求失败，入口: {login_url}"))?;
 
         let final_url = response.url().to_string();
+
         let header_location = response
             .headers()
             .get("Location")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
+
         let token = extract_bykc_token(&final_url).or_else(|| extract_bykc_token(&header_location));
 
         let token = match token {
             Some(token) => token,
             None => {
+
                 let fallback_response = self
                     .client
                     .get(&login_url)
                     .send()
                     .await
                     .context("博雅登录重试失败")?;
+
                 let fallback_url = fallback_response.url().to_string();
+
                 extract_bykc_token(&fallback_url)
                     .ok_or_else(|| anyhow!("博雅登录成功但未获取到 auth_token"))?
             }
         };
 
         *self.auth_token.lock().expect("token mutex poisoned") = Some(token);
+
         Ok(())
     }
 
     /// Calls the paged course-list API and validates the business response.
+
     async fn query_student_semester_course_by_page(
         &self,
         page_number: usize,
         page_size: usize,
     ) -> Result<BykcCoursePageResult> {
+
         let request = format!(r#"{{"pageNumber":{page_number},"pageSize":{page_size}}}"#);
+
         let response: BykcApiResponse<BykcCoursePageResult> = self
             .call_api("queryStudentSemesterCourseByPage", &request)
             .await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(
                 &response.errmsg,
                 "博雅课程列表加载失败"
             ));
         }
+
         response.data.ok_or_else(|| anyhow!("博雅课程列表返回为空"))
     }
 
     /// Loads BYKC global config, mainly to resolve the active semester window.
+
     async fn get_all_config(&self) -> Result<BykcAllConfig> {
+
         let response: BykcApiResponse<BykcAllConfig> = self.call_api("getAllConfig", "{}").await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(
                 &response.errmsg,
                 "博雅配置加载失败"
             ));
         }
+
         response.data.ok_or_else(|| anyhow!("博雅配置返回为空"))
     }
 
     /// Loads chosen courses within the given semester date range.
+
     async fn query_chosen_course(
         &self,
         start_date: &str,
         end_date: &str,
     ) -> Result<Vec<BykcChosenCourseRaw>> {
+
         let request = format!(r#"{{"startDate":"{start_date}","endDate":"{end_date}"}}"#);
+
         let response: BykcApiResponse<BykcChosenCoursePayload> =
             self.call_api("queryChosenCourse", &request).await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(
                 &response.errmsg,
                 "已选课程加载失败"
             ));
         }
+
         Ok(response.data.unwrap_or_default().course_list)
     }
 
     /// Loads a single raw course record from BYKC.
+
     async fn query_course_by_id(&self, id: i64) -> Result<BykcCourseRaw> {
+
         let request = format!(r#"{{"id":{id}}}"#);
+
         let response: BykcApiResponse<BykcCourseRaw> =
             self.call_api("queryCourseById", &request).await?;
+
         if !response.is_success() {
+
             bail!(sanitize_bykc_error_message(
                 &response.errmsg,
                 "课程详情加载失败"
             ));
         }
+
         response.data.ok_or_else(|| anyhow!("课程详情返回为空"))
     }
 
     /// Finds the chosen-course record matching a course in the active semester.
+
     async fn find_chosen_course_for_current_semester(
         &self,
         course_id: i64,
     ) -> Result<Option<BykcChosenCourseRaw>> {
+
         let chosen_courses = self.query_current_semester_chosen_courses().await?;
+
         Ok(chosen_courses
             .into_iter()
             .find(|item| item.course_info.as_ref().map(|course| course.id) == Some(course_id)))
     }
 
     /// Loads the chosen-course list for the active semester only.
+
     async fn query_current_semester_chosen_courses(&self) -> Result<Vec<BykcChosenCourseRaw>> {
+
         let (start_date, end_date) = self.current_semester_dates().await?;
+
         self.query_chosen_course(&start_date, &end_date).await
     }
 
     /// Resolves the current semester date range from the BYKC config payload.
+
     async fn current_semester_dates(&self) -> Result<(String, String)> {
+
         if let Some((start_date, end_date)) = self
             .current_semester_dates
             .lock()
             .expect("semester dates mutex poisoned")
             .clone()
         {
+
             return Ok((start_date, end_date));
         }
 
         let config = self.get_all_config().await?;
+
         let semester = config
             .semester
             .first()
             .ok_or_else(|| anyhow!("无法获取当前学期信息"))?;
+
         let start_date = semester
             .semester_start_date
             .as_deref()
             .ok_or_else(|| anyhow!("无法获取当前学期信息"))?;
+
         let end_date = semester
             .semester_end_date
             .as_deref()
             .ok_or_else(|| anyhow!("无法获取当前学期信息"))?;
+
         let semester_dates = (start_date.to_string(), end_date.to_string());
+
         *self
             .current_semester_dates
             .lock()
             .expect("semester dates mutex poisoned") = Some(semester_dates.clone());
+
         Ok(semester_dates)
     }
 
     /// Calls a BYKC API and deserializes the decrypted JSON payload.
+
     async fn call_api<T>(&self, api_name: &str, request_json: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
     {
+
         let raw = self.call_api_raw(api_name, request_json).await?;
+
         serde_json::from_str(&raw)
             .with_context(|| format!("BYKC 响应 JSON 解析失败: {api_name}: {raw}"))
     }
 
     /// Calls a BYKC API and retries once after refreshing the auth token.
+
     async fn call_api_raw(&self, api_name: &str, request_json: &str) -> Result<String> {
+
         self.ensure_login(false).await?;
+
         match self.do_call_api_raw(api_name, request_json).await {
             Ok(value) => Ok(value),
             Err(error) => {
+
                 *self.auth_token.lock().expect("token mutex poisoned") = None;
+
                 self.ensure_login(true).await?;
+
                 self.do_call_api_raw(api_name, request_json)
                     .await
                     .with_context(|| format!("{error}"))
@@ -581,18 +731,18 @@ impl BykcApi {
     }
 
     /// Sends one encrypted BYKC request and returns the decrypted response body.
+
     async fn do_call_api_raw(&self, api_name: &str, request_json: &str) -> Result<String> {
+
         let encrypted = encrypt_request(request_json)?;
-        let endpoint = format!(
-            "{}/sscv/{}",
-            bykc_base_url(self.login_input.use_vpn),
-            api_name
-        );
-        let referer = format!(
-            "{}/system/course-select",
-            bykc_base_url(self.login_input.use_vpn)
-        );
-        let origin = bykc_base_url(self.login_input.use_vpn).to_string();
+
+        let base_url = bykc_base_url(self.login_input.use_vpn);
+
+        let endpoint = format!("{}/sscv/{}", base_url, api_name);
+
+        let referer = format!("{}/system/course-select", base_url);
+
+        let origin = base_url;
 
         let mut request = self
             .client
@@ -612,23 +762,30 @@ impl BykcApi {
             .expect("token mutex poisoned")
             .clone()
         {
+
             request = request
                 .header("auth_token", token.as_str())
                 .header("authtoken", token);
         }
 
         let response = request.send().await.context("BYKC 请求失败")?;
+
         let status = response.status();
+
         let body = response.text().await.context("读取 BYKC 响应失败")?;
+
         if !status.is_success() {
+
             bail!("BYKC 服务返回异常 HTTP 状态: {status}: {body}");
         }
 
         let response_base64 = serde_json::from_str::<String>(&body).unwrap_or(body);
+
         let decoded = decrypt_response(&response_base64, &encrypted.aes_key)
             .unwrap_or_else(|_| response_base64.to_string());
 
         if decoded.contains("会话已失效") || decoded.contains("未登录") {
+
             bail!("博雅会话已失效");
         }
 
@@ -637,7 +794,9 @@ impl BykcApi {
 }
 
 /// Extracts the primary and secondary category names from a raw course record.
+
 fn course_kind_names(course: &BykcCourseRaw) -> (String, String) {
+
     (
         course_kind_name(course.course_new_kind1.as_ref()),
         course_kind_name(course.course_new_kind2.as_ref()),
@@ -645,11 +804,14 @@ fn course_kind_names(course: &BykcCourseRaw) -> (String, String) {
 }
 
 /// Normalizes an optional BYKC category node into a plain display string.
+
 fn course_kind_name(kind: Option<&BykcCourseKind>) -> String {
+
     kind.map(|item| item.kind_name.clone()).unwrap_or_default()
 }
 
 fn statistics_key_label(value: &str) -> String {
+
     value
         .split('|')
         .next_back()
