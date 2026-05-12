@@ -529,8 +529,7 @@ impl Default for App {
             bykc:                  BykcState::default(),
             event_log:             vec![EventEntry {
                 level:   EventLevel::Info,
-                message: "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
-                    .to_string(),
+                message: "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录".to_string(),
             }],
             status:                "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
                 .to_string(),
@@ -2715,6 +2714,57 @@ fn open_path_with_system(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("启动外部查看器失败: {error}"))
 }
 
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+
+    if cfg!(target_os = "macos") {
+
+        return run_clipboard_command("pbcopy", &[], text);
+    }
+
+    if cfg!(target_os = "windows") {
+
+        return run_clipboard_command("clip", &[], text);
+    }
+
+    run_clipboard_command("wl-copy", &[], text)
+        .or_else(|_| run_clipboard_command("xclip", &["-selection", "clipboard"], text))
+        .or_else(|_| run_clipboard_command("xsel", &["--clipboard", "--input"], text))
+}
+
+fn run_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<(), String> {
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("启动 {command} 失败: {error}"))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+
+        return Err(format!("{command} 未提供 stdin"));
+    };
+
+    use std::io::Write;
+
+    stdin
+        .write_all(text.as_bytes())
+        .map_err(|error| format!("写入 {command} stdin 失败: {error}"))?;
+
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("等待 {command} 退出失败: {error}"))?;
+
+    if status.success() {
+
+        Ok(())
+    } else {
+
+        Err(format!("{command} 返回退出码 {status}"))
+    }
+}
+
 fn remembered_login_path() -> Result<PathBuf, String> {
 
     Ok(user_config_dir()?
@@ -2818,4 +2868,54 @@ fn clamp_step(current: usize, len: usize, delta: isize) -> usize {
     let next = current as isize + delta;
 
     next.clamp(0, len.saturating_sub(1) as isize) as usize
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use super::{App, EventLevel, MAX_EVENT_LOG_ENTRIES};
+
+    #[test]
+
+    fn event_log_keeps_only_recent_entries() {
+
+        let mut app = App::default();
+
+        for index in 0..(MAX_EVENT_LOG_ENTRIES + 3) {
+
+            app.info(format!("event-{index}"));
+        }
+
+        assert_eq!(app.event_log.len(), MAX_EVENT_LOG_ENTRIES);
+
+        assert_eq!(
+            app.event_log.first().map(|entry| entry.message.as_str()),
+            Some("event-3")
+        );
+
+        assert_eq!(
+            app.event_log.last().map(|entry| entry.message.as_str()),
+            Some("event-10")
+        );
+    }
+
+    #[test]
+
+    fn clear_event_log_replaces_entries_with_clear_notice() {
+
+        let mut app = App::default();
+
+        app.error("boom");
+
+        app.clear_event_log();
+
+        assert_eq!(app.event_log.len(), 1);
+
+        assert_eq!(app.event_log[0].level, EventLevel::Info);
+
+        assert_eq!(app.event_log[0].message, "已清空事件日志");
+
+        assert_eq!(app.status, "已清空事件日志");
+    }
 }

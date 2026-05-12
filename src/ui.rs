@@ -11,7 +11,7 @@ use ratatui::{
 };
 use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
-use crate::app::{App, BykcView, LoginFocus, QrMode, Screen, WorkspaceTab};
+use crate::app::{App, BykcView, EventLevel, LoginFocus, QrMode, Screen, WorkspaceTab};
 use crate::bykc::can_deselect_bykc_course;
 
 const QR_MAX_MODULE_SCALE: u16 = 1;
@@ -33,6 +33,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.busy {
 
         render_busy_popup(frame);
+    } else if app.show_event_log {
+
+        render_event_log_popup(frame, app);
     } else if app.screen == Screen::Login && app.show_login_details {
 
         render_login_diagnostic_popup(frame, app);
@@ -92,7 +95,7 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     constraints.push(Constraint::Length(3));
 
-    constraints.push(Constraint::Min(3));
+    constraints.push(Constraint::Length(6));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -216,11 +219,7 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     let status_index = next_index + 1;
 
-    let status = Paragraph::new(app.status.as_str())
-        .block(Block::default().title("状态").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(status, chunks[status_index]);
+    render_event_log_block(frame, chunks[status_index], app);
 }
 
 /// Renders the shared workspace shell before delegating to the active tab body.
@@ -284,7 +283,7 @@ fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
 
     let hint = Paragraph::new(vec![
         Line::from(format!(
-            "当前页: {current} | tab: 下一个标签 | shift+tab: 上一个标签 | ?: 帮助"
+            "当前页: {current} | tab: 下一个标签 | shift+tab: 上一个标签 | e: 事件日志 | ?: 帮助"
         )),
         Line::from(Span::styled(app.version_text(), app.version_style())),
     ])
@@ -311,7 +310,7 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(3),
             Constraint::Min(12),
             Constraint::Length(8),
-            Constraint::Length(4),
+            Constraint::Length(6),
         ])
         .split(area);
 
@@ -489,11 +488,7 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(detail, vertical[3]);
 
-    let status = Paragraph::new(app.status.as_str())
-        .block(Block::default().title("状态").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(status, vertical[4]);
+    render_event_log_block(frame, vertical[4], app);
 }
 
 /// Renders the BYKC workspace with view tabs, list content, detail, and status.
@@ -507,7 +502,7 @@ fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(3),
             Constraint::Min(10),
             Constraint::Length(12),
-            Constraint::Length(4),
+            Constraint::Length(6),
         ])
         .split(area);
 
@@ -568,11 +563,7 @@ fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
 
     render_bykc_detail(frame, vertical[3], app);
 
-    let status = Paragraph::new(app.status.as_str())
-        .block(Block::default().title("状态").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(status, vertical[4]);
+    render_event_log_block(frame, vertical[4], app);
 }
 
 fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
@@ -1357,6 +1348,94 @@ fn render_doctor_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(popup, area);
 }
 
+fn render_event_log_block(frame: &mut Frame, area: Rect, app: &App) {
+
+    let rows = app
+        .latest_events()
+        .iter()
+        .rev()
+        .take(4)
+        .map(|entry| {
+
+            let level = match entry.level {
+                EventLevel::Info => "INFO",
+                EventLevel::Success => "OK",
+                EventLevel::Warn => "WARN",
+                EventLevel::Error => "ERR",
+            };
+
+            let style = match entry.level {
+                EventLevel::Info => Style::default().fg(Color::Cyan),
+                EventLevel::Success => Style::default().fg(Color::LightGreen),
+                EventLevel::Warn => Style::default().fg(Color::Yellow),
+                EventLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            };
+
+            Line::from(vec![
+                Span::styled(format!("[{level}] "), style),
+                Span::raw(entry.message.as_str()),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let events = Paragraph::new(rows)
+        .block(
+            Block::default()
+                .title("事件 | e 日志弹窗 | y 复制最近错误 | C 清空")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(events, area);
+}
+
+fn render_event_log_popup(frame: &mut Frame, app: &App) {
+
+    let area = centered_rect(78, 65, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let mut lines = app
+        .latest_events()
+        .iter()
+        .rev()
+        .map(|entry| {
+
+            let (level, style) = match entry.level {
+                EventLevel::Info => ("INFO", Style::default().fg(Color::Cyan)),
+                EventLevel::Success => ("SUCCESS", Style::default().fg(Color::LightGreen)),
+                EventLevel::Warn => ("WARN", Style::default().fg(Color::Yellow)),
+                EventLevel::Error => {
+                    (
+                        "ERROR",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )
+                }
+            };
+
+            Line::from(vec![
+                Span::styled(format!("[{level}] "), style),
+                Span::raw(entry.message.as_str()),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+
+        lines.push(Line::from("暂无事件"));
+    }
+
+    lines.push(Line::from(""));
+
+    lines.push(Line::from("按 e / q / esc 关闭 | y 复制最近错误 | C 清空"));
+
+    let popup = Paragraph::new(lines)
+        .block(Block::default().title("事件日志").borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(popup, area);
+}
+
 fn render_help_popup(frame: &mut Frame, app: &App) {
 
     let area = centered_rect(70, 70, frame.area());
@@ -1371,6 +1450,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("tab / shift+tab: 切换 iClass / BYKC"),
+        Line::from("e: 打开或关闭事件日志"),
         Line::from("?: 打开或关闭帮助"),
         Line::from("Shift+X: 退出登录"),
         Line::from("q / esc: 退出程序"),
@@ -1386,6 +1466,8 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("enter: 登录"),
         Line::from("D: 执行 WebVPN / SSO / iClass / BYKC 自检"),
         Line::from("v: 查看最近一次登录失败详情"),
+        Line::from("y: 复制最近错误（事件日志打开时）"),
+        Line::from("C: 清空事件日志（事件日志打开时）"),
         Line::from(""),
         Line::from(Span::styled(
             "iClass",
