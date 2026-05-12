@@ -1968,7 +1968,7 @@ mod tests {
 
     use super::{
         append_captcha_fields, build_cas_login_form, collect_captcha_field_names,
-        detect_captcha_id, needs_vpn_captcha, resolve_login_form_action,
+        detect_captcha_id, needs_vpn_captcha, resolve_login_form_action, summarize_login_page,
     };
 
     #[test]
@@ -2092,6 +2092,74 @@ mod tests {
             .expect("action should resolve");
 
         assert_eq!(action, "https://d.buaa.edu.cn/login?service=x");
+    }
+
+    #[test]
+
+    fn cas_fixture_covers_action_hidden_captcha_and_summary_markers() {
+
+        let body = include_str!("../../tests/fixtures/cas_login_with_captcha.html");
+
+        let document = Html::parse_document(body);
+
+        let action = resolve_login_form_action("https://sso.buaa.edu.cn/login", &document).unwrap();
+
+        assert_eq!(
+            action,
+            "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Ficlass.example.invalid%2Fcas"
+        );
+
+        let form = build_cas_login_form(&document, "22330000", "secret", None)
+            .expect("fixture form should parse");
+
+        let fields = form_map(&form);
+
+        assert_eq!(fields.get("execution").map(String::as_str), Some("e1s1"));
+
+        assert_eq!(fields.get("lt").map(String::as_str), Some("LT-REDACTED"));
+
+        assert_eq!(fields.get("username").map(String::as_str), Some("22330000"));
+
+        assert_eq!(fields.get("password").map(String::as_str), Some("secret"));
+
+        assert!(needs_vpn_captcha(body));
+
+        assert_eq!(
+            detect_captcha_id(body).as_deref(),
+            Some("fixture-captcha-1")
+        );
+
+        assert_eq!(
+            collect_captcha_field_names(&document),
+            vec!["captchaResponse"]
+        );
+
+        let summary = summarize_login_page(body);
+
+        assert!(summary.contains("北京航空航天大学统一身份认证"));
+
+        assert!(summary.contains("captcha"));
+
+        assert!(summary.contains("cas_form"));
+    }
+
+    #[test]
+
+    fn bad_credentials_fixture_summary_exposes_page_markers_without_secrets() {
+
+        let body = include_str!("../../tests/fixtures/cas_bad_credentials.html");
+
+        let summary = summarize_login_page(body);
+
+        assert!(summary.contains("统一身份认证 - 登录失败"));
+
+        assert!(summary.contains("bad_credentials"));
+
+        assert!(summary.contains("cas_form"));
+
+        assert!(!summary.contains("secret"));
+
+        assert!(!summary.contains("password="));
     }
 
     fn form_map(form: &[(String, String)]) -> HashMap<String, String> {

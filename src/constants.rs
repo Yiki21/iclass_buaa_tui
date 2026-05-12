@@ -238,4 +238,39 @@ mod tests {
             "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/user/login.action"
         );
     }
+
+    #[test]
+
+    fn webvpn_url_preserves_query_fragment_and_port_mapping() {
+
+        let https_with_query = to_webvpn_url(
+            "https://iclass.buaa.edu.cn:8347/app/course/list.action?x=1&name=a%20b#section",
+        );
+
+        assert!(
+            https_with_query
+                .starts_with("https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421")
+        );
+
+        assert!(https_with_query.ends_with("/app/course/list.action?x=1&name=a%20b#section"));
+
+        let http_default_port = to_webvpn_url("http://iclass.buaa.edu.cn:80/app/ping?ok=1");
+
+        assert!(
+            http_default_port
+                .starts_with("https://d.buaa.edu.cn/http/77726476706e69737468656265737421")
+        );
+
+        assert!(http_default_port.ends_with("/app/ping?ok=1"));
+
+        let http_custom_port =
+            to_webvpn_url("http://iclass.buaa.edu.cn:8081/app/common/get_timestamp.action");
+
+        assert!(
+            http_custom_port
+                .starts_with("https://d.buaa.edu.cn/http-8081/77726476706e69737468656265737421")
+        );
+
+        assert!(http_custom_port.ends_with("/app/common/get_timestamp.action"));
+    }
 }
