@@ -23,6 +23,8 @@ use crate::model::{
     Session, SignOutcome,
 };
 
+const MAX_EVENT_LOG_ENTRIES: usize = 8;
+
 #[derive(Clone, Debug)]
 
 pub enum AsyncEvent {
@@ -465,6 +467,22 @@ enum BykcDetailTarget {
     ChosenFirst(i64),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+
+pub enum EventLevel {
+    Info,
+    Success,
+    Warn,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+
+pub struct EventEntry {
+    pub level:   EventLevel,
+    pub message: String,
+}
+
 #[derive(Debug)]
 
 pub struct App {
@@ -477,6 +495,7 @@ pub struct App {
     pub selected_week:         usize,
     pub selected:              usize,
     pub bykc:                  BykcState,
+    pub event_log:             Vec<EventEntry>,
     pub status:                String,
     pub busy:                  bool,
     pub should_quit:           bool,
@@ -491,6 +510,7 @@ pub struct App {
     pub show_login_details:    bool,
     pub doctor_report:         Option<DoctorReport>,
     pub show_doctor_details:   bool,
+    pub show_event_log:        bool,
     next_qr_refresh_at:        Option<Instant>,
 }
 
@@ -507,6 +527,11 @@ impl Default for App {
             selected_week:         0,
             selected:              0,
             bykc:                  BykcState::default(),
+            event_log:             vec![EventEntry {
+                level:   EventLevel::Info,
+                message: "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
+                    .to_string(),
+            }],
             status:                "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
                 .to_string(),
             busy:                  false,
@@ -522,6 +547,7 @@ impl Default for App {
             show_login_details:    false,
             doctor_report:         None,
             show_doctor_details:   false,
+            show_event_log:        false,
             next_qr_refresh_at:    None,
         }
     }
@@ -537,12 +563,12 @@ impl App {
 
                 app.login = LoginForm::from_remembered(remembered);
 
-                app.status = "已载入上次登录信息，按 enter 登录；space 可关闭记住我".to_string();
+                app.info("已载入上次登录信息，按 enter 登录；space 可关闭记住我");
             }
             Ok(None) => {}
             Err(error) => {
 
-                app.status = format!("读取记住我信息失败: {error}");
+                app.error(format!("读取记住我信息失败: {error}"));
             }
         }
 
@@ -637,6 +663,75 @@ impl App {
             .add_modifier(Modifier::BOLD)
     }
 
+    pub fn latest_events(&self) -> &[EventEntry] {
+
+        &self.event_log
+    }
+
+    pub fn clear_event_log(&mut self) {
+
+        self.event_log.clear();
+
+        self.info("已清空事件日志");
+    }
+
+    pub fn copy_latest_error_to_clipboard(&mut self) {
+
+        let Some(entry) = self
+            .event_log
+            .iter()
+            .rev()
+            .find(|entry| entry.level == EventLevel::Error)
+            .cloned()
+        else {
+
+            self.warn("最近没有可复制的错误事件");
+
+            return;
+        };
+
+        match copy_to_clipboard(&entry.message) {
+            Ok(()) => self.success("已复制最近错误到剪贴板"),
+            Err(error) => self.error(format!("复制最近错误失败: {error}")),
+        }
+    }
+
+    fn set_status_with_level(&mut self, level: EventLevel, message: impl Into<String>) {
+
+        let message = message.into();
+
+        self.status = message.clone();
+
+        self.event_log.push(EventEntry { level, message });
+
+        if self.event_log.len() > MAX_EVENT_LOG_ENTRIES {
+
+            let overflow = self.event_log.len() - MAX_EVENT_LOG_ENTRIES;
+
+            self.event_log.drain(0..overflow);
+        }
+    }
+
+    fn info(&mut self, message: impl Into<String>) {
+
+        self.set_status_with_level(EventLevel::Info, message);
+    }
+
+    fn success(&mut self, message: impl Into<String>) {
+
+        self.set_status_with_level(EventLevel::Success, message);
+    }
+
+    fn warn(&mut self, message: impl Into<String>) {
+
+        self.set_status_with_level(EventLevel::Warn, message);
+    }
+
+    fn error(&mut self, message: impl Into<String>) {
+
+        self.set_status_with_level(EventLevel::Error, message);
+    }
+
     /// Applies one key press to the current screen state.
     ///
     /// Why:
@@ -665,6 +760,21 @@ impl App {
             return;
         }
 
+        if self.show_event_log {
+
+            match key.code {
+                KeyCode::Char('e') | KeyCode::Esc | KeyCode::Char('q') => {
+
+                    self.show_event_log = false;
+                }
+                KeyCode::Char('y') => self.copy_latest_error_to_clipboard(),
+                KeyCode::Char('C') => self.clear_event_log(),
+                _ => {}
+            }
+
+            return;
+        }
+
         if self.screen == Screen::Login && (self.show_login_details || self.show_doctor_details) {
 
             match key.code {
@@ -683,6 +793,13 @@ impl App {
         if key.code == KeyCode::Char('?') {
 
             self.show_help = true;
+
+            return;
+        }
+
+        if key.code == KeyCode::Char('e') {
+
+            self.show_event_log = true;
 
             return;
         }
@@ -730,7 +847,7 @@ impl App {
 
         if let Err(error) = self.refresh_qr_inline() {
 
-            self.status = format!("二维码刷新失败: {error}");
+            self.error(format!("二维码刷新失败: {error}"));
 
             self.clear_qr();
 
@@ -780,10 +897,10 @@ impl App {
 
                         let remember_status = self.persist_remembered_login_status();
 
-                        self.status = format!(
+                        self.success(format!(
                             "登录成功。tab 切换 iClass / BYKC，s 直接签到，g 终端二维码，G \
                              外部二维码，r 刷新，Shift+X 退出登录。{remember_status}"
-                        );
+                        ));
                     }
                     Err(error) => {
 
@@ -797,7 +914,7 @@ impl App {
 
                         self.show_login_details = false;
 
-                        self.status = format!("登录失败: {}。按 v 查看详情", error.message);
+                        self.error(format!("登录失败: {}。按 v 查看详情", error.message));
                     }
                 }
             }
@@ -813,14 +930,14 @@ impl App {
 
                         self.login.reset_focus_bounds();
 
-                        self.status = format!(
+                        self.warn(format!(
                             "检测到验证码，请查看 {} 并输入后按 enter 继续",
                             pending.challenge.captcha_path
-                        );
+                        ));
                     }
                     Err(error) => {
 
-                        self.status = format!("验证码准备失败: {error}");
+                        self.error(format!("验证码准备失败: {error}"));
                     }
                 }
             }
@@ -846,11 +963,11 @@ impl App {
                             .map(|item| item.label.as_str())
                             .unwrap_or("未分组");
 
-                        self.status = format!(
+                        self.success(format!(
                             "课程已刷新，共 {} 条，当前周：{}",
                             self.visible_courses_len(),
                             week_label
-                        );
+                        ));
 
                         if self
                             .qr_display
@@ -863,7 +980,7 @@ impl App {
                     }
                     Err(error) => {
 
-                        self.status = format!("刷新失败: {error}");
+                        self.error(format!("刷新失败: {error}"));
                     }
                 }
             }
@@ -871,13 +988,13 @@ impl App {
                 match result {
                     Ok(outcome) => {
 
-                        self.status = if outcome.success_like {
+                        if outcome.success_like {
 
-                            "签到成功".to_string()
+                            self.success("签到成功");
                         } else {
 
-                            format!("签到失败: {}", outcome.message)
-                        };
+                            self.error(format!("签到失败: {}", outcome.message));
+                        }
 
                         if outcome.success_like
                             && let Some(index) = self.selected_course_absolute_index()
@@ -889,7 +1006,7 @@ impl App {
                     }
                     Err(error) => {
 
-                        self.status = format!("签到失败: {error}");
+                        self.error(format!("签到失败: {error}"));
                     }
                 }
             }
@@ -919,11 +1036,11 @@ impl App {
 
                         self.bykc.show_detail_popup = data.open_detail_popup;
 
-                        self.status = message;
+                        self.success(message);
                     }
                     Err(error) => {
 
-                        self.status = format!("博雅操作失败: {error}");
+                        self.error(format!("博雅操作失败: {error}"));
                     }
                 }
             }
@@ -953,17 +1070,17 @@ impl App {
 
                         self.show_doctor_details = true;
 
-                        self.status = if failed == 0 {
+                        if failed == 0 {
 
-                            "网络自检完成：全部通过".to_string()
+                            self.success("网络自检完成：全部通过");
                         } else {
 
-                            format!("网络自检完成：{failed} 项异常，按 D 查看详情")
-                        };
+                            self.warn(format!("网络自检完成：{failed} 项异常，按 D 查看详情"));
+                        }
                     }
                     Err(error) => {
 
-                        self.status = format!("网络自检失败: {error}");
+                        self.error(format!("网络自检失败: {error}"));
                     }
                 }
             }
@@ -1181,14 +1298,14 @@ impl App {
 
         if !input.use_vpn && input.student_id.is_empty() {
 
-            self.status = "直连模式需要输入学号".to_string();
+            self.warn("直连模式需要输入学号");
 
             return;
         }
 
         if input.use_vpn && (input.vpn_username.is_empty() || input.vpn_password.is_empty()) {
 
-            self.status = "VPN 模式需要输入账号和密码".to_string();
+            self.warn("VPN 模式需要输入账号和密码");
 
             return;
         }
@@ -1197,7 +1314,7 @@ impl App {
 
             let Some(pending) = self.pending_captcha_login.clone() else {
 
-                self.status = "验证码状态已失效，请重新登录".to_string();
+                self.warn("验证码状态已失效，请重新登录");
 
                 self.login.captcha_required = false;
 
@@ -1208,7 +1325,7 @@ impl App {
 
             if self.login.captcha.trim().is_empty() {
 
-                self.status = "请输入验证码后按 enter 继续".to_string();
+                self.warn("请输入验证码后按 enter 继续");
 
                 return;
             }
@@ -1219,7 +1336,7 @@ impl App {
 
             self.show_login_details = false;
 
-            self.status = "提交验证码并继续登录...".to_string();
+            self.info("提交验证码并继续登录...");
 
             spawn_continue_captcha_login(pending, self.login.captcha.clone(), tx.clone());
 
@@ -1234,7 +1351,7 @@ impl App {
 
         self.show_login_details = false;
 
-        self.status = "登录中并拉取课程...".to_string();
+        self.info("登录中并拉取课程...");
 
         spawn_login(input, tx.clone());
     }
@@ -1245,7 +1362,7 @@ impl App {
 
         self.show_doctor_details = false;
 
-        self.status = "执行网络自检中...".to_string();
+        self.info("执行网络自检中...");
 
         spawn_doctor(self.login.use_vpn, tx.clone());
     }
@@ -1271,7 +1388,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1280,7 +1397,7 @@ impl App {
 
         self.busy = true;
 
-        self.status = "刷新课程中...".to_string();
+        self.info("刷新课程中...");
 
         spawn_refresh(session, tx.clone());
     }
@@ -1289,7 +1406,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1298,14 +1415,14 @@ impl App {
 
         if session.bykc_api.is_none() {
 
-            self.status = "博雅功能需要 VPN 模式登录".to_string();
+            self.warn("博雅功能需要 VPN 模式登录");
 
             return;
         }
 
         self.busy = true;
 
-        self.status = "加载博雅课程中...".to_string();
+        self.info("加载博雅课程中...");
 
         spawn_bykc_sync(
             session,
@@ -1321,7 +1438,7 @@ impl App {
 
         let Some(course_id) = self.bykc.selected_detail_target() else {
 
-            self.status = "当前没有可查看的博雅课程".to_string();
+            self.warn("当前没有可查看的博雅课程");
 
             return;
         };
@@ -1334,14 +1451,14 @@ impl App {
 
             self.bykc.show_detail_popup = true;
 
-            self.status = "已打开博雅详情".to_string();
+            self.info("已打开博雅详情");
 
             return;
         }
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1350,7 +1467,7 @@ impl App {
 
         self.busy = true;
 
-        self.status = "加载博雅课程详情...".to_string();
+        self.info("加载博雅课程详情...");
 
         spawn_bykc_sync(
             session,
@@ -1366,7 +1483,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1375,21 +1492,21 @@ impl App {
 
         let Some(course) = self.bykc.selected_course().cloned() else {
 
-            self.status = "当前没有可报名的博雅课程".to_string();
+            self.warn("当前没有可报名的博雅课程");
 
             return;
         };
 
         if course.selected {
 
-            self.status = "该课程已经报名".to_string();
+            self.warn("该课程已经报名");
 
             return;
         }
 
         self.busy = true;
 
-        self.status = format!("报名中: {}", course.course_name);
+        self.info(format!("报名中: {}", course.course_name));
 
         spawn_bykc_task(
             session,
@@ -1406,7 +1523,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1415,21 +1532,21 @@ impl App {
 
         let Some(course) = self.bykc.selected_chosen_course().cloned() else {
 
-            self.status = "当前没有可退选的博雅课程".to_string();
+            self.warn("当前没有可退选的博雅课程");
 
             return;
         };
 
         if !can_deselect_bykc_course(&course.course_cancel_end_date) {
 
-            self.status = "当前课程已超过退选时间".to_string();
+            self.warn("当前课程已超过退选时间");
 
             return;
         }
 
         self.busy = true;
 
-        self.status = format!("退选中: {}", course.course_name);
+        self.info(format!("退选中: {}", course.course_name));
 
         let course_id = course.course_id;
 
@@ -1448,7 +1565,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1457,35 +1574,35 @@ impl App {
 
         let Some(course) = self.bykc.selected_course().cloned() else {
 
-            self.status = "当前没有可退选的博雅课程".to_string();
+            self.warn("当前没有可退选的博雅课程");
 
             return;
         };
 
         if !course.selected {
 
-            self.status = "当前课程尚未报名，无法退选".to_string();
+            self.warn("当前课程尚未报名，无法退选");
 
             return;
         }
 
         let Some(chosen) = self.bykc.chosen_course_for(course.id).cloned() else {
 
-            self.status = "当前课程已标记为已报，但未找到对应已选记录，请先刷新".to_string();
+            self.warn("当前课程已标记为已报，但未找到对应已选记录，请先刷新");
 
             return;
         };
 
         if !can_deselect_bykc_course(&chosen.course_cancel_end_date) {
 
-            self.status = "当前课程已超过退选时间".to_string();
+            self.warn("当前课程已超过退选时间");
 
             return;
         }
 
         self.busy = true;
 
-        self.status = format!("退选中: {}", course.course_name);
+        self.info(format!("退选中: {}", course.course_name));
 
         let course_id = course.id;
 
@@ -1508,7 +1625,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1525,7 +1642,7 @@ impl App {
 
         let Some(course) = self.bykc.selected_chosen_course().cloned() else {
 
-            self.status = format!("当前没有可{action_label}的博雅课程");
+            self.warn(format!("当前没有可{action_label}的博雅课程"));
 
             return;
         };
@@ -1537,14 +1654,14 @@ impl App {
 
         if !allowed {
 
-            self.status = pending_status.to_string();
+            self.warn(pending_status);
 
             return;
         }
 
         self.busy = true;
 
-        self.status = format!("博雅{action_label}中: {}", course.course_name);
+        self.info(format!("博雅{action_label}中: {}", course.course_name));
 
         spawn_bykc_task(
             session,
@@ -1561,7 +1678,7 @@ impl App {
 
         let Some(session) = self.session.clone() else {
 
-            self.status = "当前未登录".to_string();
+            self.warn("当前未登录");
 
             self.screen = Screen::Login;
 
@@ -1570,28 +1687,28 @@ impl App {
 
         let Some(course) = self.selected_course().cloned() else {
 
-            self.status = "当前没有可签到课程".to_string();
+            self.warn("当前没有可签到课程");
 
             return;
         };
 
         if course.signed() {
 
-            self.status = "该课程已签到".to_string();
+            self.warn("该课程已签到");
 
             return;
         }
 
         if course.course_sched_id.trim().is_empty() {
 
-            self.status = "当前课程缺少 courseSchedId，无法签到".to_string();
+            self.warn("当前课程缺少 courseSchedId，无法签到");
 
             return;
         }
 
         self.busy = true;
 
-        self.status = format!("签到中: {}", course.name);
+        self.info(format!("签到中: {}", course.name));
 
         spawn_sign(session, course.course_sched_id, tx.clone());
     }
@@ -1626,7 +1743,9 @@ impl App {
 
         self.show_doctor_details = false;
 
-        self.status = "已退出登录".to_string();
+        self.show_event_log = false;
+
+        self.info("已退出登录");
     }
 
     fn toggle_qr(&mut self) {
@@ -1635,7 +1754,7 @@ impl App {
 
             self.clear_qr();
 
-            self.status = "已关闭二维码刷新".to_string();
+            self.info("已关闭二维码刷新");
 
             return;
         }
@@ -1649,11 +1768,11 @@ impl App {
 
                 self.next_qr_refresh_at = Some(Instant::now() + Duration::from_secs(2));
 
-                self.status = "二维码刷新中，按 g 关闭".to_string();
+                self.info("二维码刷新中，按 g 关闭");
             }
             Err(error) => {
 
-                self.status = format!("二维码生成失败: {error}");
+                self.error(format!("二维码生成失败: {error}"));
 
                 self.clear_qr();
             }
@@ -1666,7 +1785,7 @@ impl App {
 
             self.clear_qr();
 
-            self.status = "已关闭外部二维码刷新，浏览器页面可手动关闭".to_string();
+            self.info("已关闭外部二维码刷新，浏览器页面可手动关闭");
 
             return;
         }
@@ -1683,11 +1802,11 @@ impl App {
                 match self.open_external_qr_viewer() {
                     Ok(()) => {
 
-                        self.status = "外部二维码刷新中，按 G 关闭刷新".to_string();
+                        self.info("外部二维码刷新中，按 G 关闭刷新");
                     }
                     Err(error) => {
 
-                        self.status = format!("外部二维码打开失败: {error}");
+                        self.error(format!("外部二维码打开失败: {error}"));
 
                         self.clear_qr();
                     }
@@ -1695,7 +1814,7 @@ impl App {
             }
             Err(error) => {
 
-                self.status = format!("二维码生成失败: {error}");
+                self.error(format!("二维码生成失败: {error}"));
 
                 self.clear_qr();
             }
@@ -1973,7 +2092,7 @@ impl App {
 
         if let Some(week) = self.selected_week_group() {
 
-            self.status = format!("已切换到 {}", week.label);
+            self.info(format!("已切换到 {}", week.label));
         }
     }
 
@@ -1992,7 +2111,7 @@ impl App {
 
         if let Some(week) = self.selected_week_group() {
 
-            self.status = format!("已切换到 {}", week.label);
+            self.info(format!("已切换到 {}", week.label));
         }
     }
 
