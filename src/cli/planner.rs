@@ -1049,6 +1049,7 @@ async fn collect_sign_debug_context(
 
             data["sign_detail"] = match sign_detail {
                 Some(item) => {
+
                     json!({
                         "name": item.name,
                         "id": item.id,

@@ -139,6 +139,7 @@ pub(super) fn parse_sign_config(config_json: Option<&str>) -> Option<BykcSignCon
             .sign_point_list
             .into_iter()
             .map(|point| {
+
                 BykcSignPoint {
                     lat:    point.lat,
                     lng:    point.lng,

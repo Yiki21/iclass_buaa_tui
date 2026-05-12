@@ -68,6 +68,25 @@ pub struct SignQrData {
 
 #[derive(Clone, Debug, Serialize)]
 
+pub struct LoginCaptchaChallenge {
+    pub login_url:           String,
+    pub action_url:          String,
+    pub form:                Vec<(String, String)>,
+    pub captcha_id:          String,
+    pub captcha_path:        String,
+    pub page_hint:           String,
+    pub captcha_field_names: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+
+pub enum LoginStart {
+    Complete(Session),
+    Captcha(LoginCaptchaChallenge),
+}
+
+#[derive(Clone, Debug, Serialize)]
+
 pub enum LoginFailureKind {
     Validation,
     Network,

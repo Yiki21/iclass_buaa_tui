@@ -83,6 +83,13 @@ fn render_login(frame: &mut Frame, app: &App) {
         constraints.push(Constraint::Length(3));
     }
 
+    if app.login.captcha_required {
+
+        constraints.push(Constraint::Length(3));
+
+        constraints.push(Constraint::Length(4));
+    }
+
     constraints.push(Constraint::Length(3));
 
     constraints.push(Constraint::Min(3));
@@ -123,7 +130,7 @@ fn render_login(frame: &mut Frame, app: &App) {
         false,
     );
 
-    let remember_index = if app.login.use_vpn {
+    let mut next_index = if app.login.use_vpn {
 
         render_input(
             frame,
@@ -158,9 +165,43 @@ fn render_login(frame: &mut Frame, app: &App) {
         3
     };
 
+    if app.login.captcha_required {
+
+        render_input(
+            frame,
+            chunks[next_index],
+            "验证码",
+            &app.login.captcha,
+            app.login.current_focus() == LoginFocus::Captcha,
+            false,
+        );
+
+        next_index += 1;
+
+        let captcha_hint = app
+            .pending_captcha_login
+            .as_ref()
+            .map(|pending| {
+
+                format!(
+                    "验证码图片: {} | 输入后按 enter 继续同一登录会话",
+                    pending.challenge.captcha_path
+                )
+            })
+            .unwrap_or_else(|| "验证码状态已失效，请重新登录".to_string());
+
+        let hint = Paragraph::new(captcha_hint)
+            .block(Block::default().title("验证码").borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(hint, chunks[next_index]);
+
+        next_index += 1;
+    }
+
     render_input(
         frame,
-        chunks[remember_index],
+        chunks[next_index],
         "记住我",
         if app.login.remember_me {
 
@@ -173,7 +214,7 @@ fn render_login(frame: &mut Frame, app: &App) {
         false,
     );
 
-    let status_index = remember_index + 1;
+    let status_index = next_index + 1;
 
     let status = Paragraph::new(app.status.as_str())
         .block(Block::default().title("状态").borders(Borders::ALL))

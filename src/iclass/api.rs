@@ -10,13 +10,13 @@ use reqwest::header::{
 };
 use scraper::{Html, Selector};
 use serde_json::Value;
-use std::{collections::HashSet, net::ToSocketAddrs, time::Instant};
+use std::{collections::HashSet, fs, net::ToSocketAddrs, path::PathBuf, time::Instant};
 
 use crate::bykc::BykcApi;
 use crate::constants::{BYKC_DIRECT_BASE, VPN_OFFSET_CORRECTION_MS, network_urls, sso_vpn_entry};
 use crate::model::{
-    CourseDetailItem, CourseItem, DoctorCheck, DoctorReport, LoginDiagnostic, LoginFailureKind,
-    LoginInput, Session, SignOutcome, SignQrData,
+    CourseDetailItem, CourseItem, DoctorCheck, DoctorReport, LoginCaptchaChallenge,
+    LoginDiagnostic, LoginFailureKind, LoginInput, LoginStart, Session, SignOutcome, SignQrData,
 };
 
 #[derive(Clone, Debug)]
@@ -24,6 +24,17 @@ use crate::model::{
 pub struct IClassApi {
     client:  reqwest::Client,
     use_vpn: bool,
+}
+
+#[derive(Clone, Debug)]
+
+struct LoginFormState {
+    login_url:           String,
+    action_url:          String,
+    form:                Vec<(String, String)>,
+    captcha_id:          Option<String>,
+    page_hint:           String,
+    captcha_field_names: Vec<String>,
 }
 
 impl IClassApi {
@@ -66,10 +77,10 @@ impl IClassApi {
             .map_err(|diagnostic| anyhow!(diagnostic.summary))
     }
 
-    pub async fn login_with_diagnostic(
+    pub async fn start_login(
         &self,
         input: &LoginInput,
-    ) -> std::result::Result<Session, LoginDiagnostic> {
+    ) -> std::result::Result<LoginStart, LoginDiagnostic> {
 
         let student_id = input.student_id.trim();
 
@@ -89,87 +100,113 @@ impl IClassApi {
 
         if self.use_vpn {
 
-            self.vpn_login(&input.vpn_username, &input.vpn_password)
+            let form_state = self
+                .fetch_login_form_state(&input.vpn_username, &input.vpn_password)
                 .await
-                .map_err(|error| diagnose_login_error("vpn_login", error, None, None, None))?;
+                .map_err(|error| diagnose_login_error("vpn_login_page", error, None, None, None))?;
+
+            if let Some(captcha_id) = form_state.captcha_id.clone() {
+
+                let captcha_path =
+                    self.download_captcha_image(&captcha_id)
+                        .await
+                        .map_err(|error| {
+
+                            diagnose_login_error("vpn_captcha", error, None, None, None)
+                        })?;
+
+                return Ok(LoginStart::Captcha(LoginCaptchaChallenge {
+                    login_url: form_state.login_url,
+                    action_url: form_state.action_url,
+                    form: form_state.form,
+                    captcha_id,
+                    captcha_path: captcha_path.display().to_string(),
+                    page_hint: form_state.page_hint,
+                    captcha_field_names: form_state.captcha_field_names,
+                }));
+            }
+
+            self.finish_vpn_login_submission(
+                &form_state.login_url,
+                &form_state.action_url,
+                &form_state.form,
+            )
+            .await
+            .map_err(|error| diagnose_login_error("vpn_login_submit", error, None, None, None))?;
         }
 
-        let (user_info, server_time_offset_ms) =
-            self.fetch_user_info(student_id).await.map_err(|error| {
+        self.finish_login_session(input)
+            .await
+            .map(LoginStart::Complete)
+    }
 
-                diagnose_login_error(
-                    "iclass_user_info",
-                    error,
-                    Some(network_urls(self.use_vpn).user_login),
-                    None,
-                    None,
-                )
-            })?;
+    pub async fn login_with_diagnostic(
+        &self,
+        input: &LoginInput,
+    ) -> std::result::Result<Session, LoginDiagnostic> {
 
-        let user_id = user_info
-            .get("id")
-            .and_then(Value::as_i64)
-            .map(|v| v.to_string())
-            .or_else(|| {
+        match self.start_login(input).await? {
+            LoginStart::Complete(session) => Ok(session),
+            LoginStart::Captcha(challenge) => {
+                Err(LoginDiagnostic {
+                    kind:        LoginFailureKind::Captcha,
+                    stage:       "vpn_captcha".to_string(),
+                    summary:     "当前 VPN 登录需要验证码，请在 TUI 中输入验证码后继续，CLI \
+                                  请改用浏览器登录"
+                        .to_string(),
+                    error_chain: vec!["当前 VPN 登录需要验证码".to_string()],
+                    final_url:   Some(challenge.login_url),
+                    http_status: None,
+                    page_hint:   Some(challenge.page_hint),
+                    suggestions: vec![
+                        format!("验证码图片路径: {}", challenge.captcha_path),
+                        "TUI 中可继续输入验证码".to_string(),
+                        "CLI 请先在浏览器完成一次登录".to_string(),
+                    ],
+                })
+            }
+        }
+    }
 
-                user_info
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .unwrap_or_default();
+    pub async fn continue_captcha_login(
+        &self,
+        input: &LoginInput,
+        challenge: &LoginCaptchaChallenge,
+        captcha: &str,
+    ) -> std::result::Result<Session, LoginDiagnostic> {
 
-        let user_name = user_info
-            .get("realName")
-            .and_then(Value::as_str)
-            .or_else(|| user_info.get("name").and_then(Value::as_str))
-            .unwrap_or(student_id)
-            .to_string();
+        let captcha = captcha.trim();
 
-        let session_id = user_info
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-
-        if user_id.is_empty() || session_id.is_empty() {
+        if captcha.is_empty() {
 
             return Err(LoginDiagnostic {
-                kind:        LoginFailureKind::IclassApi,
-                stage:       "iclass_user_info".to_string(),
-                summary:     "登录成功但用户信息不完整，请重试".to_string(),
-                error_chain: vec!["登录成功但用户信息不完整，请重试".to_string()],
-                final_url:   Some(network_urls(self.use_vpn).user_login),
+                kind:        LoginFailureKind::Validation,
+                stage:       "vpn_captcha".to_string(),
+                summary:     "验证码不能为空".to_string(),
+                error_chain: vec!["验证码不能为空".to_string()],
+                final_url:   Some(challenge.login_url.clone()),
                 http_status: None,
-                page_hint:   Some("missing_user_id_or_session_id".to_string()),
-                suggestions: vec![
-                    "稍后重试".to_string(),
-                    "若持续出现，请附上诊断信息提交 issue".to_string(),
-                ],
+                page_hint:   Some(challenge.page_hint.clone()),
+                suggestions: vec!["输入验证码后重试".to_string()],
             });
         }
 
-        let bykc_api =
-            if input.use_vpn {
+        let form = append_captcha_fields(&challenge.form, &challenge.captcha_field_names, captcha);
 
-                Some(BykcApi::new(input.clone()).map_err(|error| {
+        self.finish_vpn_login_submission(&challenge.login_url, &challenge.action_url, &form)
+            .await
+            .map_err(|error| {
 
-                    diagnose_login_error("bykc_bootstrap", error, None, None, None)
-                })?)
-            } else {
+                diagnose_login_error(
+                    "vpn_captcha_submit",
+                    error,
+                    Some(challenge.login_url.clone()),
+                    None,
+                    Some(challenge.page_hint.clone()),
+                )
+            })?;
 
-                None
-            };
-
-        Ok(Session {
-            api: self.clone(),
-            bykc_api,
-            user_id,
-            user_name,
-            session_id,
-            server_time_offset_ms,
-            use_vpn: self.use_vpn,
-        })
+        self.finish_login_session(input).await
     }
 
     pub async fn doctor(&self) -> DoctorReport {
@@ -500,75 +537,6 @@ impl IClassApi {
         })
     }
 
-    /// Completes the BUAA VPN login flow and verifies that iClass is reachable.
-    ///
-    /// Why:
-    /// A successful SSO form submission is not enough on its own. The VPN may
-    /// still leave the session on a portal page, which later causes confusing
-    /// iClass failures. This helper finishes the login and proves the cookies
-    /// actually grant access to the target service.
-
-    async fn vpn_login(&self, username: &str, password: &str) -> Result<()> {
-
-        if username.trim().is_empty() || password.is_empty() {
-
-            bail!("VPN 模式需要输入账号和密码");
-        }
-
-        let (login_url, action_url, form) = self.fetch_login_form(username, password).await?;
-
-        let response = self
-            .client
-            .post(&action_url)
-            .header(ORIGIN, "https://d.buaa.edu.cn")
-            .header(REFERER, &login_url)
-            .form(&form)
-            .send()
-            .await
-            .with_context(|| format!("VPN 登录请求失败，提交地址: {action_url}"))?;
-
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-
-            bail!("登录失败：账号或密码错误，或密码过弱需先修改后再登录");
-        }
-
-        let final_url = response.url().to_string();
-
-        if looks_like_iclass_url(&final_url) {
-
-            return Ok(());
-        }
-
-        if looks_like_vpn_portal_home(&final_url) {
-
-            let urls = network_urls(true);
-
-            let probe = self
-                .client
-                .get(format!("{}/", urls.service_home.trim_end_matches('/')))
-                .send()
-                .await
-                .with_context(|| {
-                    format!("进入 iClass 服务失败，服务入口: {}", urls.service_home)
-                })?;
-
-            let probe_final = probe.url().to_string();
-
-            if looks_like_iclass_url(&probe_final) {
-
-                return Ok(());
-            }
-
-            let probe_body = probe.text().await.unwrap_or_default();
-
-            return vpn_login_error(&probe_final, &probe_body);
-        }
-
-        let body = response.text().await.unwrap_or_default();
-
-        vpn_login_error(&final_url, &body)
-    }
-
     /// Extracts the transient `execution` token required by BUAA SSO.
     ///
     /// Why:
@@ -576,11 +544,11 @@ impl IClassApi {
     /// hidden token, so this remains a dedicated pre-step instead of being
     /// inlined into the larger VPN login flow.
 
-    async fn fetch_login_form(
+    async fn fetch_login_form_state(
         &self,
         username: &str,
         password: &str,
-    ) -> Result<(String, String, Vec<(String, String)>)> {
+    ) -> Result<LoginFormState> {
 
         let login_entry = sso_vpn_entry();
 
@@ -613,7 +581,7 @@ impl IClassApi {
         let action_url = resolve_login_form_action(&login_url, &document)
             .with_context(|| format!("解析 SSO 登录表单提交地址失败，最终 URL: {login_url}"))?;
 
-        let form = build_cas_login_form(&document, username, password).ok_or_else(|| {
+        let form = build_cas_login_form(&document, username, password, None).ok_or_else(|| {
 
             anyhow!(
                 "无法从 SSO 登录页面解析登录表单，最终 URL: {}, 页面线索: {}",
@@ -622,7 +590,181 @@ impl IClassApi {
             )
         })?;
 
-        Ok((login_url, action_url, form))
+        Ok(LoginFormState {
+            login_url,
+            action_url,
+            form,
+            captcha_id: detect_captcha_id(&body),
+            page_hint: summarize_login_page(&body),
+            captcha_field_names: collect_captcha_field_names(&document),
+        })
+    }
+
+    async fn finish_vpn_login_submission(
+        &self,
+        login_url: &str,
+        action_url: &str,
+        form: &[(String, String)],
+    ) -> Result<()> {
+
+        let response = self
+            .client
+            .post(action_url)
+            .header(ORIGIN, "https://d.buaa.edu.cn")
+            .header(REFERER, login_url)
+            .form(form)
+            .send()
+            .await
+            .with_context(|| format!("VPN 登录请求失败，提交地址: {action_url}"))?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+
+            bail!("登录失败：账号或密码错误，或密码过弱需先修改后再登录");
+        }
+
+        let final_url = response.url().to_string();
+
+        if looks_like_iclass_url(&final_url) {
+
+            return Ok(());
+        }
+
+        if looks_like_vpn_portal_home(&final_url) {
+
+            let urls = network_urls(true);
+
+            let probe = self
+                .client
+                .get(format!("{}/", urls.service_home.trim_end_matches('/')))
+                .send()
+                .await
+                .with_context(|| {
+
+                    format!("进入 iClass 服务失败，服务入口: {}", urls.service_home)
+                })?;
+
+            let probe_final = probe.url().to_string();
+
+            if looks_like_iclass_url(&probe_final) {
+
+                return Ok(());
+            }
+
+            let probe_body = probe.text().await.unwrap_or_default();
+
+            return vpn_login_error(&probe_final, &probe_body);
+        }
+
+        let body = response.text().await.unwrap_or_default();
+
+        vpn_login_error(&final_url, &body)
+    }
+
+    async fn finish_login_session(
+        &self,
+        input: &LoginInput,
+    ) -> std::result::Result<Session, LoginDiagnostic> {
+
+        let student_id = input.student_id.trim();
+
+        let (user_info, server_time_offset_ms) =
+            self.fetch_user_info(student_id).await.map_err(|error| {
+
+                diagnose_login_error(
+                    "iclass_user_info",
+                    error,
+                    Some(network_urls(self.use_vpn).user_login),
+                    None,
+                    None,
+                )
+            })?;
+
+        let user_id = user_info
+            .get("id")
+            .and_then(Value::as_i64)
+            .map(|v| v.to_string())
+            .or_else(|| {
+
+                user_info
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_default();
+
+        let user_name = user_info
+            .get("realName")
+            .and_then(Value::as_str)
+            .or_else(|| user_info.get("name").and_then(Value::as_str))
+            .unwrap_or(student_id)
+            .to_string();
+
+        let session_id = user_info
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        if user_id.is_empty() || session_id.is_empty() {
+
+            return Err(LoginDiagnostic {
+                kind:        LoginFailureKind::IclassApi,
+                stage:       "iclass_user_info".to_string(),
+                summary:     "登录成功但用户信息不完整，请重试".to_string(),
+                error_chain: vec!["登录成功但用户信息不完整，请重试".to_string()],
+                final_url:   Some(network_urls(self.use_vpn).user_login),
+                http_status: None,
+                page_hint:   Some("missing_user_id_or_session_id".to_string()),
+                suggestions: vec![
+                    "稍后重试".to_string(),
+                    "若持续出现，请附上诊断信息提交 issue".to_string(),
+                ],
+            });
+        }
+
+        let bykc_api =
+            if input.use_vpn {
+
+                Some(BykcApi::new(input.clone()).map_err(|error| {
+
+                    diagnose_login_error("bykc_bootstrap", error, None, None, None)
+                })?)
+            } else {
+
+                None
+            };
+
+        Ok(Session {
+            api: self.clone(),
+            bykc_api,
+            user_id,
+            user_name,
+            session_id,
+            server_time_offset_ms,
+            use_vpn: self.use_vpn,
+        })
+    }
+
+    async fn download_captcha_image(&self, captcha_id: &str) -> Result<PathBuf> {
+
+        let url = format!("https://sso.buaa.edu.cn/captcha?captchaId={captcha_id}");
+
+        let bytes = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("获取验证码图片失败")?
+            .bytes()
+            .await
+            .context("读取验证码图片失败")?;
+
+        let path = std::env::temp_dir().join(format!("iclass-buaa-tui-captcha-{captcha_id}.jpg"));
+
+        fs::write(&path, bytes)
+            .with_context(|| format!("写入验证码图片失败: {}", path.display()))?;
+
+        Ok(path)
     }
 
     /// Fetches user info and derives `server_time_offset_ms` from the HTTP `Date` header.
@@ -1042,6 +1184,7 @@ fn diagnose_login_error(
         LoginFailureKind::Credentials => "登录失败：账号或密码错误".to_string(),
         LoginFailureKind::SsoChanged => "登录失败：SSO 页面结构可能已变化".to_string(),
         LoginFailureKind::Http => {
+
             format!(
                 "登录失败：HTTP 状态异常{}",
                 http_status.map(|v| format!(" {v}")).unwrap_or_default()
@@ -1130,42 +1273,49 @@ fn login_suggestions(kind: LoginFailureKind) -> Vec<String> {
 
     match kind {
         LoginFailureKind::Dns => {
+
             vec![
                 "检查本机 DNS 与网络连接".to_string(),
                 "若在校外，请先连接 WebVPN".to_string(),
             ]
         }
         LoginFailureKind::Timeout | LoginFailureKind::Network => {
+
             vec![
                 "检查当前网络或稍后重试".to_string(),
                 "可先执行 doctor 自检确认 WebVPN / SSO / iClass 连通性".to_string(),
             ]
         }
         LoginFailureKind::Captcha => {
+
             vec![
                 "当前登录需要验证码".to_string(),
                 "先在浏览器完成一次 WebVPN / SSO 登录后再重试".to_string(),
             ]
         }
         LoginFailureKind::Credentials => {
+
             vec![
                 "确认账号密码正确".to_string(),
                 "若提示密码过弱，请先在学校统一认证页面修改密码".to_string(),
             ]
         }
         LoginFailureKind::SsoChanged => {
+
             vec![
                 "SSO 页面结构可能已变化".to_string(),
                 "请附上诊断输出提交 issue".to_string(),
             ]
         }
         LoginFailureKind::Http => {
+
             vec![
                 "上游服务返回了异常 HTTP 状态".to_string(),
                 "可稍后重试，或附上诊断输出提交 issue".to_string(),
             ]
         }
         LoginFailureKind::IclassApi => {
+
             vec![
                 "SSO 已通过，但 iClass 接口返回异常".to_string(),
                 "刷新网络后重试；若持续失败，请附上诊断输出".to_string(),
@@ -1173,6 +1323,7 @@ fn login_suggestions(kind: LoginFailureKind) -> Vec<String> {
         }
         LoginFailureKind::Validation => vec!["补全登录输入后重试".to_string()],
         LoginFailureKind::Unknown => {
+
             vec![
                 "查看错误链、最终 URL 和页面线索".to_string(),
                 "附上诊断输出提交 issue".to_string(),
@@ -1298,7 +1449,9 @@ fn needs_vpn_captcha(body: &str) -> bool {
     body.contains("/captcha?captchaId=")
         || body.contains("captcha?captchaId=")
         || body.contains("config.captcha.id")
+        || body.contains("config.captcha")
         || body.contains("\"captcha\":{\"id\"")
+        || body.contains("\"captcha\": {")
         || body.contains("'captcha':{'id'")
 }
 
@@ -1340,6 +1493,7 @@ fn build_cas_login_form(
     document: &Html,
     username: &str,
     password: &str,
+    captcha: Option<&str>,
 ) -> Option<Vec<(String, String)>> {
 
     let form_selector = Selector::parse(r#"form#loginForm, form#fm1, form[action]"#).ok()?;
@@ -1405,6 +1559,19 @@ fn build_cas_login_form(
 
     fields.push(("password".to_string(), password.to_string()));
 
+    if let Some(captcha) = captcha.map(str::trim).filter(|value| !value.is_empty()) {
+
+        if present_names.contains("captcha") {
+
+            fields.push(("captcha".to_string(), captcha.to_string()));
+        }
+
+        if present_names.contains("captchaResponse") {
+
+            fields.push(("captchaResponse".to_string(), captcha.to_string()));
+        }
+    }
+
     if !present_names.contains("submit") {
 
         fields.push(("submit".to_string(), "登录".to_string()));
@@ -1421,6 +1588,110 @@ fn build_cas_login_form(
     }
 
     Some(fields)
+}
+
+fn detect_captcha_id(body: &str) -> Option<String> {
+
+    let marker = "captchaId=";
+
+    if let Some(index) = body.find(marker) {
+
+        let rest = &body[index + marker.len()..];
+
+        let value = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+            .collect::<String>();
+
+        if !value.is_empty() {
+
+            return Some(value);
+        }
+    }
+
+    let marker_index = body
+        .find("config.captcha")
+        .or_else(|| body.find("\"captcha\""))?;
+
+    let rest = &body[marker_index..];
+
+    let id_index = rest.find("id")?;
+
+    let after_id = &rest[id_index + "id".len()..];
+
+    let colon_index = after_id.find(':')?;
+
+    let after = after_id[colon_index + 1..].trim_start();
+
+    let quote = after.chars().next()?;
+
+    if !matches!(quote, '\'' | '"') {
+
+        return None;
+    }
+
+    let content = &after[quote.len_utf8()..];
+
+    let end = content.find(quote)?;
+
+    Some(content[..end].to_string())
+}
+
+fn collect_captcha_field_names(document: &Html) -> Vec<String> {
+
+    let Ok(input_selector) = Selector::parse("input[name]") else {
+
+        return vec!["captcha".to_string(), "captchaResponse".to_string()];
+    };
+
+    let mut fields = document
+        .select(&input_selector)
+        .filter_map(|input| input.value().attr("name"))
+        .filter(|name| matches!(*name, "captcha" | "captchaResponse"))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if fields.is_empty() {
+
+        fields.push("captcha".to_string());
+
+        fields.push("captchaResponse".to_string());
+    }
+
+    fields
+}
+
+fn append_captcha_fields(
+    base_form: &[(String, String)],
+    field_names: &[String],
+    captcha: &str,
+) -> Vec<(String, String)> {
+
+    let mut form = base_form
+        .iter()
+        .filter(|(name, _)| name != "captcha" && name != "captchaResponse")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for name in field_names {
+
+        if matches!(name.as_str(), "captcha" | "captchaResponse") {
+
+            form.push((name.clone(), captcha.to_string()));
+        }
+    }
+
+    if !field_names.iter().any(|name| name == "captcha") {
+
+        form.push(("captcha".to_string(), captcha.to_string()));
+    }
+
+    if !field_names.iter().any(|name| name == "captchaResponse") {
+
+        form.push(("captchaResponse".to_string(), captcha.to_string()));
+    }
+
+    form
 }
 
 fn summarize_login_page(body: &str) -> String {
@@ -1685,4 +1956,146 @@ fn encode_component(value: &str) -> String {
     }
 
     encoded
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use std::collections::HashMap;
+
+    use scraper::Html;
+
+    use super::{
+        append_captcha_fields, build_cas_login_form, collect_captcha_field_names,
+        detect_captcha_id, needs_vpn_captcha, resolve_login_form_action,
+    };
+
+    #[test]
+
+    fn detects_captcha_from_cas_config_and_url_shapes() {
+
+        let cas_config = r#"
+            <html><script>
+              config.captcha = { type: 'image', id: 'captcha-1' };
+            </script></html>
+        "#;
+
+        let json_config = r#"
+            <script>window.login = {"captcha":{"type":"image","id":"captcha_2"}}</script>
+        "#;
+
+        let image_tag = r#"<img src="/captcha?captchaId=captcha-3&ts=1">"#;
+
+        assert!(needs_vpn_captcha(cas_config));
+
+        assert_eq!(detect_captcha_id(cas_config).as_deref(), Some("captcha-1"));
+
+        assert_eq!(detect_captcha_id(json_config).as_deref(), Some("captcha_2"));
+
+        assert_eq!(detect_captcha_id(image_tag).as_deref(), Some("captcha-3"));
+    }
+
+    #[test]
+
+    fn builds_cas_form_preserving_hidden_fields_and_replacing_credentials() {
+
+        let document = Html::parse_document(
+            r#"
+            <form id="fm1" action="/login">
+              <input type="hidden" name="execution" value="e1s1">
+              <input type="hidden" name="lt" value="LT-123">
+              <input type="checkbox" name="remember" value="on" checked>
+              <input type="checkbox" name="unused" value="1">
+              <input name="username" value="old-user">
+              <input type="password" name="password" value="old-pass">
+              <input type="text" name="captchaResponse">
+            </form>
+            "#,
+        );
+
+        let form = build_cas_login_form(&document, " 22330000 ", "secret", Some("abcd"))
+            .expect("form should parse");
+
+        let fields = form_map(&form);
+
+        assert_eq!(fields.get("execution").map(String::as_str), Some("e1s1"));
+
+        assert_eq!(fields.get("lt").map(String::as_str), Some("LT-123"));
+
+        assert_eq!(fields.get("remember").map(String::as_str), Some("on"));
+
+        assert!(!fields.contains_key("unused"));
+
+        assert_eq!(fields.get("username").map(String::as_str), Some("22330000"));
+
+        assert_eq!(fields.get("password").map(String::as_str), Some("secret"));
+
+        assert_eq!(
+            fields.get("captchaResponse").map(String::as_str),
+            Some("abcd")
+        );
+
+        assert_eq!(fields.get("_eventId").map(String::as_str), Some("submit"));
+
+        assert_eq!(
+            fields.get("type").map(String::as_str),
+            Some("username_password")
+        );
+    }
+
+    #[test]
+
+    fn captcha_fields_are_collected_and_appended_without_duplicate_old_values() {
+
+        let document = Html::parse_document(
+            r#"
+            <form id="fm1">
+              <input name="execution" value="e1s1">
+              <input name="captcha">
+              <input name="captchaResponse">
+            </form>
+            "#,
+        );
+
+        let field_names = collect_captcha_field_names(&document);
+
+        assert_eq!(field_names, vec!["captcha", "captchaResponse"]);
+
+        let base = vec![
+            ("execution".to_string(), "e1s1".to_string()),
+            ("captcha".to_string(), "old".to_string()),
+            ("captchaResponse".to_string(), "old".to_string()),
+        ];
+
+        let form = append_captcha_fields(&base, &field_names, "new-code");
+
+        let captcha_values = form
+            .iter()
+            .filter(|(name, _)| name == "captcha" || name == "captchaResponse")
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            captcha_values,
+            vec![("captcha", "new-code"), ("captchaResponse", "new-code")]
+        );
+    }
+
+    #[test]
+
+    fn login_form_action_resolves_against_final_login_url() {
+
+        let document = Html::parse_document(r#"<form id="fm1" action="/login?service=x"></form>"#);
+
+        let action = resolve_login_form_action("https://d.buaa.edu.cn/login", &document)
+            .expect("action should resolve");
+
+        assert_eq!(action, "https://d.buaa.edu.cn/login?service=x");
+    }
+
+    fn form_map(form: &[(String, String)]) -> HashMap<String, String> {
+
+        form.iter().cloned().collect()
+    }
 }

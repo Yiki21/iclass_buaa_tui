@@ -17,14 +17,17 @@ use crate::bykc::{
     BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcSignAction, BykcStatistics,
     can_deselect_bykc_course,
 };
+use crate::iclass::IClassApi;
 use crate::model::{
-    CourseDetailItem, DoctorReport, LoginDiagnostic, LoginInput, Session, SignOutcome,
+    CourseDetailItem, DoctorReport, LoginCaptchaChallenge, LoginDiagnostic, LoginInput, LoginStart,
+    Session, SignOutcome,
 };
 
 #[derive(Clone, Debug)]
 
 pub enum AsyncEvent {
     Login(Result<LoginSuccess, LoginFailure>),
+    LoginCaptcha(Result<PendingCaptchaLogin, String>),
     Refresh(Result<Vec<CourseDetailItem>, String>),
     Sign(Result<SignOutcome, String>),
     BykcSync(Box<Result<BykcSyncSuccess, String>>),
@@ -44,6 +47,14 @@ pub struct LoginSuccess {
 pub struct LoginFailure {
     pub message:    String,
     pub diagnostic: LoginDiagnostic,
+}
+
+#[derive(Clone, Debug)]
+
+pub struct PendingCaptchaLogin {
+    pub api:       IClassApi,
+    pub input:     LoginInput,
+    pub challenge: LoginCaptchaChallenge,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +121,7 @@ pub enum LoginFocus {
     UseVpn,
     VpnUsername,
     VpnPassword,
+    Captcha,
     RememberMe,
 }
 
@@ -117,12 +129,14 @@ pub enum LoginFocus {
 #[derive(Clone, Debug, Default)]
 
 pub struct LoginForm {
-    pub student_id:   String,
-    pub use_vpn:      bool,
-    pub vpn_username: String,
-    pub vpn_password: String,
-    pub remember_me:  bool,
-    pub focus:        usize,
+    pub student_id:       String,
+    pub use_vpn:          bool,
+    pub vpn_username:     String,
+    pub vpn_password:     String,
+    pub captcha:          String,
+    pub captcha_required: bool,
+    pub remember_me:      bool,
+    pub focus:            usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -138,12 +152,14 @@ impl LoginForm {
     fn from_remembered(remembered: RememberedLogin) -> Self {
 
         Self {
-            student_id:   remembered.student_id,
-            use_vpn:      remembered.use_vpn,
-            vpn_username: remembered.vpn_username,
-            vpn_password: remembered.vpn_password,
-            remember_me:  true,
-            focus:        0,
+            student_id:       remembered.student_id,
+            use_vpn:          remembered.use_vpn,
+            vpn_username:     remembered.vpn_username,
+            vpn_password:     remembered.vpn_password,
+            captcha:          String::new(),
+            captcha_required: false,
+            remember_me:      true,
+            focus:            0,
         }
     }
 
@@ -163,6 +179,11 @@ impl LoginForm {
             fields.push(LoginFocus::VpnUsername);
 
             fields.push(LoginFocus::VpnPassword);
+        }
+
+        if self.captcha_required {
+
+            fields.push(LoginFocus::Captcha);
         }
 
         fields.push(LoginFocus::RememberMe);
@@ -447,59 +468,61 @@ enum BykcDetailTarget {
 #[derive(Debug)]
 
 pub struct App {
-    pub screen:              Screen,
-    pub active_tab:          WorkspaceTab,
-    pub login:               LoginForm,
-    pub session:             Option<Session>,
-    pub courses:             Vec<CourseDetailItem>,
-    pub week_groups:         Vec<WeekGroup>,
-    pub selected_week:       usize,
-    pub selected:            usize,
-    pub bykc:                BykcState,
-    pub status:              String,
-    pub busy:                bool,
-    pub should_quit:         bool,
-    pub show_help:           bool,
-    pub qr_display:          Option<QrDisplay>,
-    pub qr_refreshing:       bool,
-    pub qr_mode:             QrMode,
-    pub version_info:        Option<VersionInfo>,
-    pub version_error:       Option<String>,
-    pub login_diagnostic:    Option<LoginDiagnostic>,
-    pub show_login_details:  bool,
-    pub doctor_report:       Option<DoctorReport>,
-    pub show_doctor_details: bool,
-    next_qr_refresh_at:      Option<Instant>,
+    pub screen:                Screen,
+    pub active_tab:            WorkspaceTab,
+    pub login:                 LoginForm,
+    pub session:               Option<Session>,
+    pub courses:               Vec<CourseDetailItem>,
+    pub week_groups:           Vec<WeekGroup>,
+    pub selected_week:         usize,
+    pub selected:              usize,
+    pub bykc:                  BykcState,
+    pub status:                String,
+    pub busy:                  bool,
+    pub should_quit:           bool,
+    pub show_help:             bool,
+    pub qr_display:            Option<QrDisplay>,
+    pub qr_refreshing:         bool,
+    pub qr_mode:               QrMode,
+    pub version_info:          Option<VersionInfo>,
+    pub version_error:         Option<String>,
+    pub login_diagnostic:      Option<LoginDiagnostic>,
+    pub pending_captcha_login: Option<PendingCaptchaLogin>,
+    pub show_login_details:    bool,
+    pub doctor_report:         Option<DoctorReport>,
+    pub show_doctor_details:   bool,
+    next_qr_refresh_at:        Option<Instant>,
 }
 
 impl Default for App {
     fn default() -> Self {
 
         Self {
-            screen:              Screen::Login,
-            active_tab:          WorkspaceTab::IClass,
-            login:               LoginForm::default(),
-            session:             None,
-            courses:             Vec::new(),
-            week_groups:         Vec::new(),
-            selected_week:       0,
-            selected:            0,
-            bykc:                BykcState::default(),
-            status:              "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
+            screen:                Screen::Login,
+            active_tab:            WorkspaceTab::IClass,
+            login:                 LoginForm::default(),
+            session:               None,
+            courses:               Vec::new(),
+            week_groups:           Vec::new(),
+            selected_week:         0,
+            selected:              0,
+            bykc:                  BykcState::default(),
+            status:                "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
                 .to_string(),
-            busy:                false,
-            should_quit:         false,
-            show_help:           false,
-            qr_display:          None,
-            qr_refreshing:       false,
-            qr_mode:             QrMode::Terminal,
-            version_info:        None,
-            version_error:       None,
-            login_diagnostic:    None,
-            show_login_details:  false,
-            doctor_report:       None,
-            show_doctor_details: false,
-            next_qr_refresh_at:  None,
+            busy:                  false,
+            should_quit:           false,
+            show_help:             false,
+            qr_display:            None,
+            qr_refreshing:         false,
+            qr_mode:               QrMode::Terminal,
+            version_info:          None,
+            version_error:         None,
+            login_diagnostic:      None,
+            pending_captcha_login: None,
+            show_login_details:    false,
+            doctor_report:         None,
+            show_doctor_details:   false,
+            next_qr_refresh_at:    None,
         }
     }
 }
@@ -741,6 +764,12 @@ impl App {
 
                         self.login_diagnostic = None;
 
+                        self.pending_captcha_login = None;
+
+                        self.login.captcha_required = false;
+
+                        self.login.captcha.clear();
+
                         self.show_login_details = false;
 
                         self.replace_courses(data.courses, None, None);
@@ -760,9 +789,38 @@ impl App {
 
                         self.login_diagnostic = Some(error.diagnostic);
 
+                        self.pending_captcha_login = None;
+
+                        self.login.captcha_required = false;
+
+                        self.login.captcha.clear();
+
                         self.show_login_details = false;
 
                         self.status = format!("登录失败: {}。按 v 查看详情", error.message);
+                    }
+                }
+            }
+            AsyncEvent::LoginCaptcha(result) => {
+                match result {
+                    Ok(pending) => {
+
+                        self.pending_captcha_login = Some(pending.clone());
+
+                        self.login.captcha_required = true;
+
+                        self.login.captcha.clear();
+
+                        self.login.reset_focus_bounds();
+
+                        self.status = format!(
+                            "检测到验证码，请查看 {} 并输入后按 enter 继续",
+                            pending.challenge.captcha_path
+                        );
+                    }
+                    Err(error) => {
+
+                        self.status = format!("验证码准备失败: {error}");
                     }
                 }
             }
@@ -1076,6 +1134,7 @@ impl App {
             LoginFocus::StudentId => self.login.student_id.push(ch),
             LoginFocus::VpnUsername => self.login.vpn_username.push(ch),
             LoginFocus::VpnPassword => self.login.vpn_password.push(ch),
+            LoginFocus::Captcha => self.login.captcha.push(ch),
             LoginFocus::UseVpn => {
                 if ch == ' ' {
 
@@ -1108,6 +1167,10 @@ impl App {
 
                 self.login.vpn_password.pop();
             }
+            LoginFocus::Captcha => {
+
+                self.login.captcha.pop();
+            }
             LoginFocus::UseVpn | LoginFocus::RememberMe => {}
         }
     }
@@ -1130,9 +1193,44 @@ impl App {
             return;
         }
 
+        if self.login.captcha_required {
+
+            let Some(pending) = self.pending_captcha_login.clone() else {
+
+                self.status = "验证码状态已失效，请重新登录".to_string();
+
+                self.login.captcha_required = false;
+
+                self.login.captcha.clear();
+
+                return;
+            };
+
+            if self.login.captcha.trim().is_empty() {
+
+                self.status = "请输入验证码后按 enter 继续".to_string();
+
+                return;
+            }
+
+            self.busy = true;
+
+            self.login_diagnostic = None;
+
+            self.show_login_details = false;
+
+            self.status = "提交验证码并继续登录...".to_string();
+
+            spawn_continue_captcha_login(pending, self.login.captcha.clone(), tx.clone());
+
+            return;
+        }
+
         self.busy = true;
 
         self.login_diagnostic = None;
+
+        self.pending_captcha_login = None;
 
         self.show_login_details = false;
 
@@ -1943,12 +2041,13 @@ fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
 
         let result = match crate::iclass::IClassApi::new(input.use_vpn) {
             Ok(api) => {
-                match api.login_with_diagnostic(&input).await {
-                    Ok(session) => {
+                match api.start_login(&input).await {
+                    Ok(LoginStart::Complete(session)) => {
                         api.get_merged_course_details(&session, 7)
                             .await
                             .map(|courses| LoginSuccess { session, courses })
                             .map_err(|error| {
+
                                 LoginFailure {
                                     message:    format_anyhow_error(error),
                                     diagnostic: LoginDiagnostic {
@@ -1963,6 +2062,18 @@ fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
                                     },
                                 }
                             })
+                    }
+                    Ok(LoginStart::Captcha(challenge)) => {
+
+                        let pending = PendingCaptchaLogin {
+                            api,
+                            input,
+                            challenge,
+                        };
+
+                        let _ = tx.send(AsyncEvent::LoginCaptcha(Ok(pending)));
+
+                        return;
                     }
                     Err(diagnostic) => {
                         Err(LoginFailure {
@@ -1985,6 +2096,54 @@ fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
                         page_hint:   None,
                         suggestions: vec!["检查本机 TLS/证书环境".to_string()],
                     },
+                })
+            }
+        };
+
+        let _ = tx.send(AsyncEvent::Login(result));
+    });
+}
+
+fn spawn_continue_captcha_login(
+    pending: PendingCaptchaLogin,
+    captcha: String,
+    tx: UnboundedSender<AsyncEvent>,
+) {
+
+    tokio::spawn(async move {
+
+        let result = match pending
+            .api
+            .continue_captcha_login(&pending.input, &pending.challenge, &captcha)
+            .await
+        {
+            Ok(session) => {
+                pending
+                    .api
+                    .get_merged_course_details(&session, 7)
+                    .await
+                    .map(|courses| LoginSuccess { session, courses })
+                    .map_err(|error| {
+
+                        LoginFailure {
+                            message:    format_anyhow_error(error),
+                            diagnostic: LoginDiagnostic {
+                                kind:        crate::model::LoginFailureKind::IclassApi,
+                                stage:       "course_prefetch".to_string(),
+                                summary:     "登录成功，但拉取课程失败".to_string(),
+                                error_chain: vec!["登录成功，但拉取课程失败".to_string()],
+                                final_url:   None,
+                                http_status: None,
+                                page_hint:   None,
+                                suggestions: vec!["按 r 重试刷新课程".to_string()],
+                            },
+                        }
+                    })
+            }
+            Err(diagnostic) => {
+                Err(LoginFailure {
+                    message: diagnostic.summary.clone(),
+                    diagnostic,
                 })
             }
         };
