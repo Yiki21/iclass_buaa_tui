@@ -1453,6 +1453,15 @@ fn render_event_log_popup(frame: &mut Frame, app: &App) {
 
     lines.push(Line::from(""));
 
+    lines.push(Line::from(format!(
+        "本地日志: {}",
+        crate::logging::path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未初始化".to_string())
+    )));
+
+    lines.push(Line::from(""));
+
     lines.push(Line::from("按 e / q / esc 关闭 | y 复制最近错误 | C 清空"));
 
     let popup = Paragraph::new(lines)
@@ -1523,6 +1532,12 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("x: 退选当前已选课程"),
         Line::from("u: 执行签退"),
         Line::from(""),
+        Line::from(format!(
+            "本地日志: {}",
+            crate::logging::path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "未初始化".to_string())
+        )),
         Line::from(format!("当前标签: {:?}", app.active_tab)),
         Line::from("按 ?、q 或 esc 关闭帮助"),
     ];

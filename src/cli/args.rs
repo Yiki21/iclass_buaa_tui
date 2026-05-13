@@ -11,8 +11,14 @@ use super::core::{SignAction, SignSource};
 #[command(author, version, about = "BUAA iClass TUI and automation CLI")]
 
 pub(crate) struct Cli {
+    /// Minimum structured log level: error, warn, info, or debug.
+    #[arg(long, global = true, default_value = "info")]
+    pub(crate) log_level: String,
+    /// Structured JSONL log file path. Defaults to the user state directory.
+    #[arg(long, global = true)]
+    pub(crate) log_file:  Option<PathBuf>,
     #[command(subcommand)]
-    pub(crate) command: CommandKind,
+    pub(crate) command:   CommandKind,
 }
 
 #[derive(Debug, Subcommand)]

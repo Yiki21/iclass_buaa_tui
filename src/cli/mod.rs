@@ -11,6 +11,8 @@ use std::ffi::OsString;
 use anyhow::Result;
 use clap::Parser;
 
+use crate::logging;
+
 use self::args::{Cli, CommandKind};
 
 pub fn should_run_cli(args: impl IntoIterator<Item = OsString>) -> bool {
@@ -23,6 +25,17 @@ pub fn should_run_cli(args: impl IntoIterator<Item = OsString>) -> bool {
 pub async fn run_cli() -> Result<()> {
 
     let cli = Cli::parse();
+
+    let log_level = logging::parse_level(&cli.log_level)?;
+
+    let log_path = logging::init(log_level, cli.log_file.clone())?;
+
+    logging::event(
+        logging::LogLevel::Info,
+        "cli",
+        "CLI started",
+        serde_json::json!({ "log_file": log_path }),
+    );
 
     match cli.command {
         CommandKind::ListToday(args) => planner::list_today(args).await,

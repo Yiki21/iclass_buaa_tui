@@ -18,6 +18,7 @@ use crate::bykc::{
     can_deselect_bykc_course,
 };
 use crate::iclass::IClassApi;
+use crate::logging::{self, LogLevel};
 use crate::model::{
     CourseDetailItem, DoctorReport, LoginCaptchaChallenge, LoginDiagnostic, LoginInput, LoginStart,
     Session, SignOutcome,
@@ -705,6 +706,13 @@ impl App {
         self.status = message.clone();
 
         self.event_log.push(EventEntry { level, message });
+
+        logging::event(
+            log_level_from_event(level),
+            "tui.event",
+            &self.status,
+            serde_json::json!({ "screen": format!("{:?}", self.screen) }),
+        );
 
         if self.event_log.len() > MAX_EVENT_LOG_ENTRIES {
 
@@ -2200,6 +2208,15 @@ impl App {
 
             self.selected = 0;
         }
+    }
+}
+
+fn log_level_from_event(level: EventLevel) -> LogLevel {
+
+    match level {
+        EventLevel::Info | EventLevel::Success => LogLevel::Info,
+        EventLevel::Warn => LogLevel::Warn,
+        EventLevel::Error => LogLevel::Error,
     }
 }
 

@@ -5,6 +5,7 @@ mod bykc;
 mod cli;
 mod constants;
 mod iclass;
+mod logging;
 mod model;
 mod ui;
 
@@ -46,6 +47,11 @@ async fn main() -> Result<()> {
 
         cli::run_cli().await
     } else {
+
+        if let Err(error) = logging::init(logging::LogLevel::Info, None) {
+
+            eprintln!("初始化日志失败: {error}");
+        }
 
         run_app().await
     };

@@ -161,6 +161,8 @@ iclass_buaa_tui uninstall-autologin --help
 
 主要参数：
 - `--config <PATH>`: 显式指定配置文件路径，覆盖默认的 XDG 查找顺序。
+- `--log-level <LEVEL>`: 设置结构化日志等级，支持 `error`、`warn`、`info`、`debug`。
+- `--log-file <PATH>`: 指定 JSONL 结构化日志路径；不指定时写入用户 state 目录。
 - `plan --dry-run`: 输出今日课程的自动签到评估结果、include/exclude 命中规则、时间窗口和跳过原因，不实际签到。
 - `install-autologin --output-dir <PATH>`: 指定平台调度文件的输出目录。Linux 写 `.service`/`.timer`，macOS 写 `.plist`，Windows 写包装 `.cmd`。
 - `install-autologin --planner-time <HH:MM[:SS]>`: 覆盖配置里的 `planner_time`。

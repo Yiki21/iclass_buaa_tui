@@ -1037,6 +1037,30 @@ fn print_retry_decision(
     classified: &ClassifiedError,
 ) {
 
+    crate::logging::event(
+        if classified.retryable {
+
+            crate::logging::LogLevel::Warn
+        } else {
+
+            crate::logging::LogLevel::Error
+        },
+        "cli.retry",
+        format!("{operation} failed"),
+        json!({
+            "attempt": attempt,
+            "max_attempts": retry.max_attempts,
+            "retryable": classified.retryable,
+            "reason": classified.reason,
+            "next_delay_seconds": if classified.retryable && attempt < retry.max_attempts {
+                Some(retry.delay_seconds(attempt))
+            } else {
+                None
+            },
+            "error": classified.description,
+        }),
+    );
+
     if classified.retryable && attempt < retry.max_attempts {
 
         let delay = retry.delay_seconds(attempt);
