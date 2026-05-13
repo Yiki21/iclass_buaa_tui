@@ -483,6 +483,14 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(
                 "操作: r 刷新 | s 直接签到 | g 终端二维码 | G 外部二维码 | Shift+X 退出登录",
             ),
+            Line::from(format!(
+                "外部二维码: {} | {}",
+                app.external_qr_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                app.external_qr_status.as_deref().unwrap_or("未启动")
+            )),
         ]
     } else {
 

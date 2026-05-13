@@ -1,6 +1,6 @@
 //! Application state, async event routing, and keyboard-driven TUI behavior.
 
-use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate};
+use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qrcode::{EcLevel, QrCode, render::svg};
 use ratatui::style::{Color, Modifier, Style};
@@ -64,6 +64,7 @@ pub struct PendingCaptchaLogin {
 
 pub struct QrDisplay {
     pub course_sched_id: String,
+    pub course_name:     String,
     pub qr_url:          String,
     pub timestamp:       i64,
 }
@@ -506,6 +507,8 @@ pub struct App {
     pub qr_display:            Option<QrDisplay>,
     pub qr_refreshing:         bool,
     pub qr_mode:               QrMode,
+    pub external_qr_path:      Option<PathBuf>,
+    pub external_qr_status:    Option<String>,
     pub version_info:          Option<VersionInfo>,
     pub version_error:         Option<String>,
     pub login_diagnostic:      Option<LoginDiagnostic>,
@@ -543,6 +546,8 @@ impl Default for App {
             qr_display:            None,
             qr_refreshing:         false,
             qr_mode:               QrMode::Terminal,
+            external_qr_path:      None,
+            external_qr_status:    None,
             version_info:          None,
             version_error:         None,
             login_diagnostic:      None,
@@ -859,6 +864,11 @@ impl App {
 
             self.error(format!("二维码刷新失败: {error}"));
 
+            if self.qr_mode == QrMode::External {
+
+                self.mark_external_qr_error(&error);
+            }
+
             self.clear_qr();
 
             return;
@@ -999,6 +1009,8 @@ impl App {
                             .as_ref()
                             .is_some_and(|qr| qr.course_sched_id != selected_id)
                         {
+
+                            self.mark_external_qr_inactive("课程已切换，旧二维码已失效");
 
                             self.clear_qr();
                         }
@@ -1859,7 +1871,15 @@ impl App {
                 match self.open_external_qr_viewer() {
                     Ok(()) => {
 
-                        self.info("外部二维码刷新中，按 G 关闭刷新");
+                        let path = self
+                            .external_qr_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "未知路径".to_string());
+
+                        self.external_qr_status = Some("刷新中".to_string());
+
+                        self.info(format!("外部二维码刷新中，按 G 关闭刷新，页面: {path}"));
                     }
                     Err(error) => {
 
@@ -1872,6 +1892,8 @@ impl App {
             Err(error) => {
 
                 self.error(format!("二维码生成失败: {error}"));
+
+                self.mark_external_qr_error(&error);
 
                 self.clear_qr();
             }
@@ -1904,6 +1926,7 @@ impl App {
 
         self.qr_display = Some(QrDisplay {
             course_sched_id: qr.course_sched_id,
+            course_name:     course.name,
             qr_url:          qr.qr_url,
             timestamp:       qr.timestamp,
         });
@@ -1911,14 +1934,18 @@ impl App {
         if self.qr_mode == QrMode::External {
 
             self.write_external_qr_svg()?;
+
+            self.write_external_qr_status("refreshing", None)?;
         }
 
         Ok(())
     }
 
-    fn open_external_qr_viewer(&self) -> Result<(), String> {
+    fn open_external_qr_viewer(&mut self) -> Result<(), String> {
 
         self.write_external_qr_svg()?;
+
+        self.write_external_qr_status("refreshing", None)?;
 
         let html_path = self.write_external_qr_html()?;
 
@@ -1947,11 +1974,36 @@ impl App {
         fs::write(&path, image).map_err(|error| format!("写入 {} 失败: {error}", path.display()))
     }
 
-    fn write_external_qr_html(&self) -> Result<PathBuf, String> {
+    fn write_external_qr_status(&self, state: &str, error: Option<&str>) -> Result<(), String> {
+
+        let Some(qr) = &self.qr_display else {
+
+            return Err("当前没有二维码".to_string());
+        };
+
+        let path = external_qr_status_path()?;
+
+        let payload = serde_json::json!({
+            "state": state,
+            "course_name": qr.course_name,
+            "course_sched_id": qr.course_sched_id,
+            "generated_at": qr.timestamp,
+            "generated_at_text": format_qr_timestamp(qr.timestamp),
+            "error": error,
+        });
+
+        let body = serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?;
+
+        fs::write(&path, body).map_err(|error| format!("写入 {} 失败: {error}", path.display()))
+    }
+
+    fn write_external_qr_html(&mut self) -> Result<PathBuf, String> {
 
         let dir = external_qr_dir()?;
 
         let path = dir.join("index.html");
+
+        self.external_qr_path = Some(path.clone());
 
         let html = r#"<!doctype html>
 <html lang="zh-CN">
@@ -1975,6 +2027,13 @@ impl App {
       display: grid;
       gap: 14px;
       justify-items: center;
+      width: min(92vw, 560px);
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      text-align: center;
     }
     img {
       width: min(76vw, 420px);
@@ -1987,21 +2046,65 @@ impl App {
     .meta {
       font-size: 14px;
       color: #4b5563;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .status-ok { color: #047857; }
+    .status-error { color: #b91c1c; }
+    .status-inactive { color: #92400e; }
+    .hidden { display: none; }
+    .error-box {
+      padding: 10px 12px;
+      border: 1px solid #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
+      border-radius: 6px;
+      max-width: 100%;
+      overflow-wrap: anywhere;
     }
   </style>
 </head>
 <body>
   <main>
+    <h1 id="course">iClass 签到二维码</h1>
     <img id="qr" src="iclass-buaa-tui-qr.svg" alt="签到二维码">
-    <div class="meta" id="meta">自动刷新中</div>
+    <div class="meta" id="meta">等待 TUI 写入刷新状态</div>
+    <div class="error-box hidden" id="error"></div>
   </main>
   <script>
     const img = document.getElementById("qr");
     const meta = document.getElementById("meta");
-    function refreshQr() {
-      const now = new Date();
-      img.src = "iclass-buaa-tui-qr.svg?t=" + now.getTime();
-      meta.textContent = "刷新时间 " + now.toLocaleTimeString();
+    const course = document.getElementById("course");
+    const errorBox = document.getElementById("error");
+    async function refreshQr() {
+      const now = Date.now();
+      try {
+        const response = await fetch("iclass-buaa-tui-qr-status.json?t=" + now, { cache: "no-store" });
+        if (!response.ok) throw new Error("状态文件读取失败: HTTP " + response.status);
+        const status = await response.json();
+        course.textContent = status.course_name || "iClass 签到二维码";
+        img.src = "iclass-buaa-tui-qr.svg?t=" + now;
+        meta.className = "meta " + (
+          status.state === "refreshing" ? "status-ok" :
+          status.state === "error" ? "status-error" :
+          "status-inactive"
+        );
+        meta.textContent = "状态: " + status.state
+          + " | 最后更新: " + (status.generated_at_text || "-")
+          + " | courseSchedId: " + (status.course_sched_id || "-");
+        if (status.error) {
+          errorBox.textContent = status.error;
+          errorBox.classList.remove("hidden");
+        } else {
+          errorBox.textContent = "";
+          errorBox.classList.add("hidden");
+        }
+      } catch (error) {
+        meta.className = "meta status-error";
+        meta.textContent = "状态刷新失败: " + error.message;
+        errorBox.textContent = "请确认 TUI 仍在运行并保持外部二维码刷新开启。";
+        errorBox.classList.remove("hidden");
+      }
     }
     refreshQr();
     setInterval(refreshQr, 1000);
@@ -2017,6 +2120,17 @@ impl App {
 
     fn clear_qr(&mut self) {
 
+        if self.qr_mode == QrMode::External
+            && self.qr_display.is_some()
+            && !self
+                .external_qr_status
+                .as_deref()
+                .is_some_and(|status| status.starts_with("刷新失败"))
+        {
+
+            self.mark_external_qr_inactive("TUI 已停止外部二维码刷新");
+        }
+
         self.qr_display = None;
 
         self.qr_refreshing = false;
@@ -2024,6 +2138,20 @@ impl App {
         self.qr_mode = QrMode::Terminal;
 
         self.next_qr_refresh_at = None;
+    }
+
+    fn mark_external_qr_error(&mut self, error: &str) {
+
+        self.external_qr_status = Some(format!("刷新失败: {error}"));
+
+        let _ = self.write_external_qr_status("error", Some(error));
+    }
+
+    fn mark_external_qr_inactive(&mut self, reason: &str) {
+
+        self.external_qr_status = Some(reason.to_string());
+
+        let _ = self.write_external_qr_status("inactive", Some(reason));
     }
 
     fn move_vertical(&mut self, delta: isize) {
@@ -2760,6 +2888,20 @@ fn external_qr_svg_path() -> Result<PathBuf, String> {
     Ok(external_qr_dir()?.join("iclass-buaa-tui-qr.svg"))
 }
 
+fn external_qr_status_path() -> Result<PathBuf, String> {
+
+    Ok(external_qr_dir()?.join("iclass-buaa-tui-qr-status.json"))
+}
+
+fn format_qr_timestamp(timestamp: i64) -> String {
+
+    chrono::Local
+        .timestamp_millis_opt(timestamp)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
 fn open_path_with_system(path: &Path) -> Result<(), String> {
 
     let result = if cfg!(target_os = "macos") {
@@ -3031,5 +3173,37 @@ mod tests {
         assert!(!app.bykc.loading);
 
         assert!(app.bykc.loaded);
+    }
+
+    #[test]
+
+    fn external_qr_status_json_contains_course_and_error_state() {
+
+        let app = App {
+            qr_display: Some(super::QrDisplay {
+                course_sched_id: "sched-42".to_string(),
+                course_name:     "测试课程".to_string(),
+                qr_url:          "https://example.invalid/qr".to_string(),
+                timestamp:       1_779_811_200_000,
+            }),
+            ..App::default()
+        };
+
+        app.write_external_qr_status("error", Some("刷新失败"))
+            .unwrap();
+
+        let status_path = super::external_qr_status_path().unwrap();
+
+        let raw = std::fs::read_to_string(status_path).unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(value["state"], "error");
+
+        assert_eq!(value["course_name"], "测试课程");
+
+        assert_eq!(value["course_sched_id"], "sched-42");
+
+        assert_eq!(value["error"], "刷新失败");
     }
 }
