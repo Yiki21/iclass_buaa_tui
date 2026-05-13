@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::args::{InstallAutologinArgs, UninstallAutologinArgs};
+use super::args::{AutologinStatusArgs, InstallAutologinArgs, UninstallAutologinArgs};
 use super::config::{
     load_config, parse_planner_time, resolve_config_path, validate_planner_interval_minutes,
 };
@@ -75,6 +75,35 @@ pub(crate) fn uninstall_autologin(args: UninstallAutologinArgs) -> Result<()> {
     }
 }
 
+pub(crate) fn autologin_status(args: AutologinStatusArgs) -> Result<()> {
+
+    #[cfg(target_os = "linux")]
+    {
+
+        autologin_status_linux(args)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+
+        autologin_status_macos(args)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+
+        autologin_status_windows(args)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+
+        let _ = args;
+
+        bail!("当前平台暂不支持 autologin-status");
+    }
+}
+
 #[cfg(target_os = "linux")]
 
 fn install_autologin_linux(args: InstallAutologinArgs) -> Result<()> {
@@ -134,6 +163,12 @@ fn install_autologin_linux(args: InstallAutologinArgs) -> Result<()> {
         "启用方式: systemctl --user daemon-reload && systemctl --user enable --now {timer_name}"
     );
 
+    print_status_hint(&unit_prefix);
+
+    println!("安装后状态检查:");
+
+    print_linux_autologin_status(&output_dir, &unit_prefix)?;
+
     Ok(())
 }
 
@@ -168,6 +203,71 @@ fn uninstall_autologin_linux(args: UninstallAutologinArgs) -> Result<()> {
         service_path.display(),
         timer_path.display()
     );
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+
+fn autologin_status_linux(args: AutologinStatusArgs) -> Result<()> {
+
+    let output_dir = args.output_dir.unwrap_or(default_linux_autologin_dir()?);
+
+    let unit_prefix = args
+        .unit_prefix
+        .unwrap_or_else(|| DEFAULT_AUTOLOGIN_PREFIX.to_string());
+
+    print_linux_autologin_status(&output_dir, &unit_prefix)
+}
+
+#[cfg(target_os = "linux")]
+
+fn print_linux_autologin_status(output_dir: &Path, unit_prefix: &str) -> Result<()> {
+
+    let service_name = format!("{unit_prefix}-planner.service");
+
+    let timer_name = format!("{unit_prefix}-planner.timer");
+
+    let service_path = output_dir.join(&service_name);
+
+    let timer_path = output_dir.join(&timer_name);
+
+    println!("autologin-status | platform=linux | scheduler=systemd --user");
+
+    println!("service_file={}", status_file_state(&service_path));
+
+    println!("timer_file={}", status_file_state(&timer_path));
+
+    print_command_status(
+        "timer",
+        "systemctl --user status",
+        Command::new("systemctl")
+            .arg("--user")
+            .arg("status")
+            .arg(&timer_name),
+    )?;
+
+    print_command_status(
+        "timer-next-run",
+        "systemctl --user list-timers",
+        Command::new("systemctl")
+            .arg("--user")
+            .arg("list-timers")
+            .arg("--all")
+            .arg(&timer_name),
+    )?;
+
+    print_command_status(
+        "recent-logs",
+        "journalctl --user",
+        Command::new("journalctl")
+            .arg("--user")
+            .arg("-u")
+            .arg(&service_name)
+            .arg("-n")
+            .arg("20")
+            .arg("--no-pager"),
+    )?;
 
     Ok(())
 }
@@ -223,6 +323,12 @@ fn install_autologin_macos(args: InstallAutologinArgs) -> Result<()> {
 
     println!("自动签到将在每天 {planner_time} 后开始按 {planner_interval_minutes} 分钟周期轮询。");
 
+    print_status_hint(&unit_prefix);
+
+    println!("安装后状态检查:");
+
+    print_macos_autologin_status(&output_dir, &unit_prefix)?;
+
     Ok(())
 }
 
@@ -249,6 +355,50 @@ fn uninstall_autologin_macos(args: UninstallAutologinArgs) -> Result<()> {
     remove_file_if_exists(&plist_path)?;
 
     println!("已卸载 macOS launchd 配置:\n{}", plist_path.display());
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+
+fn autologin_status_macos(args: AutologinStatusArgs) -> Result<()> {
+
+    let output_dir = args
+        .output_dir
+        .unwrap_or(default_macos_launch_agents_dir()?);
+
+    let unit_prefix = args
+        .unit_prefix
+        .unwrap_or_else(|| DEFAULT_AUTOLOGIN_PREFIX.to_string());
+
+    print_macos_autologin_status(&output_dir, &unit_prefix)
+}
+
+#[cfg(target_os = "macos")]
+
+fn print_macos_autologin_status(output_dir: &Path, unit_prefix: &str) -> Result<()> {
+
+    let label = format!("{unit_prefix}.planner");
+
+    let plist_path = output_dir.join(format!("{label}.plist"));
+
+    println!("autologin-status | platform=macos | scheduler=launchd");
+
+    println!("plist_file={}", status_file_state(&plist_path));
+
+    print_command_status(
+        "launchd-service",
+        "launchctl print",
+        Command::new("launchctl")
+            .arg("print")
+            .arg(format!("gui/{}/{}", current_uid(), label)),
+    )?;
+
+    println!(
+        "recent_logs=macOS launchd does not keep one fixed log file; inspect Console.app or run: \
+         log show --predicate 'process == \"{}\"' --last 1h",
+        label
+    );
 
     Ok(())
 }
@@ -320,6 +470,12 @@ fn install_autologin_windows(args: InstallAutologinArgs) -> Result<()> {
          {planner_time} 前自行跳过。"
     );
 
+    print_status_hint(&unit_prefix);
+
+    println!("安装后状态检查:");
+
+    print_windows_autologin_status(&output_dir, &unit_prefix)?;
+
     Ok(())
 }
 
@@ -346,6 +502,48 @@ fn uninstall_autologin_windows(args: UninstallAutologinArgs) -> Result<()> {
         script_path.display(),
         task_name
     );
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+
+fn autologin_status_windows(args: AutologinStatusArgs) -> Result<()> {
+
+    let output_dir = args.output_dir.unwrap_or(default_windows_autologin_dir()?);
+
+    let unit_prefix = args
+        .unit_prefix
+        .unwrap_or_else(|| DEFAULT_AUTOLOGIN_PREFIX.to_string());
+
+    print_windows_autologin_status(&output_dir, &unit_prefix)
+}
+
+#[cfg(target_os = "windows")]
+
+fn print_windows_autologin_status(output_dir: &Path, unit_prefix: &str) -> Result<()> {
+
+    let task_name = format!("{unit_prefix}-planner");
+
+    let script_path = output_dir.join(format!("{task_name}.cmd"));
+
+    println!("autologin-status | platform=windows | scheduler=schtasks");
+
+    println!("wrapper_file={}", status_file_state(&script_path));
+
+    print_command_status(
+        "scheduled-task",
+        "schtasks /Query",
+        Command::new("schtasks")
+            .arg("/Query")
+            .arg("/TN")
+            .arg(&task_name)
+            .arg("/V")
+            .arg("/FO")
+            .arg("LIST"),
+    )?;
+
+    println!("recent_logs=Windows Task Scheduler History for task '{task_name}'");
 
     Ok(())
 }
@@ -435,6 +633,92 @@ fn run_schtasks<const N: usize>(args: [&str; N]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn status_file_state(path: &Path) -> String {
+
+    if path.is_file() {
+
+        format!("present ({})", path.display())
+    } else {
+
+        format!("missing ({})", path.display())
+    }
+}
+
+fn print_command_status(label: &str, command_label: &str, command: &mut Command) -> Result<()> {
+
+    println!("{label}: command={command_label}");
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+
+            println!("{label}: ok=no");
+
+            println!("{label}: error={error}");
+
+            return Ok(());
+        }
+    };
+
+    println!(
+        "{label}: ok={}",
+        if output.status.success() { "yes" } else { "no" }
+    );
+
+    println!("{label}: exit_status={}", output.status);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    print_trimmed_output(label, "stdout", stdout.trim());
+
+    print_trimmed_output(label, "stderr", stderr.trim());
+
+    Ok(())
+}
+
+fn print_trimmed_output(label: &str, stream: &str, text: &str) {
+
+    if text.is_empty() {
+
+        println!("{label}: {stream}=<empty>");
+
+        return;
+    }
+
+    println!("{label}: {stream}:");
+
+    for line in text.lines().take(80) {
+
+        println!("  {line}");
+    }
+
+    if text.lines().count() > 80 {
+
+        println!("  ...");
+    }
+}
+
+fn print_status_hint(unit_prefix: &str) {
+
+    println!("健康检查: iclass_buaa_tui autologin-status --unit-prefix {unit_prefix}");
+}
+
+#[cfg(target_os = "macos")]
+
+fn current_uid() -> String {
+
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| env::var("UID").unwrap_or_else(|_| "unknown".to_string()))
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {

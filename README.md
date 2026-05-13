@@ -155,6 +155,7 @@ iclass_buaa_tui plan
 iclass_buaa_tui --help
 iclass_buaa_tui plan --help
 iclass_buaa_tui install-autologin --help
+iclass_buaa_tui autologin-status --help
 iclass_buaa_tui uninstall-autologin --help
 ```
 
@@ -164,6 +165,7 @@ iclass_buaa_tui uninstall-autologin --help
 - `install-autologin --output-dir <PATH>`: 指定平台调度文件的输出目录。Linux 写 `.service`/`.timer`，macOS 写 `.plist`，Windows 写包装 `.cmd`。
 - `install-autologin --planner-time <HH:MM[:SS]>`: 覆盖配置里的 `planner_time`。
 - `install-autologin --planner-interval-minutes <N>`: 覆盖配置里的轮询周期，单位分钟。
+- `autologin-status --unit-prefix <PREFIX>`: 查看当前平台调度器状态、下次触发信息和最近日志位置。
 - `uninstall-autologin --output-dir <PATH>`: 指定需要删除的平台调度文件目录。
 - `uninstall-autologin --unit-prefix <PREFIX>`: 指定需要卸载的任务名前缀。
 
@@ -172,6 +174,12 @@ iclass_buaa_tui uninstall-autologin --help
 
 ```bash
 iclass_buaa_tui install-autologin
+```
+
+安装后可以立即检查调度器健康状态：
+
+```bash
+iclass_buaa_tui autologin-status
 ```
 
 各平台行为：

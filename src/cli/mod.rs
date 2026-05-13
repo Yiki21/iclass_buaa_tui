@@ -30,6 +30,7 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::Plan(args) => planner::plan_command(args).await,
         CommandKind::Doctor(args) => planner::doctor_command(args).await,
         CommandKind::InstallAutologin(args) => autologin::install_autologin(args),
+        CommandKind::AutologinStatus(args) => autologin::autologin_status(args),
         CommandKind::UninstallAutologin(args) => autologin::uninstall_autologin(args),
     }
 }

@@ -1087,10 +1087,14 @@ fn build_local_time(date: &str, time: &str) -> Result<Option<DateTime<Local>>> {
         return Ok(None);
     }
 
-    let naive =
-        NaiveDateTime::parse_from_str(&format!("{date} {time}:00"), "%Y-%m-%d %H:%M:%S").or_else(
-            |_| NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M:%S"),
-        )?;
+    let datetime_with_seconds = format!("{date} {time}:00");
+
+    let datetime_without_seconds = format!("{date} {time}");
+
+    let naive = match NaiveDateTime::parse_from_str(&datetime_with_seconds, "%Y-%m-%d %H:%M:%S") {
+        Ok(value) => value,
+        Err(_) => NaiveDateTime::parse_from_str(&datetime_without_seconds, "%Y-%m-%d %H:%M:%S")?,
+    };
 
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(value) => Ok(Some(value)),

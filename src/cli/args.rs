@@ -29,6 +29,9 @@ pub(crate) enum CommandKind {
     /// Install platform-native scheduled autologin automation.
     #[command(name = "install-autologin", alias = "install-systemd")]
     InstallAutologin(InstallAutologinArgs),
+    /// Show platform scheduler health for autologin automation.
+    #[command(name = "autologin-status")]
+    AutologinStatus(AutologinStatusArgs),
     /// Uninstall platform-native scheduled autologin automation.
     #[command(name = "uninstall-autologin", alias = "uninstall-systemd")]
     UninstallAutologin(UninstallAutologinArgs),
@@ -129,6 +132,17 @@ pub(crate) struct InstallAutologinArgs {
     /// Override planner_interval_minutes from config when generating the scheduler entry.
     #[arg(long)]
     pub(crate) planner_interval_minutes: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct AutologinStatusArgs {
+    /// Target directory containing generated scheduler files when applicable.
+    #[arg(long)]
+    pub(crate) output_dir:  Option<PathBuf>,
+    /// Prefix for generated scheduler task names.
+    #[arg(long)]
+    pub(crate) unit_prefix: Option<String>,
 }
 
 #[derive(Debug, Args)]
