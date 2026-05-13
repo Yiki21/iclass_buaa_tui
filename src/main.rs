@@ -208,7 +208,7 @@ fn event_loop(
 
         while let Ok(message) = rx.try_recv() {
 
-            app.handle_async(message);
+            app.handle_async(message, tx);
         }
 
         app.handle_tick();

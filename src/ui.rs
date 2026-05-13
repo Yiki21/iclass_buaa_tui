@@ -317,10 +317,17 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
     let header_text = if let Some(session) = &app.session {
 
         format!(
-            "用户: {} ({}) | 模式: {} | 共 {} 条课程",
+            "用户: {} ({}) | 模式: {} | iClass: {} | 共 {} 条课程",
             session.user_name,
             session.user_id,
             if session.use_vpn { "VPN" } else { "直连" },
+            if app.iclass_loading {
+
+                "加载中"
+            } else {
+
+                "就绪"
+            },
             app.courses.len()
         )
     } else {
@@ -511,10 +518,17 @@ fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
         let statistics = bykc_statistics_summary(app);
 
         format!(
-            "用户: {} ({}) | VPN: {} | 可选 {} 门 | 已选 {} 门 | {}",
+            "用户: {} ({}) | VPN: {} | BYKC: {} | 可选 {} 门 | 已选 {} 门 | {}",
             session.user_name,
             session.user_id,
             if session.use_vpn { "开启" } else { "关闭" },
+            if app.bykc.loading {
+
+                "加载中"
+            } else {
+
+                "就绪"
+            },
             app.bykc.courses.len(),
             app.bykc.chosen_courses.len(),
             statistics,
@@ -570,7 +584,13 @@ fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
 
     let items = if app.bykc.courses.is_empty() {
 
-        vec![ListItem::new("暂无课程")]
+        vec![ListItem::new(if app.bykc.loading {
+
+            "加载 BYKC 可选课程中..."
+        } else {
+
+            "暂无课程"
+        })]
     } else {
 
         app.bykc
@@ -646,7 +666,13 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
 
     let items = if app.bykc.chosen_courses.is_empty() {
 
-        vec![ListItem::new("暂无已选课程")]
+        vec![ListItem::new(if app.bykc.loading {
+
+            "加载 BYKC 已选课程中..."
+        } else {
+
+            "暂无已选课程"
+        })]
     } else {
 
         app.bykc

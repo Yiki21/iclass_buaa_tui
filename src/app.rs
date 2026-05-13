@@ -281,6 +281,7 @@ impl From<&LoginForm> for RememberedLogin {
 pub struct BykcState {
     pub view:              BykcView,
     pub include_all:       bool,
+    pub loading:           bool,
     pub loaded:            bool,
     pub courses:           Vec<BykcCourse>,
     pub selected_course:   usize,
@@ -498,6 +499,7 @@ pub struct App {
     pub event_log:             Vec<EventEntry>,
     pub status:                String,
     pub busy:                  bool,
+    pub iclass_loading:        bool,
     pub should_quit:           bool,
     pub show_help:             bool,
     pub qr_display:            Option<QrDisplay>,
@@ -534,6 +536,7 @@ impl Default for App {
             status:                "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
                 .to_string(),
             busy:                  false,
+            iclass_loading:        false,
             should_quit:           false,
             show_help:             false,
             qr_display:            None,
@@ -863,12 +866,13 @@ impl App {
     /// to those payloads flows through this single function, which makes async
     /// state transitions much easier to reason about.
 
-    pub fn handle_async(&mut self, event: AsyncEvent) {
-
-        self.busy = false;
+    pub fn handle_async(&mut self, event: AsyncEvent, tx: &UnboundedSender<AsyncEvent>) {
 
         match event {
             AsyncEvent::Login(result) => {
+
+                self.busy = false;
+
                 match result {
                     Ok(data) => {
 
@@ -876,7 +880,10 @@ impl App {
 
                         self.active_tab = WorkspaceTab::IClass;
 
-                        self.session = Some(data.session);
+                        let should_prewarm_bykc =
+                            data.session.use_vpn && data.session.bykc_api.is_some();
+
+                        self.session = Some(data.session.clone());
 
                         self.login_diagnostic = None;
 
@@ -900,6 +907,11 @@ impl App {
                             "登录成功。tab 切换 iClass / BYKC，s 直接签到，g 终端二维码，G \
                              外部二维码，r 刷新，Shift+X 退出登录。{remember_status}"
                         ));
+
+                        if should_prewarm_bykc {
+
+                            self.prewarm_bykc(data.session, tx);
+                        }
                     }
                     Err(error) => {
 
@@ -918,6 +930,9 @@ impl App {
                 }
             }
             AsyncEvent::LoginCaptcha(result) => {
+
+                self.busy = false;
+
                 match result {
                     Ok(pending) => {
 
@@ -941,6 +956,9 @@ impl App {
                 }
             }
             AsyncEvent::Refresh(result) => {
+
+                self.iclass_loading = false;
+
                 match result {
                     Ok(courses) => {
 
@@ -984,6 +1002,9 @@ impl App {
                 }
             }
             AsyncEvent::Sign(result) => {
+
+                self.iclass_loading = false;
+
                 match result {
                     Ok(outcome) => {
 
@@ -1010,6 +1031,9 @@ impl App {
                 }
             }
             AsyncEvent::BykcSync(result) => {
+
+                self.bykc.loading = false;
+
                 match *result {
                     Ok(data) => {
 
@@ -1060,6 +1084,9 @@ impl App {
                 }
             }
             AsyncEvent::Doctor(result) => {
+
+                self.busy = false;
+
                 match result {
                     Ok(report) => {
 
@@ -1238,7 +1265,7 @@ impl App {
             self.clear_qr();
         }
 
-        if self.active_tab == WorkspaceTab::Bykc && !self.bykc.loaded {
+        if self.active_tab == WorkspaceTab::Bykc && !self.bykc.loaded && !self.bykc.loading {
 
             self.refresh_bykc(tx);
         }
@@ -1394,11 +1421,32 @@ impl App {
             return;
         };
 
-        self.busy = true;
+        self.iclass_loading = true;
 
         self.info("刷新课程中...");
 
         spawn_refresh(session, tx.clone());
+    }
+
+    fn prewarm_bykc(&mut self, session: Session, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.bykc.loading || self.bykc.loaded {
+
+            return;
+        }
+
+        self.bykc.loading = true;
+
+        self.info("登录成功，后台预热 BYKC 数据...");
+
+        spawn_bykc_sync(
+            session,
+            self.bykc.include_all,
+            self.bykc.detail_course_id,
+            Some("BYKC 数据已预热".to_string()),
+            false,
+            tx.clone(),
+        );
     }
 
     fn refresh_bykc(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -1419,7 +1467,7 @@ impl App {
             return;
         }
 
-        self.busy = true;
+        self.bykc.loading = true;
 
         self.info("加载博雅课程中...");
 
@@ -1464,7 +1512,7 @@ impl App {
             return;
         };
 
-        self.busy = true;
+        self.bykc.loading = true;
 
         self.info("加载博雅课程详情...");
 
@@ -1503,7 +1551,7 @@ impl App {
             return;
         }
 
-        self.busy = true;
+        self.bykc.loading = true;
 
         self.info(format!("报名中: {}", course.course_name));
 
@@ -1543,7 +1591,7 @@ impl App {
             return;
         }
 
-        self.busy = true;
+        self.bykc.loading = true;
 
         self.info(format!("退选中: {}", course.course_name));
 
@@ -1599,7 +1647,7 @@ impl App {
             return;
         }
 
-        self.busy = true;
+        self.bykc.loading = true;
 
         self.info(format!("退选中: {}", course.course_name));
 
@@ -1658,7 +1706,7 @@ impl App {
             return;
         }
 
-        self.busy = true;
+        self.bykc.loading = true;
 
         self.info(format!("博雅{action_label}中: {}", course.course_name));
 
@@ -1705,7 +1753,7 @@ impl App {
             return;
         }
 
-        self.busy = true;
+        self.iclass_loading = true;
 
         self.info(format!("签到中: {}", course.name));
 
@@ -1731,6 +1779,8 @@ impl App {
         self.bykc = BykcState::default();
 
         self.busy = false;
+
+        self.iclass_loading = false;
 
         self.clear_qr();
 
@@ -2874,7 +2924,8 @@ fn clamp_step(current: usize, len: usize, delta: isize) -> usize {
 
 mod tests {
 
-    use super::{App, EventLevel, MAX_EVENT_LOG_ENTRIES};
+    use super::{App, AsyncEvent, BykcSyncSuccess, EventLevel, MAX_EVENT_LOG_ENTRIES};
+    use crate::bykc::BykcCourse;
 
     #[test]
 
@@ -2917,5 +2968,51 @@ mod tests {
         assert_eq!(app.event_log[0].message, "已清空事件日志");
 
         assert_eq!(app.status, "已清空事件日志");
+    }
+
+    #[test]
+
+    fn async_refresh_events_clear_only_their_module_loading_state() {
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App {
+            busy: true,
+            iclass_loading: true,
+            ..App::default()
+        };
+
+        app.bykc.loading = true;
+
+        app.handle_async(AsyncEvent::Refresh(Ok(Vec::new())), &tx);
+
+        assert!(app.busy);
+
+        assert!(!app.iclass_loading);
+
+        assert!(app.bykc.loading);
+
+        app.handle_async(
+            AsyncEvent::BykcSync(Box::new(Ok(BykcSyncSuccess {
+                courses:           vec![BykcCourse {
+                    id: 42,
+                    course_name: "博雅课程".to_string(),
+                    ..BykcCourse::default()
+                }],
+                chosen_courses:    Vec::new(),
+                statistics:        None,
+                statistics_error:  None,
+                detail:            None,
+                message:           Some("预热完成".to_string()),
+                open_detail_popup: false,
+            }))),
+            &tx,
+        );
+
+        assert!(app.busy);
+
+        assert!(!app.bykc.loading);
+
+        assert!(app.bykc.loaded);
     }
 }
