@@ -12,7 +12,7 @@ use crate::{
     bykc::{BykcChosenCourse, BykcSignAction},
     constants::network_urls,
     iclass::IClassApi,
-    model::{CourseDetailItem, SignOutcome},
+    model::{CourseDetailItem, LoginFailureKind, SignOutcome},
 };
 
 use super::args::{DoctorArgs, ListTodayArgs, PlanArgs, SignArgs};
@@ -39,6 +39,15 @@ struct DryRunCourse {
     course:     ListedTarget,
     filter:     FilterDecision,
     evaluation: Option<EvaluatedCourse>,
+}
+
+#[derive(Debug)]
+
+struct ClassifiedError {
+    error:       anyhow::Error,
+    retryable:   bool,
+    reason:      &'static str,
+    description: String,
 }
 
 impl From<SignAction> for BykcSignAction {
@@ -514,18 +523,22 @@ async fn fetch_today_targets_with_retry(
             Ok(courses) => return Ok(courses),
             Err(error) => {
 
-                let message = error.to_string();
+                let classified = classify_anyhow_error(error);
 
-                eprintln!(
-                    "[attempt {attempt}/{}] 获取今日签到目标失败 -> {}",
-                    retry.max_attempts, message
-                );
+                print_retry_decision("获取今日签到目标", attempt, &retry, &classified);
 
-                last_error = Some(error);
+                let should_retry = classified.retryable && attempt < retry.max_attempts;
 
-                if attempt < retry.max_attempts {
+                let delay_seconds = retry.delay_seconds(attempt);
 
-                    sleep(Duration::from_secs(retry.interval_seconds)).await;
+                last_error = Some(classified.error);
+
+                if should_retry {
+
+                    sleep(Duration::from_secs(delay_seconds)).await;
+                } else {
+
+                    break;
                 }
             }
         }
@@ -922,6 +935,131 @@ async fn login_session(
     }
 }
 
+async fn login_session_classified(
+    api: &IClassApi,
+    input: &crate::model::LoginInput,
+    debug_login: bool,
+) -> std::result::Result<crate::model::Session, ClassifiedError> {
+
+    match api.login_with_diagnostic(input).await {
+        Ok(session) => Ok(session),
+        Err(diagnostic) => {
+
+            if debug_login {
+
+                match serde_json::to_string_pretty(&diagnostic) {
+                    Ok(text) => eprintln!("{text}"),
+                    Err(error) => eprintln!("登录诊断序列化失败: {error}"),
+                }
+            }
+
+            let (retryable, reason) = classify_login_failure_kind(&diagnostic.kind);
+
+            Err(ClassifiedError {
+                error: anyhow!(diagnostic.summary.clone()),
+                retryable,
+                reason,
+                description: diagnostic.summary,
+            })
+        }
+    }
+}
+
+fn classify_login_failure_kind(kind: &LoginFailureKind) -> (bool, &'static str) {
+
+    match kind {
+        LoginFailureKind::Network | LoginFailureKind::Timeout | LoginFailureKind::Dns => {
+            (true, "transient-login-network")
+        }
+        LoginFailureKind::Http | LoginFailureKind::IclassApi | LoginFailureKind::Unknown => {
+            (true, "transient-login-upstream")
+        }
+        LoginFailureKind::Captcha => (false, "captcha-required"),
+        LoginFailureKind::Credentials => (false, "bad-credentials"),
+        LoginFailureKind::Validation => (false, "configuration-error"),
+        LoginFailureKind::SsoChanged => (false, "sso-page-changed"),
+    }
+}
+
+fn classify_anyhow_error(error: anyhow::Error) -> ClassifiedError {
+
+    let description = error.to_string();
+
+    let normalized = error
+        .chain()
+        .map(|cause| cause.to_string().to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    let (retryable, reason) = if normalized.contains("course_sched_id 不能为空")
+        || normalized.contains("courseschedid 不能为空")
+        || normalized.contains("配置")
+        || normalized.contains("不能为空")
+        || normalized.contains("需要 vpn 模式")
+        || normalized.contains("验证码")
+        || normalized.contains("账号或密码")
+    {
+
+        (false, "non-retryable-input")
+    } else if normalized.contains("5xx")
+        || normalized.contains("500")
+        || normalized.contains("502")
+        || normalized.contains("503")
+        || normalized.contains("504")
+        || normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("超时")
+        || normalized.contains("dns")
+        || normalized.contains("connect")
+        || normalized.contains("connection")
+        || normalized.contains("网络")
+        || normalized.contains("请求失败")
+    {
+
+        (true, "transient-network")
+    } else {
+
+        (false, "non-retryable-upstream")
+    };
+
+    ClassifiedError {
+        error,
+        retryable,
+        reason,
+        description,
+    }
+}
+
+fn print_retry_decision(
+    operation: &str,
+    attempt: u32,
+    retry: &RetryPolicy,
+    classified: &ClassifiedError,
+) {
+
+    if classified.retryable && attempt < retry.max_attempts {
+
+        let delay = retry.delay_seconds(attempt);
+
+        eprintln!(
+            "[attempt {attempt}/{}] {operation} 失败 -> reason={} -> {}；{} 秒后重试",
+            retry.max_attempts, classified.reason, classified.description, delay
+        );
+    } else if classified.retryable {
+
+        eprintln!(
+            "[attempt {attempt}/{}] {operation} 失败 -> reason={} -> {}；已达到最大重试次数",
+            retry.max_attempts, classified.reason, classified.description
+        );
+    } else {
+
+        eprintln!(
+            "[attempt {attempt}/{}] {operation} 失败 -> reason={} -> {}；不可重试，停止",
+            retry.max_attempts, classified.reason, classified.description
+        );
+    }
+}
+
 // Sign execution and diagnostics
 
 async fn sign_iclass_with_retry(
@@ -938,7 +1076,7 @@ async fn sign_iclass_with_retry(
 
         let api = IClassApi::new(config.use_vpn)?;
 
-        match login_session(&api, &config.login_input(), debug_login).await {
+        match login_session_classified(&api, &config.login_input(), debug_login).await {
             Ok(session) => {
                 match api.sign_now(&session, course_sched_id).await {
                     Ok(outcome) => return Ok(outcome),
@@ -946,31 +1084,56 @@ async fn sign_iclass_with_retry(
 
                         let name = display_name.as_deref().unwrap_or(course_sched_id);
 
-                        eprintln!(
-                            "[attempt {attempt}/{}] iClass 签到失败 -> {} ({}) -> {}",
-                            retry.max_attempts, name, course_sched_id, error
+                        let classified = classify_anyhow_error(error);
+
+                        print_retry_decision(
+                            &format!("iClass 签到 {name} ({course_sched_id})"),
+                            attempt,
+                            &retry,
+                            &classified,
                         );
 
-                        last_error = Some(error);
+                        let should_retry = classified.retryable && attempt < retry.max_attempts;
+
+                        let delay_seconds = retry.delay_seconds(attempt);
+
+                        last_error = Some(classified.error);
+
+                        if should_retry {
+
+                            sleep(Duration::from_secs(delay_seconds)).await;
+                        } else {
+
+                            break;
+                        }
                     }
                 }
             }
-            Err(error) => {
+            Err(classified) => {
 
                 let name = display_name.as_deref().unwrap_or(course_sched_id);
 
-                eprintln!(
-                    "[attempt {attempt}/{}] iClass 登录失败 -> {} ({}) -> {}",
-                    retry.max_attempts, name, course_sched_id, error
+                print_retry_decision(
+                    &format!("iClass 登录 {name} ({course_sched_id})"),
+                    attempt,
+                    &retry,
+                    &classified,
                 );
 
-                last_error = Some(error);
+                let should_retry = classified.retryable && attempt < retry.max_attempts;
+
+                let delay_seconds = retry.delay_seconds(attempt);
+
+                last_error = Some(classified.error);
+
+                if should_retry {
+
+                    sleep(Duration::from_secs(delay_seconds)).await;
+                } else {
+
+                    break;
+                }
             }
-        }
-
-        if attempt < retry.max_attempts {
-
-            sleep(Duration::from_secs(retry.interval_seconds)).await;
         }
     }
 
@@ -996,7 +1159,7 @@ async fn sign_bykc_with_retry(
 
         let api = IClassApi::new(config.use_vpn)?;
 
-        match login_session(&api, &config.login_input(), debug_login).await {
+        match login_session_classified(&api, &config.login_input(), debug_login).await {
             Ok(session) => {
 
                 let bykc_api = session
@@ -1025,38 +1188,59 @@ async fn sign_bykc_with_retry(
                             .map(str::to_string)
                             .unwrap_or_else(|| course_id.to_string());
 
-                        eprintln!(
-                            "[attempt {attempt}/{}] BYKC {} 失败 -> {} ({}) -> {}",
-                            retry.max_attempts,
-                            action.label(),
-                            name,
-                            course_id,
-                            error
+                        let classified = classify_anyhow_error(error);
+
+                        print_retry_decision(
+                            &format!("BYKC {} {name} ({course_id})", action.label()),
+                            attempt,
+                            &retry,
+                            &classified,
                         );
 
-                        last_error = Some(error);
+                        let should_retry = classified.retryable && attempt < retry.max_attempts;
+
+                        let delay_seconds = retry.delay_seconds(attempt);
+
+                        last_error = Some(classified.error);
+
+                        if should_retry {
+
+                            sleep(Duration::from_secs(delay_seconds)).await;
+                        } else {
+
+                            break;
+                        }
                     }
                 }
             }
-            Err(error) => {
+            Err(classified) => {
 
                 let name = display_name
                     .as_deref()
                     .map(str::to_string)
                     .unwrap_or_else(|| course_id.to_string());
 
-                eprintln!(
-                    "[attempt {attempt}/{}] BYKC 登录失败 -> {} ({}) -> {}",
-                    retry.max_attempts, name, course_id, error
+                print_retry_decision(
+                    &format!("BYKC 登录 {name} ({course_id})"),
+                    attempt,
+                    &retry,
+                    &classified,
                 );
 
-                last_error = Some(error);
+                let should_retry = classified.retryable && attempt < retry.max_attempts;
+
+                let delay_seconds = retry.delay_seconds(attempt);
+
+                last_error = Some(classified.error);
+
+                if should_retry {
+
+                    sleep(Duration::from_secs(delay_seconds)).await;
+                } else {
+
+                    break;
+                }
             }
-        }
-
-        if attempt < retry.max_attempts {
-
-            sleep(Duration::from_secs(retry.interval_seconds)).await;
         }
     }
 
@@ -1559,5 +1743,52 @@ mod tests {
         assert_eq!(dry_run_skip_reason(&signed), "already-signed");
 
         Ok(())
+    }
+
+    #[test]
+
+    fn retry_policy_uses_exponential_backoff_with_cap() {
+
+        let retry = RetryPolicy {
+            max_attempts:     10,
+            interval_seconds: 3,
+        };
+
+        assert_eq!(retry.delay_seconds(1), 3);
+
+        assert_eq!(retry.delay_seconds(2), 6);
+
+        assert_eq!(retry.delay_seconds(4), 24);
+
+        assert_eq!(retry.delay_seconds(20), 768);
+    }
+
+    #[test]
+
+    fn retry_classification_stops_on_credentials_and_retries_network() {
+
+        let (retryable, reason) = classify_login_failure_kind(&LoginFailureKind::Credentials);
+
+        assert!(!retryable);
+
+        assert_eq!(reason, "bad-credentials");
+
+        let (retryable, reason) = classify_login_failure_kind(&LoginFailureKind::Timeout);
+
+        assert!(retryable);
+
+        assert_eq!(reason, "transient-login-network");
+
+        let network = classify_anyhow_error(anyhow!("请求失败: timed out while connecting"));
+
+        assert!(network.retryable);
+
+        assert_eq!(network.reason, "transient-network");
+
+        let input = classify_anyhow_error(anyhow!("courseSchedId 不能为空"));
+
+        assert!(!input.retryable);
+
+        assert_eq!(input.reason, "non-retryable-input");
     }
 }

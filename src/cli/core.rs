@@ -59,6 +59,15 @@ pub(crate) struct RetryPolicy {
     pub(crate) interval_seconds: u64,
 }
 
+impl RetryPolicy {
+    pub(crate) fn delay_seconds(&self, attempt: u32) -> u64 {
+
+        let exponent = attempt.saturating_sub(1).min(8);
+
+        self.interval_seconds.saturating_mul(1_u64 << exponent)
+    }
+}
+
 /// Planner state for a course in the current automation cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 
