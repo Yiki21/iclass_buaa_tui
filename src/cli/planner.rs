@@ -21,6 +21,26 @@ use super::core::{
     EvaluatedCourse, ListedTarget, PollStatusKind, RetryPolicy, SignAction, SignSource,
 };
 
+#[derive(Debug, Clone)]
+
+struct FilterDecision {
+    include_patterns: Vec<String>,
+    exclude_patterns: Vec<String>,
+    include_matches:  Vec<String>,
+    exclude_matches:  Vec<String>,
+    matched_include:  bool,
+    matched_exclude:  bool,
+    included:         bool,
+}
+
+#[derive(Debug, Clone)]
+
+struct DryRunCourse {
+    course:     ListedTarget,
+    filter:     FilterDecision,
+    evaluation: Option<EvaluatedCourse>,
+}
+
 impl From<SignAction> for BykcSignAction {
     fn from(value: SignAction) -> Self {
 
@@ -233,14 +253,16 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
 
     let _unit_prefix = args.unit_prefix;
 
-    let evaluated = evaluate_today_courses(&config, args.debug_login).await?;
-
     if args.dry_run {
 
-        print_evaluated_courses(&evaluated);
+        let evaluated = evaluate_today_courses_for_dry_run(&config, args.debug_login).await?;
+
+        print_dry_run_courses(&evaluated);
 
         return Ok(());
     }
+
+    let evaluated = evaluate_today_courses(&config, args.debug_login).await?;
 
     let due_targets: Vec<ListedTarget> = evaluated
         .iter()
@@ -545,6 +567,48 @@ async fn evaluate_today_courses(
     Ok(evaluated)
 }
 
+/// Computes dry-run rows for all loaded targets, including filtered-out courses.
+
+async fn evaluate_today_courses_for_dry_run(
+    config: &AutomationConfig,
+    debug_login: bool,
+) -> Result<Vec<DryRunCourse>> {
+
+    let courses = fetch_today_targets_with_retry(config, debug_login).await?;
+
+    let now = Local::now();
+
+    let daily_start_at = daily_start_at(config, now)?;
+
+    let mut evaluated = Vec::with_capacity(courses.len());
+
+    for course in courses {
+
+        let filter = explain_filter_decision(&course, config);
+
+        let evaluation = if filter.included {
+
+            Some(evaluate_course(
+                course.clone(),
+                daily_start_at,
+                now,
+                config.advance_minutes,
+            )?)
+        } else {
+
+            None
+        };
+
+        evaluated.push(DryRunCourse {
+            course,
+            filter,
+            evaluation,
+        });
+    }
+
+    Ok(evaluated)
+}
+
 /// Classifies one course into the current planner state.
 
 fn evaluate_course(
@@ -724,25 +788,43 @@ fn filter_targets(courses: Vec<ListedTarget>, config: &AutomationConfig) -> Vec<
 
     courses
         .into_iter()
-        .filter(|course| {
+        .filter(|course| explain_filter_decision(course, config).included)
+        .collect()
+}
 
-            let include_patterns = config.source_include_patterns(course.source);
+fn explain_filter_decision(course: &ListedTarget, config: &AutomationConfig) -> FilterDecision {
 
-            let exclude_patterns = config.source_exclude_patterns(course.source);
+    let include_patterns = config.source_include_patterns(course.source);
 
-            let include_all = include_patterns.iter().any(|pattern| pattern.trim() == "*");
+    let exclude_patterns = config.source_exclude_patterns(course.source);
 
-            let included = include_all
-                || include_patterns
-                    .iter()
-                    .any(|pattern| course_matches_pattern(course, pattern));
+    let include_all = include_patterns.iter().any(|pattern| pattern.trim() == "*");
 
-            let excluded = exclude_patterns
-                .iter()
-                .any(|pattern| course_matches_pattern(course, pattern));
+    let include_matches = matching_patterns(course, include_patterns);
 
-            included && !excluded
-        })
+    let exclude_matches = matching_patterns(course, exclude_patterns);
+
+    let matched_include = include_all || !include_matches.is_empty();
+
+    let matched_exclude = !exclude_matches.is_empty();
+
+    FilterDecision {
+        include_patterns: include_patterns.to_vec(),
+        exclude_patterns: exclude_patterns.to_vec(),
+        include_matches,
+        exclude_matches,
+        matched_include,
+        matched_exclude,
+        included: matched_include && !matched_exclude,
+    }
+}
+
+fn matching_patterns(course: &ListedTarget, patterns: &[String]) -> Vec<String> {
+
+    patterns
+        .iter()
+        .filter(|pattern| course_matches_pattern(course, pattern))
+        .cloned()
         .collect()
 }
 
@@ -1105,40 +1187,102 @@ fn build_local_time(date: &str, time: &str) -> Result<Option<DateTime<Local>>> {
 
 /// Prints the full planner table used by `plan --dry-run`.
 
-fn print_evaluated_courses(evaluated: &[EvaluatedCourse]) {
+fn print_dry_run_courses(evaluated: &[DryRunCourse]) {
 
     if evaluated.is_empty() {
 
-        println!("今日无匹配签到目标");
+        println!("今日无签到目标");
 
         return;
     }
 
     println!(
-        "source\taction\tstatus\tavailable_at\tname\tdate\tstart\tend\tcourse_id\ttarget_id\\
-         tsigned"
+        "source\taction\tincluded\tinclude_rules\texclude_rules\tinclude_matches\\
+         texclude_matches\tstatus\tskip_reason\tavailable_at\twindow\tname\tcourse_id\\
+         ttarget_id\tsigned"
     );
 
     for entry in evaluated {
 
+        let (status, skip_reason, available_at) = match entry.evaluation.as_ref() {
+            Some(evaluation) => {
+                (
+                    poll_status_label(evaluation.status),
+                    dry_run_skip_reason(evaluation),
+                    evaluation
+                        .available_at
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_else(|| "-".to_string()),
+                )
+            }
+            None => {
+                (
+                    "filtered-out",
+                    filter_skip_reason(&entry.filter),
+                    "-".to_string(),
+                )
+            }
+        };
+
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             entry.course.source.label(),
             entry.course.action.label(),
-            poll_status_label(entry.status),
-            entry
-                .available_at
-                .map(|value| value.to_rfc3339())
-                .unwrap_or_default(),
+            if entry.filter.included { "yes" } else { "no" },
+            format_patterns(&entry.filter.include_patterns),
+            format_patterns(&entry.filter.exclude_patterns),
+            format_patterns(&entry.filter.include_matches),
+            format_patterns(&entry.filter.exclude_matches),
+            status,
+            skip_reason,
+            available_at,
+            format!(
+                "{} {}-{}",
+                entry.course.date, entry.course.start_time, entry.course.end_time
+            ),
             entry.course.name,
-            entry.course.date,
-            entry.course.start_time,
-            entry.course.end_time,
             entry.course.course_id,
             entry.course.target_id,
             if entry.course.signed { "yes" } else { "no" }
         );
     }
+}
+
+fn dry_run_skip_reason(entry: &EvaluatedCourse) -> &'static str {
+
+    match entry.status {
+        PollStatusKind::DueNow => "will-sign-now",
+        PollStatusKind::WaitingForDailyStart => "planner-time-not-reached",
+        PollStatusKind::WaitingForCourse => "course-window-not-reached",
+        PollStatusKind::Signed => "already-signed",
+        PollStatusKind::Expired => "expired",
+        PollStatusKind::MissingCourseSchedId => "missing-target-id",
+    }
+}
+
+fn filter_skip_reason(filter: &FilterDecision) -> &'static str {
+
+    if filter.matched_exclude {
+
+        return "excluded-by-rule";
+    }
+
+    if !filter.matched_include {
+
+        return "no-include-rule-matched";
+    }
+
+    "filtered-out"
+}
+
+fn format_patterns(patterns: &[String]) -> String {
+
+    if patterns.is_empty() {
+
+        return "-".to_string();
+    }
+
+    patterns.join(",")
 }
 
 /// Prints the compact planner summary used by normal `plan` runs.
@@ -1231,5 +1375,189 @@ fn parse_cli_local_time(value: &str) -> Option<DateTime<Local>> {
         LocalResult::Single(value) => Some(value),
         LocalResult::Ambiguous(first, _) => Some(first),
         LocalResult::None => None,
+    }
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone};
+
+    use super::*;
+
+    fn test_config() -> AutomationConfig {
+
+        AutomationConfig {
+            student_id:               "23370000".to_string(),
+            use_vpn:                  false,
+            vpn_username:             String::new(),
+            vpn_password:             String::new(),
+            enable_iclass:            true,
+            enable_bykc:              false,
+            advance_minutes:          5,
+            retry_count:              1,
+            retry_interval_seconds:   1,
+            include_courses:          vec!["*".to_string()],
+            exclude_courses:          Vec::new(),
+            iclass_include_courses:   Vec::new(),
+            iclass_exclude_courses:   Vec::new(),
+            bykc_include_courses:     Vec::new(),
+            bykc_exclude_courses:     Vec::new(),
+            planner_time:             "07:00:00".to_string(),
+            planner_interval_minutes: 10,
+        }
+    }
+
+    fn target(name: &str, target_id: &str, start_time: &str, end_time: &str) -> ListedTarget {
+
+        ListedTarget {
+            source:     SignSource::IClass,
+            action:     SignAction::SignIn,
+            name:       name.to_string(),
+            course_id:  format!("{name}-id"),
+            target_id:  target_id.to_string(),
+            date:       "2026-05-13".to_string(),
+            start_time: start_time.to_string(),
+            end_time:   end_time.to_string(),
+            signed:     false,
+        }
+    }
+
+    fn local_datetime(hour: u32, minute: u32) -> DateTime<Local> {
+
+        let date = NaiveDate::from_ymd_opt(2026, 5, 13).unwrap();
+
+        let time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap();
+
+        Local
+            .from_local_datetime(&NaiveDateTime::new(date, time))
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+
+    fn dry_run_filter_explains_include_and_exclude_rules() {
+
+        let mut config = test_config();
+
+        config.include_courses = vec!["*数学*".to_string()];
+
+        config.exclude_courses = vec!["*实验*".to_string()];
+
+        let included =
+            explain_filter_decision(&target("高等数学", "sched-1", "09:00", "10:00"), &config);
+
+        assert!(included.included);
+
+        assert_eq!(included.include_matches, vec!["*数学*"]);
+
+        assert!(included.exclude_matches.is_empty());
+
+        let excluded =
+            explain_filter_decision(&target("数学实验", "sched-2", "09:00", "10:00"), &config);
+
+        assert!(!excluded.included);
+
+        assert_eq!(excluded.include_matches, vec!["*数学*"]);
+
+        assert_eq!(excluded.exclude_matches, vec!["*实验*"]);
+
+        assert_eq!(filter_skip_reason(&excluded), "excluded-by-rule");
+
+        let unmatched =
+            explain_filter_decision(&target("大学英语", "sched-3", "09:00", "10:00"), &config);
+
+        assert!(!unmatched.included);
+
+        assert!(unmatched.include_matches.is_empty());
+
+        assert_eq!(filter_skip_reason(&unmatched), "no-include-rule-matched");
+    }
+
+    #[test]
+
+    fn dry_run_skip_reason_covers_planner_states() -> Result<()> {
+
+        let daily_start_at = local_datetime(7, 0);
+
+        let waiting_daily = evaluate_course(
+            target("早课", "sched-1", "09:00", "10:00"),
+            daily_start_at,
+            local_datetime(6, 30),
+            5,
+        )?;
+
+        assert_eq!(waiting_daily.status, PollStatusKind::WaitingForDailyStart);
+
+        assert_eq!(
+            dry_run_skip_reason(&waiting_daily),
+            "planner-time-not-reached"
+        );
+
+        let waiting_course = evaluate_course(
+            target("上午课", "sched-2", "10:00", "11:00"),
+            daily_start_at,
+            local_datetime(9, 30),
+            5,
+        )?;
+
+        assert_eq!(waiting_course.status, PollStatusKind::WaitingForCourse);
+
+        assert_eq!(
+            dry_run_skip_reason(&waiting_course),
+            "course-window-not-reached"
+        );
+
+        let due = evaluate_course(
+            target("当前课", "sched-3", "10:00", "11:00"),
+            daily_start_at,
+            local_datetime(9, 55),
+            5,
+        )?;
+
+        assert_eq!(due.status, PollStatusKind::DueNow);
+
+        assert_eq!(dry_run_skip_reason(&due), "will-sign-now");
+
+        let expired = evaluate_course(
+            target("过期课", "sched-4", "08:00", "09:00"),
+            daily_start_at,
+            local_datetime(9, 30),
+            5,
+        )?;
+
+        assert_eq!(expired.status, PollStatusKind::Expired);
+
+        assert_eq!(dry_run_skip_reason(&expired), "expired");
+
+        let missing = evaluate_course(
+            target("缺少 ID", "", "09:00", "10:00"),
+            daily_start_at,
+            local_datetime(9, 0),
+            5,
+        )?;
+
+        assert_eq!(missing.status, PollStatusKind::MissingCourseSchedId);
+
+        assert_eq!(dry_run_skip_reason(&missing), "missing-target-id");
+
+        let mut signed_target = target("已签课", "sched-5", "09:00", "10:00");
+
+        signed_target.signed = true;
+
+        let signed = evaluate_course(
+            signed_target,
+            daily_start_at,
+            daily_start_at + ChronoDuration::minutes(10),
+            5,
+        )?;
+
+        assert_eq!(signed.status, PollStatusKind::Signed);
+
+        assert_eq!(dry_run_skip_reason(&signed), "already-signed");
+
+        Ok(())
     }
 }
