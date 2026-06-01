@@ -6,14 +6,17 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Local, Utc};
 use reqwest::header::{
-    ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT,
+    ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, USER_AGENT,
 };
 use scraper::{Html, Selector};
 use serde_json::Value;
-use std::{collections::HashSet, fs, net::ToSocketAddrs, path::PathBuf, time::Instant};
+use std::{collections::HashSet, fs, net::ToSocketAddrs, path::PathBuf, sync::Arc, time::Instant};
 
 use crate::bykc::BykcApi;
-use crate::constants::{BYKC_DIRECT_BASE, VPN_OFFSET_CORRECTION_MS, network_urls, sso_vpn_entry};
+use crate::constants::{
+    BYKC_DIRECT_BASE, VPN_OFFSET_CORRECTION_MS, WEBVPN_CAS_LOGIN_URL, network_urls, sso_vpn_entry,
+    to_webvpn_url,
+};
 use crate::model::{
     CourseDetailItem, CourseItem, DoctorCheck, DoctorReport, LoginCaptchaChallenge,
     LoginDiagnostic, LoginFailureKind, LoginInput, LoginStart, Session, SignOutcome, SignQrData,
@@ -22,8 +25,9 @@ use crate::model::{
 #[derive(Clone, Debug)]
 
 pub struct IClassApi {
-    client:  reqwest::Client,
-    use_vpn: bool,
+    client:             reqwest::Client,
+    no_redirect_client: reqwest::Client,
+    use_vpn:            bool,
 }
 
 #[derive(Clone, Debug)]
@@ -38,7 +42,8 @@ struct LoginFormState {
 }
 
 impl IClassApi {
-    /// Creates one iClass HTTP client with the headers shared by all requests.
+    /// Creates shared-cookie iClass clients. The normal client follows redirects,
+    /// while the no-redirect client inspects 302 Location headers.
 
     pub fn new(use_vpn: bool) -> Result<Self> {
 
@@ -59,13 +64,26 @@ impl IClassApi {
             HeaderValue::from_static("application/json, text/html;q=0.9, */*;q=0.8"),
         );
 
+        let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
+
         let client = reqwest::Client::builder()
-            .cookie_store(true)
-            .default_headers(headers)
+            .cookie_provider(cookie_jar.clone())
+            .default_headers(headers.clone())
             .build()
             .context("failed to build reqwest client")?;
 
-        Ok(Self { client, use_vpn })
+        let no_redirect_client = reqwest::Client::builder()
+            .cookie_provider(cookie_jar)
+            .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("failed to build no-redirect reqwest client")?;
+
+        Ok(Self {
+            client,
+            no_redirect_client,
+            use_vpn,
+        })
     }
 
     /// Logs in and captures the server clock offset needed by later sign requests.
@@ -550,7 +568,13 @@ impl IClassApi {
         password: &str,
     ) -> Result<LoginFormState> {
 
-        let login_entry = sso_vpn_entry();
+        let login_entry = if self.use_vpn {
+
+            to_webvpn_url(WEBVPN_CAS_LOGIN_URL)
+        } else {
+
+            sso_vpn_entry()
+        };
 
         let response = self
             .client
@@ -667,8 +691,27 @@ impl IClassApi {
 
         let student_id = input.student_id.trim();
 
-        let (user_info, server_time_offset_ms) =
-            self.fetch_user_info(student_id).await.map_err(|error| {
+        let iclass_login_name = if self.use_vpn {
+
+            self.resolve_iclass_login_name().await.map_err(|error| {
+
+                diagnose_login_error(
+                    "iclass_login_name",
+                    error,
+                    Some(network_urls(self.use_vpn).my_center),
+                    None,
+                    None,
+                )
+            })?
+        } else {
+
+            student_id.to_string()
+        };
+
+        let (user_info, server_time_offset_ms) = self
+            .fetch_user_info(&iclass_login_name)
+            .await
+            .map_err(|error| {
 
                 diagnose_login_error(
                     "iclass_user_info",
@@ -745,9 +788,85 @@ impl IClassApi {
         })
     }
 
+    /// Follows the browser MyCenter flow step by step and extracts the transient loginName.
+
+    async fn resolve_iclass_login_name(&self) -> Result<String> {
+
+        let mut current_url = network_urls(self.use_vpn).my_center;
+
+        for _ in 0..8 {
+
+            let response = self
+                .no_redirect_client
+                .get(&current_url)
+                .send()
+                .await
+                .with_context(|| format!("访问 iClass MyCenter 跳转入口失败: {current_url}"))?;
+
+            let final_url = response.url().to_string();
+
+            if let Some(login_name) = extract_iclass_login_name(&final_url) {
+
+                return Ok(login_name);
+            }
+
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+
+            if let Some(location) = location {
+
+                if let Some(login_name) = extract_iclass_login_name(&location) {
+
+                    return Ok(login_name);
+                }
+
+                current_url = reqwest::Url::parse(&final_url)
+                    .and_then(|base| base.join(&location))
+                    .map(|url| url.to_string())
+                    .with_context(|| {
+
+                        format!(
+                            "解析 iClass MyCenter 跳转地址失败，当前 URL: {final_url}, Location: \
+                             {location}"
+                        )
+                    })?;
+
+                continue;
+            }
+
+            let status = response.status();
+
+            let body = response.text().await.unwrap_or_default();
+
+            if let Some(login_name) = extract_iclass_login_name(&body) {
+
+                return Ok(login_name);
+            }
+
+            bail!(
+                "iClass MyCenter 未返回 loginName，HTTP 状态: {status}, 最终 URL: {final_url}, \
+                 页面线索: {}",
+                summarize_login_page(&body)
+            );
+        }
+
+        bail!("iClass MyCenter 跳转超过 8 次仍未返回 loginName");
+    }
+
     async fn download_captcha_image(&self, captcha_id: &str) -> Result<PathBuf> {
 
-        let url = format!("https://sso.buaa.edu.cn/captcha?captchaId={captcha_id}");
+        let raw_url = format!("https://sso.buaa.edu.cn/captcha?captchaId={captcha_id}");
+
+        let url = if self.use_vpn {
+
+            to_webvpn_url(&raw_url)
+        } else {
+
+            raw_url
+        };
 
         let bytes = self
             .client
@@ -1444,6 +1563,66 @@ fn looks_like_vpn_portal_home(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Extracts loginName from redirect URLs or HTML snippets, accepting case-insensitive keys.
+
+fn extract_iclass_login_name(value: &str) -> Option<String> {
+
+    let lower = value.to_ascii_lowercase();
+
+    let marker = "loginname=";
+
+    let mut search_start = 0;
+
+    while let Some(relative_index) = lower[search_start..].find(marker) {
+
+        let value_start = search_start + relative_index + marker.len();
+
+        let raw_value = value[value_start..]
+            .chars()
+            .take_while(|ch| !matches!(*ch, '&' | '#' | '"' | '\'' | '<' | '>' | ' ' | '\n' | '\r'))
+            .collect::<String>();
+
+        if !raw_value.is_empty() {
+
+            return percent_decode(&raw_value);
+        }
+
+        search_start = value_start;
+    }
+
+    None
+}
+
+/// Decodes only `%XX` escapes so `+` inside loginName/base64 is preserved.
+
+fn percent_decode(value: &str) -> Option<String> {
+
+    let mut bytes = Vec::with_capacity(value.len());
+
+    let mut chars = value.as_bytes().iter().copied().peekable();
+
+    while let Some(byte) = chars.next() {
+
+        if byte == b'%' {
+
+            let high = chars.next()?;
+
+            let low = chars.next()?;
+
+            let high = (high as char).to_digit(16)?;
+
+            let low = (low as char).to_digit(16)?;
+
+            bytes.push(((high << 4) | low) as u8);
+        } else {
+
+            bytes.push(byte);
+        }
+    }
+
+    String::from_utf8(bytes).ok()
+}
+
 fn needs_vpn_captcha(body: &str) -> bool {
 
     body.contains("/captcha?captchaId=")
@@ -1968,8 +2147,35 @@ mod tests {
 
     use super::{
         append_captcha_fields, build_cas_login_form, collect_captcha_field_names,
-        detect_captcha_id, needs_vpn_captcha, resolve_login_form_action, summarize_login_page,
+        detect_captcha_id, extract_iclass_login_name, needs_vpn_captcha, resolve_login_form_action,
+        summarize_login_page,
     };
+
+    #[test]
+
+    fn extracts_iclass_login_name_from_redirect_shapes() {
+
+        assert_eq!(
+            extract_iclass_login_name(
+                "https://d.buaa.edu.cn/https-8346/encrypted/?loginName=abc%2Bdef%2Fghi%3D&type=jumpMyCenter#/MyCenter"
+            )
+            .as_deref(),
+            Some("abc+def/ghi=")
+        );
+
+        assert_eq!(
+            extract_iclass_login_name(
+                r#"<a href="/?loginName=Rjc1QkJDMUMxNzVENkY0NkZCNzFDMEM5RjYwNzg4RDg=&type=jumpMyCenter">center</a>"#
+            )
+            .as_deref(),
+            Some("Rjc1QkJDMUMxNzVENkY0NkZCNzFDMEM5RjYwNzg4RDg=")
+        );
+
+        assert_eq!(
+            extract_iclass_login_name("https://iclass.buaa.edu.cn:8346/?type=jumpMyCenter"),
+            None
+        );
+    }
 
     #[test]
 

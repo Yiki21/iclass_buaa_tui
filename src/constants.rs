@@ -7,9 +7,18 @@ use aes::{
 
 pub const SSO_LOGIN_URL: &str = "https://sso.buaa.edu.cn/login";
 
+/// WebVPN CAS service target observed from the browser login flow.
+
+pub(crate) const WEBVPN_CAS_LOGIN_URL: &str =
+    "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Fd.buaa.edu.cn%2Flogin%3Fcas_login%3Dtrue";
+
 /// iClass direct base URL.
 
 const DIRECT_BASE: &str = "https://iclass.buaa.edu.cn:8347";
+
+/// iClass browser entry that redirects to a transient `loginName`.
+
+pub const ICLASS_MY_CENTER_URL: &str = "https://iclass.buaa.edu.cn:8346/?type=jumpMyCenter";
 
 /// BYKC direct base URL.
 
@@ -38,6 +47,7 @@ pub const VPN_OFFSET_CORRECTION_MS: i64 = -1000;
 
 struct RawNetworkUrls {
     service_home:            &'static str,
+    my_center:               &'static str,
     user_login:              &'static str,
     course_list:             &'static str,
     semester_list:           &'static str,
@@ -51,6 +61,7 @@ struct RawNetworkUrls {
 
 pub struct NetworkUrls {
     pub service_home:            String,
+    pub my_center:               String,
     pub user_login:              String,
     pub course_list:             String,
     pub semester_list:           String,
@@ -64,6 +75,7 @@ fn raw_network_urls() -> RawNetworkUrls {
 
     RawNetworkUrls {
         service_home:            DIRECT_BASE,
+        my_center:               ICLASS_MY_CENTER_URL,
         user_login:              "https://iclass.buaa.edu.cn:8347/app/user/login.action",
         course_list:
             "https://iclass.buaa.edu.cn:8347/app/choosecourse/get_myall_course.action",
@@ -91,6 +103,7 @@ pub fn network_urls(use_vpn: bool) -> NetworkUrls {
 
         NetworkUrls {
             service_home:            to_webvpn_url(raw.service_home),
+            my_center:               to_webvpn_url(raw.my_center),
             user_login:              to_webvpn_url(raw.user_login),
             course_list:             to_webvpn_url(raw.course_list),
             semester_list:           to_webvpn_url(raw.semester_list),
@@ -103,6 +116,7 @@ pub fn network_urls(use_vpn: bool) -> NetworkUrls {
 
         NetworkUrls {
             service_home:            raw.service_home.to_string(),
+            my_center:               raw.my_center.to_string(),
             user_login:              raw.user_login.to_string(),
             course_list:             raw.course_list.to_string(),
             semester_list:           raw.semester_list.to_string(),
@@ -222,7 +236,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 mod tests {
 
-    use super::{sso_vpn_entry, to_webvpn_url};
+    use super::{WEBVPN_CAS_LOGIN_URL, network_urls, sso_vpn_entry, to_webvpn_url};
 
     #[test]
 
@@ -234,8 +248,18 @@ mod tests {
         );
 
         assert_eq!(
+            to_webvpn_url(WEBVPN_CAS_LOGIN_URL),
+            "https://d.buaa.edu.cn/https/77726476706e69737468656265737421e3e44ed225256951300d8db9d6562d/login?service=https%3A%2F%2Fd.buaa.edu.cn%2Flogin%3Fcas_login%3Dtrue"
+        );
+
+        assert_eq!(
             to_webvpn_url("https://iclass.buaa.edu.cn:8347/app/user/login.action"),
             "https://d.buaa.edu.cn/https-8347/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/app/user/login.action"
+        );
+
+        assert_eq!(
+            network_urls(true).my_center,
+            "https://d.buaa.edu.cn/https-8346/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/?type=jumpMyCenter"
         );
     }
 
