@@ -209,3 +209,33 @@ iClass 侧已由真实账号确认修复。BYKC 仍未确认，但对照上游 U
 仍未验证：
 
 - 真实账号下的 BYKC 课程列表与已选课程拉取尚未复测，需要你在授权配置读取后或自行运行一次确认。
+
+### 后续确认（二）：重复的 CAS 登录实现被删除
+
+cookie 共享修复后，BYKC 又报出另一个错误：
+
+```
+博雅操作失败: 无法从 SSO 登录页面解析登录表单，最终 URL:
+https://d.buaa.edu.cn/https/77726476706e69737468656265737421e5f40f9e3231691e7b0c9ce29b5b/,
+页面线索: title=<none>, markers=portal
+```
+
+把加密后的主机段解出来是 `uc.buaa.edu.cn`：拿回来的是统一认证门户（SPA），不是 CAS 表单。也就是说，`bykc/helpers.rs` 里那套重复的 CAS 登录在重定向后落到门户页，再去抓表单就必然失败；而它的孪生 no-redirect client 又看不到重定向目标里的 `token`，于是两边都退回到重新提交密码（换来 423）。
+
+上游 UBAA 的 BYKC 从不自己登录：它在已认证的共享会话上读 `token`，然后请求 `cas-login?token=` 激活。
+
+修复：
+
+- 删掉 `bykc/helpers.rs` 里重复的 `vpn_login`、`resolve_login_form_action`、`build_cas_login_form`、`summarize_vpn_login_page`。CAS 登录只由 `iclass/api.rs` 负责一份。
+- 新增 `activate_bykc_session`，对齐 UBAA 的 `cas-login?token=` 激活。
+- `ensure_login` 改为跟随重定向，从最终 URL 读 `token`，激活会话，全程不再提交密码；取不到 token 不再当作致命错误。
+- 删掉因此失效的 no-redirect client、`login_client` 和无用导入。
+
+验证：
+
+- `cargo fmt --check`、`cargo check`、`cargo test` 全部通过（31 passed），无编译警告。
+- 本次净删 352 行、新增 50 行。
+
+仍未验证：
+
+- 真实账号下的 BYKC 仍未复测。这是三次修改中唯一还没被真实环境确认的一条。
