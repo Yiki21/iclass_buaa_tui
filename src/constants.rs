@@ -14,11 +14,50 @@ pub(crate) const WEBVPN_CAS_LOGIN_URL: &str =
 
 /// iClass direct base URL.
 
-const DIRECT_BASE: &str = "https://iclass.buaa.edu.cn:8347";
-
 /// iClass browser entry that redirects to a transient `loginName`.
 
 pub const ICLASS_MY_CENTER_URL: &str = "https://iclass.buaa.edu.cn:8346/?type=jumpMyCenter";
+
+/// Undergraduate academic portal entry points used by the schedule module.
+
+pub const BYXT_HOME_URL: &str = "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.html";
+
+pub const BYXT_CURRENT_USER_URL: &str =
+    "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/currentUser.do";
+
+pub const BYXT_TERMS_URL: &str =
+    "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/student/schoolCalendars.do";
+
+pub const BYXT_WEEKS_URL: &str =
+    "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/getTermWeeks.do";
+
+pub const BYXT_WEEK_URL: &str =
+    "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/student/getMyScheduleDetail.do";
+
+pub const BYXT_EXAMS_URL: &str =
+    "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/student/exams.do";
+
+/// Read-only academic services hosted by the BUAA mobile portal.
+
+pub const BUAA_SCORE_URL: &str = "https://app.buaa.edu.cn/buaascore/wap/default/index";
+
+pub const BUAA_CLASSROOM_QUERY_URL: &str =
+    "https://app.buaa.edu.cn/buaafreeclass/wap/default/search1";
+
+pub const BUAA_CLASSROOM_REFERRER: &str = "https://app.buaa.edu.cn/site/classRoomQuery/index";
+
+pub const BUAA_CLASSROOM_SYNC_URL: &str =
+    "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Fapp.buaa.edu.cn%2Fa_buaa%2Fapi%2Fcas%2Findex%3Fredirect%3Dhttps%253A%252F%252Fapp.buaa.edu.cn%252Fsite%252FclassRoomQuery%252Findex%26from%3Dwap%26login_from%3D&noAutoRedirect=1";
+
+/// Graduate GSMIS timetable entry points used by the schedule module.
+
+pub const GSMIS_HOME_URL: &str = "https://gsmis.buaa.edu.cn/gsapp/sys/wdkbapp/*default/index.do";
+
+pub const GSMIS_TERMS_URL: &str =
+    "https://gsmis.buaa.edu.cn/gsapp/sys/wdkbapp/modules/xskcb/kfdxnxqcx.do";
+
+pub const GSMIS_SCHEDULE_URL: &str =
+    "https://gsmis.buaa.edu.cn/gsapp/sys/wdkbapp/bykb/loadXskbData.do";
 
 /// BYKC direct base URL.
 
@@ -46,7 +85,6 @@ pub const VPN_OFFSET_CORRECTION_MS: i64 = -1000;
 #[derive(Clone, Copy)]
 
 struct RawNetworkUrls {
-    service_home:            &'static str,
     my_center:               &'static str,
     user_login:              &'static str,
     course_list:             &'static str,
@@ -60,7 +98,6 @@ struct RawNetworkUrls {
 #[derive(Clone, Debug)]
 
 pub struct NetworkUrls {
-    pub service_home:            String,
     pub my_center:               String,
     pub user_login:              String,
     pub course_list:             String,
@@ -74,7 +111,6 @@ pub struct NetworkUrls {
 fn raw_network_urls() -> RawNetworkUrls {
 
     RawNetworkUrls {
-        service_home:            DIRECT_BASE,
         my_center:               ICLASS_MY_CENTER_URL,
         user_login:              "https://iclass.buaa.edu.cn:8347/app/user/login.action",
         course_list:
@@ -95,6 +131,17 @@ pub fn sso_vpn_entry() -> String {
     to_webvpn_url(SSO_LOGIN_URL)
 }
 
+pub fn sso_login_entry(use_vpn: bool) -> String {
+
+    if use_vpn {
+
+        sso_vpn_entry()
+    } else {
+
+        SSO_LOGIN_URL.to_string()
+    }
+}
+
 pub fn network_urls(use_vpn: bool) -> NetworkUrls {
 
     let raw = raw_network_urls();
@@ -102,7 +149,6 @@ pub fn network_urls(use_vpn: bool) -> NetworkUrls {
     if use_vpn {
 
         NetworkUrls {
-            service_home:            to_webvpn_url(raw.service_home),
             my_center:               to_webvpn_url(raw.my_center),
             user_login:              to_webvpn_url(raw.user_login),
             course_list:             to_webvpn_url(raw.course_list),
@@ -115,7 +161,6 @@ pub fn network_urls(use_vpn: bool) -> NetworkUrls {
     } else {
 
         NetworkUrls {
-            service_home:            raw.service_home.to_string(),
             my_center:               raw.my_center.to_string(),
             user_login:              raw.user_login.to_string(),
             course_list:             raw.course_list.to_string(),

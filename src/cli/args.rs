@@ -32,6 +32,20 @@ pub(crate) enum CommandKind {
     Plan(PlanArgs),
     /// Check WebVPN, SSO, iClass, and BYKC connectivity before login.
     Doctor(DoctorArgs),
+    /// Show today's cached academic courses and next class.
+    Today(TodayArgs),
+    /// Show exam arrangements for one academic term.
+    Exams(AcademicListArgs),
+    /// Show grades for one academic term.
+    Grades(AcademicListArgs),
+    /// Query available classrooms by campus and date.
+    Classrooms(ClassroomArgs),
+    /// Show read-only assignment summaries from supported course systems.
+    Tasks(TaskArgs),
+    /// Export a cached semester schedule.
+    ScheduleExport(ScheduleExportArgs),
+    /// Compare two cached semester snapshots.
+    ScheduleDiff(ScheduleDiffArgs),
     /// Install platform-native scheduled autologin automation.
     #[command(name = "install-autologin", alias = "install-systemd")]
     InstallAutologin(InstallAutologinArgs),
@@ -116,6 +130,105 @@ pub(crate) struct DoctorArgs {
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
     /// Print JSON instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:   bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct TodayArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config: Option<PathBuf>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:   bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct AcademicListArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Academic term code, such as 2025-2026-1.
+    #[arg(long)]
+    pub(crate) term:        Option<String>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct ClassroomArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Campus id: 1=学院路, 2=沙河, 3=杭州.
+    #[arg(long)]
+    pub(crate) campus:      i64,
+    /// Date in YYYY-MM-DD format. Defaults to today.
+    #[arg(long)]
+    pub(crate) date:        Option<String>,
+    /// Only show rooms free for this section.
+    #[arg(long)]
+    pub(crate) section:     Option<usize>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct TaskArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct ScheduleExportArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config: Option<PathBuf>,
+    /// Cached academic term code. Defaults to the current cached term.
+    #[arg(long)]
+    pub(crate) term:   Option<String>,
+    /// Output format: markdown, csv, json, or ics.
+    #[arg(long, value_parser = ["markdown", "csv", "json", "ics"], default_value = "markdown")]
+    pub(crate) format: String,
+    /// Write to a file instead of stdout.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct ScheduleDiffArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config: Option<PathBuf>,
+    /// First cached term code. Defaults to the oldest cached term.
+    #[arg(long)]
+    pub(crate) from:   Option<String>,
+    /// Second cached term code. Defaults to the newest cached term.
+    #[arg(long)]
+    pub(crate) to:     Option<String>,
+    /// Print JSON instead of a human-readable list.
     #[arg(long)]
     pub(crate) json:   bool,
 }

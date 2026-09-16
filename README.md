@@ -92,15 +92,28 @@ cargo install --path .
 - `$XDG_CONFIG_DIRS/iclass-buaa/config.toml`
 - `/etc/iclass-buaa/config.toml`
 
-如果 `use_vpn = true` 且配置文件里包含 `vpn_password`，权限必须是 `600`。系统级配置更适合放不含密码的默认项。
+配置文件里包含统一认证密码时权限必须是 `600`。系统级配置更适合放不含密码的默认项。
+历史字段名仍为 `vpn_username` / `vpn_password`，现在含义是统一认证账号和密码；`vpn_username` 留空时默认使用 `student_id` 作为统一认证账号。直连模式会先建立 SSO 会话，再按 UBAA 的 MyCenter 流程获取 `loginName` 后登录 iClass。
+
+### 课程课表
+
+课表工作区跟随 UBAA 的课程主线，但只保留与课程直接相关的能力：
+
+- 本科账号从 BYXT 读取学期、教学周和整周课表。
+- 研究生账号从 GSMIS“我的课表”读取整学期排课，支持完整节次和晚间课程。
+- 首次使用时按 `u` 手动导入当前学期，更新成功后才能离线查看。
+- 课表按账号保存在本地，学期和周次可以切换；导入失败不会覆盖已有缓存。
+- `,` / `.` 切换已保存学期，`[` / `]` 或 `h` / `l` 切换周，`j` / `k` 选择课程。
+
+课表缓存与登录信息都只保存在本机配置目录，不上传到 UBAA 服务端。研究生课表使用与当前登录模式相同的直连或 WebVPN 会话。
 
 示例配置：
 
 ```toml
 student_id = "2337xxxx"
-use_vpn = true
-vpn_username = "your-vpn-user"
-vpn_password = "your-vpn-password"
+use_vpn = false
+vpn_username = ""
+vpn_password = "your-sso-password"
 enable_iclass = true
 enable_bykc = false
 
@@ -151,6 +164,18 @@ iclass_buaa_tui sign --source bykc --action sign-out --bykc-course-id 12345
 # 执行一次自动签到轮询：抓今天签到/签退目标并直接尝试执行到点项目
 iclass_buaa_tui plan
 
+# 今日课程、考试、成绩、空教室和作业
+iclass_buaa_tui today
+iclass_buaa_tui exams --term 2025-2026-1
+iclass_buaa_tui grades --term 2025-2026-1
+iclass_buaa_tui classrooms --campus 2 --date 2026-09-14 --section 3
+iclass_buaa_tui tasks
+
+# 课表导出与缓存差异
+iclass_buaa_tui schedule-export --format markdown --term 2025-2026-1
+iclass_buaa_tui schedule-export --format ics --output schedule.ics
+iclass_buaa_tui schedule-diff --json
+
 # 查看完整参数
 iclass_buaa_tui --help
 iclass_buaa_tui plan --help
@@ -158,6 +183,13 @@ iclass_buaa_tui install-autologin --help
 iclass_buaa_tui autologin-status --help
 iclass_buaa_tui uninstall-autologin --help
 ```
+
+课程工作区快捷键：
+- `1` 今日课程，`2` 学期课表，`3` 考试，`4` 成绩，`5` 空教室，`6` 作业。
+- `/` 搜索课程名、课程号、地点或教师，`j/k` 选择课程，`r` 刷新当前只读数据。
+- `u` 手动导入整学期课表；`,/.`、`[`/`]` 用于切换学期和周次。
+
+考试、成绩、空教室和作业都是只读功能。TUI 不提供作业提交、评教、预约或其他不可逆写操作。
 
 主要参数：
 - `--config <PATH>`: 显式指定配置文件路径，覆盖默认的 XDG 查找顺序。

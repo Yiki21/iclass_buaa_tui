@@ -196,7 +196,7 @@ fn ensure_config_permissions(path: &Path, config: &AutomationConfig) -> Result<(
 
         use std::os::unix::fs::PermissionsExt;
 
-        if !config.use_vpn || config.vpn_password.is_empty() {
+        if config.vpn_password.is_empty() {
 
             return Ok(());
         }
@@ -209,7 +209,7 @@ fn ensure_config_permissions(path: &Path, config: &AutomationConfig) -> Result<(
         if mode != 0o600 {
 
             bail!(
-                "配置文件包含 vpn_password 时权限必须是 600，当前为 {:o}: {}",
+                "配置文件包含统一认证密码时权限必须是 600，当前为 {:o}: {}",
                 mode,
                 path.display()
             );
@@ -227,9 +227,14 @@ impl AutomationConfig {
             bail!("student_id 不能为空");
         }
 
-        if self.use_vpn && (self.vpn_username.trim().is_empty() || self.vpn_password.is_empty()) {
+        if self.vpn_password.is_empty() {
 
-            bail!("use_vpn = true 时必须提供 vpn_username 和 vpn_password");
+            bail!("必须提供统一认证密码");
+        }
+
+        if self.use_vpn && self.vpn_username.trim().is_empty() {
+
+            bail!("use_vpn = true 时必须提供 vpn_username");
         }
 
         if self.enable_bykc && !self.use_vpn {

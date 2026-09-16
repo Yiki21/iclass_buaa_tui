@@ -11,11 +11,12 @@ use reqwest::header::{
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::{collections::HashSet, fs, net::ToSocketAddrs, path::PathBuf, sync::Arc, time::Instant};
+use tokio::sync::Semaphore;
 
 use crate::bykc::BykcApi;
 use crate::constants::{
-    BYKC_DIRECT_BASE, VPN_OFFSET_CORRECTION_MS, WEBVPN_CAS_LOGIN_URL, network_urls, sso_vpn_entry,
-    to_webvpn_url,
+    BYKC_DIRECT_BASE, VPN_OFFSET_CORRECTION_MS, WEBVPN_CAS_LOGIN_URL, network_urls,
+    sso_login_entry, to_webvpn_url,
 };
 use crate::model::{
     CourseDetailItem, CourseItem, DoctorCheck, DoctorReport, LoginCaptchaChallenge,
@@ -25,9 +26,9 @@ use crate::model::{
 #[derive(Clone, Debug)]
 
 pub struct IClassApi {
-    client:             reqwest::Client,
-    no_redirect_client: reqwest::Client,
-    use_vpn:            bool,
+    pub(crate) client:             reqwest::Client,
+    pub(crate) no_redirect_client: reqwest::Client,
+    pub(crate) use_vpn:            bool,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,14 @@ struct LoginFormState {
     captcha_id:          Option<String>,
     page_hint:           String,
     captcha_field_names: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+
+struct LoginFlowResult {
+    final_url:   String,
+    body:        String,
+    http_status: reqwest::StatusCode,
 }
 
 impl IClassApi {
@@ -116,42 +125,72 @@ impl IClassApi {
             });
         }
 
-        if self.use_vpn {
+        let username = if self.use_vpn {
 
-            let form_state = self
-                .fetch_login_form_state(&input.vpn_username, &input.vpn_password)
-                .await
-                .map_err(|error| diagnose_login_error("vpn_login_page", error, None, None, None))?;
+            input.vpn_username.trim()
+        } else {
 
-            if let Some(captcha_id) = form_state.captcha_id.clone() {
+            student_id
+        };
 
-                let captcha_path =
-                    self.download_captcha_image(&captcha_id)
-                        .await
-                        .map_err(|error| {
+        if username.is_empty() {
 
-                            diagnose_login_error("vpn_captcha", error, None, None, None)
-                        })?;
-
-                return Ok(LoginStart::Captcha(LoginCaptchaChallenge {
-                    login_url: form_state.login_url,
-                    action_url: form_state.action_url,
-                    form: form_state.form,
-                    captcha_id,
-                    captcha_path: captcha_path.display().to_string(),
-                    page_hint: form_state.page_hint,
-                    captcha_field_names: form_state.captcha_field_names,
-                }));
-            }
-
-            self.finish_vpn_login_submission(
-                &form_state.login_url,
-                &form_state.action_url,
-                &form_state.form,
-            )
-            .await
-            .map_err(|error| diagnose_login_error("vpn_login_submit", error, None, None, None))?;
+            return Err(LoginDiagnostic {
+                kind:        LoginFailureKind::Validation,
+                stage:       "input".to_string(),
+                summary:     "统一认证账号不能为空".to_string(),
+                error_chain: vec!["统一认证账号不能为空".to_string()],
+                final_url:   None,
+                http_status: None,
+                page_hint:   None,
+                suggestions: vec!["请输入学号或统一认证账号后重试".to_string()],
+            });
         }
+
+        if input.vpn_password.is_empty() {
+
+            return Err(LoginDiagnostic {
+                kind:        LoginFailureKind::Validation,
+                stage:       "input".to_string(),
+                summary:     "统一认证密码不能为空".to_string(),
+                error_chain: vec!["统一认证密码不能为空".to_string()],
+                final_url:   None,
+                http_status: None,
+                page_hint:   None,
+                suggestions: vec!["请输入统一认证密码后重试".to_string()],
+            });
+        }
+
+        let form_state = self
+            .fetch_login_form_state(username, &input.vpn_password)
+            .await
+            .map_err(|error| diagnose_login_error("sso_login_page", error, None, None, None))?;
+
+        if let Some(captcha_id) = form_state.captcha_id.clone() {
+
+            let captcha_path = self
+                .download_captcha_image(&captcha_id)
+                .await
+                .map_err(|error| diagnose_login_error("sso_captcha", error, None, None, None))?;
+
+            return Ok(LoginStart::Captcha(LoginCaptchaChallenge {
+                login_url: form_state.login_url,
+                action_url: form_state.action_url,
+                form: form_state.form,
+                captcha_id,
+                captcha_path: captcha_path.display().to_string(),
+                page_hint: form_state.page_hint,
+                captcha_field_names: form_state.captcha_field_names,
+            }));
+        }
+
+        self.finish_sso_login_submission(
+            &form_state.login_url,
+            &form_state.action_url,
+            &form_state.form,
+        )
+        .await
+        .map_err(|error| diagnose_login_error("sso_login_submit", error, None, None, None))?;
 
         self.finish_login_session(input)
             .await
@@ -211,7 +250,7 @@ impl IClassApi {
 
         let form = append_captcha_fields(&challenge.form, &challenge.captcha_field_names, captcha);
 
-        self.finish_vpn_login_submission(&challenge.login_url, &challenge.action_url, &form)
+        self.finish_sso_login_submission(&challenge.login_url, &challenge.action_url, &form)
             .await
             .map_err(|error| {
 
@@ -238,7 +277,10 @@ impl IClassApi {
                 .await,
         );
 
-        checks.push(self.run_doctor_check("sso_login", &sso_vpn_entry()).await);
+        checks.push(
+            self.run_doctor_check("sso_login", &sso_login_entry(self.use_vpn))
+                .await,
+        );
 
         checks.push(
             self.run_doctor_check("iclass_login_api", &urls.user_login)
@@ -335,30 +377,59 @@ impl IClassApi {
         future_days: usize,
     ) -> Result<Vec<CourseDetailItem>> {
 
-        let semester_code = self
-            .get_current_semester(&session.user_id, &session.session_id)
-            .await?
-            .ok_or_else(|| anyhow!("未获取到当前学期"))?;
-
-        let courses = self
-            .get_courses(&session.user_id, &session.session_id, &semester_code)
-            .await?;
-
-        let detail_data = self
-            .get_courses_detail(&session.user_id, &session.session_id, &courses)
-            .await?;
-
-        let mut merged = Vec::with_capacity(detail_data.len());
+        let mut merged = Vec::new();
 
         let mut seen = HashSet::new();
 
-        for item in detail_data {
+        let mut source_errors = Vec::new();
 
-            let key = merged_key(&item);
+        match self
+            .get_current_semester(&session.user_id, &session.session_id)
+            .await
+        {
+            Ok(Some(semester_code)) => {
 
-            if seen.insert(key) {
+                match self
+                    .get_courses(&session.user_id, &session.session_id, &semester_code)
+                    .await
+                {
+                    Ok(courses) => {
 
-                merged.push(item);
+                        match self
+                            .get_courses_detail(&session.user_id, &session.session_id, &courses)
+                            .await
+                        {
+                            Ok(detail_data) => {
+                                for item in detail_data {
+
+                                    let key = merged_key(&item);
+
+                                    if seen.insert(key) {
+
+                                        merged.push(item);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+
+                                source_errors
+                                    .push(format!("课程详情: {}", format_anyhow_chain(&error)));
+                            }
+                        }
+                    }
+                    Err(error) => {
+
+                        source_errors.push(format!("课程列表: {}", format_anyhow_chain(&error)));
+                    }
+                }
+            }
+            Ok(None) => {
+
+                source_errors.push("学期列表: 未获取到当前学期".to_string());
+            }
+            Err(error) => {
+
+                source_errors.push(format!("学期列表: {}", format_anyhow_chain(&error)));
             }
         }
 
@@ -385,15 +456,28 @@ impl IClassApi {
 
         for task in tasks {
 
-            for item in task.await.context("按日期获取课程任务执行失败")?? {
+            match task.await.context("按日期获取课程任务执行失败")? {
+                Ok(items) => {
+                    for item in items {
 
-                let key = merged_key(&item);
+                        let key = merged_key(&item);
 
-                if seen.insert(key) {
+                        if seen.insert(key) {
 
-                    merged.push(item);
+                            merged.push(item);
+                        }
+                    }
+                }
+                Err(error) => {
+
+                    source_errors.push(format!("按日期课程: {}", format_anyhow_chain(&error)));
                 }
             }
+        }
+
+        if merged.is_empty() && !source_errors.is_empty() {
+
+            bail!("拉取课程失败: {}", source_errors.join(" | "));
         }
 
         merged.sort_by(|a, b| {
@@ -573,7 +657,7 @@ impl IClassApi {
             to_webvpn_url(WEBVPN_CAS_LOGIN_URL)
         } else {
 
-            sso_vpn_entry()
+            sso_login_entry(false)
         };
 
         let response = self
@@ -624,7 +708,7 @@ impl IClassApi {
         })
     }
 
-    async fn finish_vpn_login_submission(
+    async fn finish_sso_login_submission(
         &self,
         login_url: &str,
         action_url: &str,
@@ -632,56 +716,136 @@ impl IClassApi {
     ) -> Result<()> {
 
         let response = self
-            .client
+            .no_redirect_client
             .post(action_url)
-            .header(ORIGIN, "https://d.buaa.edu.cn")
             .header(REFERER, login_url)
             .form(form)
             .send()
             .await
             .with_context(|| format!("VPN 登录请求失败，提交地址: {action_url}"))?;
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let login_flow = self.follow_sso_login_flow(response).await?;
 
-            bail!("登录失败：账号或密码错误，或密码过弱需先修改后再登录");
+        if !login_flow.http_status.is_success() {
+
+            bail!(
+                "登录失败，HTTP 状态: {}, 最终 URL: {}",
+                login_flow.http_status,
+                login_flow.final_url
+            );
         }
 
-        let final_url = response.url().to_string();
+        if looks_like_login_form_page(&login_flow.body) {
 
-        if looks_like_iclass_url(&final_url) {
-
-            return Ok(());
+            return vpn_login_error(&login_flow.final_url, &login_flow.body);
         }
 
-        if looks_like_vpn_portal_home(&final_url) {
+        Ok(())
+    }
 
-            let urls = network_urls(true);
+    async fn follow_sso_login_flow(
+        &self,
+        initial_response: reqwest::Response,
+    ) -> Result<LoginFlowResult> {
 
-            let probe = self
-                .client
-                .get(format!("{}/", urls.service_home.trim_end_matches('/')))
-                .send()
-                .await
-                .with_context(|| {
+        let mut current_response = initial_response;
 
-                    format!("进入 iClass 服务失败，服务入口: {}", urls.service_home)
-                })?;
+        let mut password_expiry_ignored = false;
 
-            let probe_final = probe.url().to_string();
+        for _ in 0..16 {
 
-            if looks_like_iclass_url(&probe_final) {
+            while current_response.status().is_redirection() {
 
-                return Ok(());
+                let current_url = current_response.url().to_string();
+
+                let location = current_response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| anyhow!("登录跳转缺少重定向地址，当前 URL: {current_url}"))?;
+
+                let next_url = resolve_redirect_url(&current_url, location)?;
+
+                current_response = self
+                    .no_redirect_client
+                    .get(&next_url)
+                    .send()
+                    .await
+                    .with_context(|| format!("跟随 SSO 登录跳转失败: {next_url}"))?;
             }
 
-            let probe_body = probe.text().await.unwrap_or_default();
+            let http_status = current_response.status();
 
-            return vpn_login_error(&probe_final, &probe_body);
+            let final_url = current_response.url().to_string();
+
+            let body = current_response
+                .text()
+                .await
+                .with_context(|| format!("读取 SSO 登录响应失败，最终 URL: {final_url}"))?;
+
+            if is_ignorable_password_expiry_page(&body) {
+
+                if password_expiry_ignored {
+
+                    bail!("登录失败：忽略密码风险提示后仍停留在风险提示页");
+                }
+
+                let execution = extract_execution_value(&body)
+                    .ok_or_else(|| anyhow!("密码风险提示页缺少 execution 参数"))?;
+
+                let ignore_url = strip_query(&final_url);
+
+                let ignore_form = build_ignore_password_expiry_form(&execution);
+
+                let mut request = self
+                    .no_redirect_client
+                    .post(&ignore_url)
+                    .header(REFERER, &final_url)
+                    .form(&ignore_form);
+
+                if let Some(origin) = origin_for_url(&ignore_url) {
+
+                    request = request.header(ORIGIN, origin);
+                }
+
+                current_response = request
+                    .send()
+                    .await
+                    .with_context(|| format!("提交忽略密码风险提示失败: {ignore_url}"))?;
+
+                password_expiry_ignored = true;
+
+                continue;
+            }
+
+            if let Some(message) = extract_exception_message_from_url(&final_url) {
+
+                bail!("登录失败：{message}");
+            }
+
+            if http_status == reqwest::StatusCode::UNAUTHORIZED {
+
+                bail!("登录失败：账号或密码错误，或密码过弱需先修改后再登录");
+            }
+
+            if let Some(message) = find_login_error(&body) {
+
+                bail!("登录失败：{message}");
+            }
+
+            if looks_like_login_form_page(&body) {
+
+                bail!("登录失败：账号或密码错误");
+            }
+
+            return Ok(LoginFlowResult {
+                final_url,
+                body,
+                http_status,
+            });
         }
 
-        let body = response.text().await.unwrap_or_default();
-
-        vpn_login_error(&final_url, &body)
+        bail!("SSO 登录重定向超过 16 次仍未完成")
     }
 
     async fn finish_login_session(
@@ -691,22 +855,16 @@ impl IClassApi {
 
         let student_id = input.student_id.trim();
 
-        let iclass_login_name = if self.use_vpn {
+        let iclass_login_name = self.resolve_iclass_login_name().await.map_err(|error| {
 
-            self.resolve_iclass_login_name().await.map_err(|error| {
-
-                diagnose_login_error(
-                    "iclass_login_name",
-                    error,
-                    Some(network_urls(self.use_vpn).my_center),
-                    None,
-                    None,
-                )
-            })?
-        } else {
-
-            student_id.to_string()
-        };
+            diagnose_login_error(
+                "iclass_login_name",
+                error,
+                Some(network_urls(self.use_vpn).my_center),
+                None,
+                None,
+            )
+        })?;
 
         let (user_info, server_time_offset_ms) = self
             .fetch_user_info(&iclass_login_name)
@@ -1083,6 +1241,8 @@ impl IClassApi {
 
         let mut tasks = Vec::with_capacity(courses.len());
 
+        let semaphore = Arc::new(Semaphore::new(8));
+
         for course in courses {
 
             let api = self.clone();
@@ -1095,7 +1255,14 @@ impl IClassApi {
 
             let course_sign_detail = urls.course_sign_detail.clone();
 
+            let semaphore = semaphore.clone();
+
             tasks.push(tokio::spawn(async move {
+
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .context("课程详情并发限流器关闭")?;
 
                 let url = format!(
                     "{}?id={}&courseId={}&sessionId={}",
@@ -1275,6 +1442,28 @@ fn merged_key(item: &CourseDetailItem) -> String {
 
         format!("fallback:{}|{}|{}", item.id, item.date, item.name)
     }
+}
+
+fn format_anyhow_chain(error: &anyhow::Error) -> String {
+
+    let mut parts = error.chain().map(ToString::to_string);
+
+    let Some(first) = parts.next() else {
+
+        return "未知错误".to_string();
+    };
+
+    parts.fold(first, |mut output, cause| {
+
+        if !output.contains(&cause) {
+
+            output.push_str(": ");
+
+            output.push_str(&cause);
+        }
+
+        output
+    })
 }
 
 fn diagnose_login_error(
@@ -1499,6 +1688,69 @@ fn resolve_host_addrs(target: &str) -> Vec<String> {
     }
 }
 
+fn resolve_redirect_url(base_url: &str, location: &str) -> Result<String> {
+
+    reqwest::Url::parse(base_url)
+        .and_then(|base| base.join(location))
+        .map(|url| url.to_string())
+        .with_context(|| {
+
+            format!("解析 SSO 重定向地址失败，当前 URL: {base_url}, Location: {location}")
+        })
+}
+
+fn strip_query(url: &str) -> String {
+
+    url.split_once('?')
+        .map(|(left, _)| left.to_string())
+        .unwrap_or_else(|| url.to_string())
+}
+
+fn origin_for_url(url: &str) -> Option<String> {
+
+    let parsed = reqwest::Url::parse(url).ok()?;
+
+    let host = parsed.host_str()?;
+
+    let mut origin = format!("{}://{}", parsed.scheme(), host);
+
+    if let Some(port) = parsed.port() {
+
+        origin.push(':');
+
+        origin.push_str(&port.to_string());
+    }
+
+    Some(origin)
+}
+
+fn extract_exception_message_from_url(url: &str) -> Option<String> {
+
+    let query = reqwest::Url::parse(url).ok()?.query()?.to_string();
+
+    for part in query.split('&') {
+
+        let Some((key, value)) = part.split_once('=') else {
+
+            continue;
+        };
+
+        if key == "exception.message" {
+
+            return Some(decode_url_query_component(value));
+        }
+    }
+
+    None
+}
+
+fn decode_url_query_component(value: &str) -> String {
+
+    let value = value.replace('+', " ");
+
+    percent_decode(&value).unwrap_or(value)
+}
+
 fn doctor_suggestion(
     name: &str,
     dns_ok: bool,
@@ -1544,24 +1796,7 @@ fn doctor_suggestion(
     "检查未完成".to_string()
 }
 
-/// Detects whether a redirect target has already landed inside iClass.
-
-fn looks_like_iclass_url(url: &str) -> bool {
-
-    url.contains("iclass.buaa.edu.cn") || url.contains("d.buaa.edu.cn/https-834")
-}
-
 /// Detects the generic VPN portal page that appears before entering iClass.
-
-fn looks_like_vpn_portal_home(url: &str) -> bool {
-
-    reqwest::Url::parse(url)
-        .map(|parsed| {
-
-            parsed.host_str() == Some("d.buaa.edu.cn") && !parsed.path().contains("/login")
-        })
-        .unwrap_or(false)
-}
 
 /// Extracts loginName from redirect URLs or HTML snippets, accepting case-insensitive keys.
 
@@ -1647,6 +1882,88 @@ fn looks_like_bad_vpn_credentials(body: &str) -> bool {
     .any(|marker| body.contains(marker))
 }
 
+fn extract_execution_value(body: &str) -> Option<String> {
+
+    let document = Html::parse_document(body);
+
+    let selector = Selector::parse(r#"input[name="execution"]"#).ok()?;
+
+    document
+        .select(&selector)
+        .next()
+        .and_then(|node| node.value().attr("value"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn is_ignorable_password_expiry_page(body: &str) -> bool {
+
+    if body.is_empty() || extract_execution_value(body).is_none() {
+
+        return false;
+    }
+
+    body.contains("continueForm")
+        || body.contains("ignoreAndContinue")
+        || body.contains("账号存在安全风险")
+        || body.contains("密码过期")
+}
+
+fn build_ignore_password_expiry_form(execution: &str) -> Vec<(String, String)> {
+
+    vec![
+        ("execution".to_string(), execution.to_string()),
+        ("_eventId".to_string(), "ignoreAndContinue".to_string()),
+    ]
+}
+
+fn find_login_error(body: &str) -> Option<String> {
+
+    if body.trim().is_empty() {
+
+        return None;
+    }
+
+    let document = Html::parse_document(body);
+
+    let selectors = [
+        "#errorDiv.alert.alert-danger p",
+        "#errorDiv.alert.alert-danger",
+        "div.errors",
+        "p.errors",
+        "span.errors",
+        ".tip-text",
+        ".login-error",
+    ];
+
+    for selector in selectors {
+
+        let Ok(selector) = Selector::parse(selector) else {
+
+            continue;
+        };
+
+        if let Some(message) = document
+            .select(&selector)
+            .map(|node| node.text().collect::<String>())
+            .map(|text| text.trim().to_string())
+            .find(|text| !text.is_empty())
+        {
+
+            return Some(message);
+        }
+    }
+
+    None
+}
+
+fn looks_like_login_form_page(body: &str) -> bool {
+
+    extract_execution_value(body).is_some()
+        && (body.contains("loginForm") || body.contains("fm1") || body.contains("统一身份认证"))
+}
+
 fn resolve_login_form_action(login_url: &str, document: &Html) -> Result<String> {
 
     let selector = Selector::parse(r#"form#loginForm, form#fm1, form[action]"#)
@@ -1701,9 +2018,9 @@ fn build_cas_login_form(
             .trim()
             .to_ascii_lowercase();
 
-        present_names.insert(name.to_string());
-
         if matches!(name, "username" | "password") {
+
+            present_names.insert(name.to_string());
 
             continue;
         }
@@ -1711,6 +2028,9 @@ fn build_cas_login_form(
         match input_type.as_str() {
             "submit" | "button" | "image" => {}
             "checkbox" => {
+
+                present_names.insert(name.to_string());
+
                 if input.value().attr("checked").is_some() {
 
                     fields.push((
@@ -1719,12 +2039,25 @@ fn build_cas_login_form(
                     ));
                 }
             }
-            _ => {
+            "hidden" => {
+
+                present_names.insert(name.to_string());
 
                 fields.push((
                     name.to_string(),
                     input.value().attr("value").unwrap_or_default().to_string(),
                 ));
+            }
+            _ => {
+
+                present_names.insert(name.to_string());
+
+                let value = input.value().attr("value").unwrap_or_default();
+
+                if !value.is_empty() {
+
+                    fields.push((name.to_string(), value.to_string()));
+                }
             }
         }
     }
@@ -1751,10 +2084,7 @@ fn build_cas_login_form(
         }
     }
 
-    if !present_names.contains("submit") {
-
-        fields.push(("submit".to_string(), "登录".to_string()));
-    }
+    fields.push(("submit".to_string(), "登录".to_string()));
 
     if !present_names.contains("type") {
 
@@ -2146,9 +2476,10 @@ mod tests {
     use scraper::Html;
 
     use super::{
-        append_captcha_fields, build_cas_login_form, collect_captcha_field_names,
-        detect_captcha_id, extract_iclass_login_name, needs_vpn_captcha, resolve_login_form_action,
-        summarize_login_page,
+        append_captcha_fields, build_cas_login_form, build_ignore_password_expiry_form,
+        collect_captcha_field_names, detect_captcha_id, extract_execution_value,
+        extract_iclass_login_name, find_login_error, is_ignorable_password_expiry_page,
+        needs_vpn_captcha, resolve_login_form_action, summarize_login_page,
     };
 
     #[test]
@@ -2247,6 +2578,61 @@ mod tests {
         assert_eq!(
             fields.get("type").map(String::as_str),
             Some("username_password")
+        );
+    }
+
+    #[test]
+
+    fn builds_cas_form_always_submitting_login_button_value() {
+
+        let document = Html::parse_document(
+            r#"
+            <form id="fm1" action="/login">
+              <input type="hidden" name="execution" value="e1s1">
+              <input name="username" value="old-user">
+              <input type="password" name="password" value="old-pass">
+              <input type="submit" name="submit" value="旧值">
+            </form>
+            "#,
+        );
+
+        let form =
+            build_cas_login_form(&document, "22330000", "secret", None).expect("form should parse");
+
+        let fields = form_map(&form);
+
+        assert_eq!(fields.get("submit").map(String::as_str), Some("登录"));
+    }
+
+    #[test]
+
+    fn password_expiry_warning_page_builds_ignore_form() {
+
+        let body = r#"
+            <html>
+              <body>
+                <form id="continueForm" action="/login" method="post">
+                  <div>账号存在安全风险，请修改密码</div>
+                  <input type="hidden" name="execution" value="e2s2">
+                  <button type="submit" name="_eventId" value="ignoreAndContinue">忽略提示</button>
+                </form>
+              </body>
+            </html>
+        "#;
+
+        assert!(is_ignorable_password_expiry_page(body));
+
+        assert_eq!(extract_execution_value(body).as_deref(), Some("e2s2"));
+
+        let form = build_ignore_password_expiry_form("e2s2");
+
+        let fields = form_map(&form);
+
+        assert_eq!(fields.get("execution").map(String::as_str), Some("e2s2"));
+
+        assert_eq!(
+            fields.get("_eventId").map(String::as_str),
+            Some("ignoreAndContinue")
         );
     }
 
@@ -2366,6 +2752,8 @@ mod tests {
         assert!(!summary.contains("secret"));
 
         assert!(!summary.contains("password="));
+
+        assert_eq!(find_login_error(body).as_deref(), Some("账号或密码错误"));
     }
 
     fn form_map(form: &[(String, String)]) -> HashMap<String, String> {

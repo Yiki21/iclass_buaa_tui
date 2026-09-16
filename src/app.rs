@@ -13,6 +13,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::academic::{ClassroomRoom, ExamItem, GradeItem};
 use crate::bykc::{
     BykcApi, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcSignAction, BykcStatistics,
     can_deselect_bykc_course,
@@ -23,6 +24,10 @@ use crate::model::{
     CourseDetailItem, DoctorReport, LoginCaptchaChallenge, LoginDiagnostic, LoginInput, LoginStart,
     Session, SignOutcome,
 };
+use crate::schedule::{
+    ScheduleEntry, SemesterSchedule, Week, load_cached_schedules, save_cached_schedule,
+};
+use crate::tasks::AssignmentItem;
 
 const MAX_EVENT_LOG_ENTRIES: usize = 8;
 
@@ -34,6 +39,11 @@ pub enum AsyncEvent {
     Refresh(Result<Vec<CourseDetailItem>, String>),
     Sign(Result<SignOutcome, String>),
     BykcSync(Box<Result<BykcSyncSuccess, String>>),
+    ScheduleImport(Result<SemesterSchedule, String>),
+    Exams(Result<Vec<ExamItem>, String>),
+    Grades(Result<Vec<GradeItem>, String>),
+    Classrooms(Result<Vec<ClassroomRoom>, String>),
+    Tasks(Result<Vec<AssignmentItem>, String>),
     VersionCheck(Result<VersionInfo, String>),
     Doctor(Result<DoctorReport, String>),
 }
@@ -41,8 +51,10 @@ pub enum AsyncEvent {
 #[derive(Clone, Debug)]
 
 pub struct LoginSuccess {
-    pub session: Session,
-    pub courses: Vec<CourseDetailItem>,
+    pub session:               Session,
+    pub courses:               Vec<CourseDetailItem>,
+    pub course_prefetch_error: Option<String>,
+    pub schedule_account:      String,
 }
 
 #[derive(Clone, Debug)]
@@ -106,8 +118,230 @@ pub enum Screen {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
 pub enum WorkspaceTab {
+    Schedule,
     IClass,
     Bykc,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+
+pub enum CourseView {
+    #[default]
+    Today,
+    Schedule,
+    Exams,
+    Grades,
+    Classrooms,
+    Tasks,
+}
+
+#[derive(Clone, Debug, Default)]
+
+pub struct ScheduleState {
+    pub account:           Option<String>,
+    pub semesters:         Vec<SemesterSchedule>,
+    pub selected_semester: usize,
+    pub selected_week:     usize,
+    pub selected_entry:    usize,
+    pub loaded:            bool,
+    pub updating:          bool,
+    pub view:              CourseView,
+    pub query:             String,
+    pub filtering:         bool,
+    pub exams:             Vec<ExamItem>,
+    pub grades:            Vec<GradeItem>,
+    pub classrooms:        Vec<ClassroomRoom>,
+    pub tasks:             Vec<AssignmentItem>,
+    pub academic_loading:  bool,
+    pub classroom_campus:  i64,
+    pub classroom_date:    String,
+}
+
+impl ScheduleState {
+    pub fn from_cache(account: String, mut semesters: Vec<SemesterSchedule>) -> Self {
+
+        let today = Local::now().date_naive();
+
+        for semester in &mut semesters {
+
+            for week in &mut semester.weeks {
+
+                week.current = date_in_range(today, &week.start_date, &week.end_date);
+            }
+        }
+
+        semesters.sort_by(|left, right| right.term_code.cmp(&left.term_code));
+
+        let mut state = Self {
+            account: Some(account),
+            semesters,
+            loaded: true,
+            classroom_campus: 1,
+            classroom_date: Local::now().date_naive().to_string(),
+            ..Self::default()
+        };
+
+        state.select_current_semester();
+
+        state
+    }
+
+    pub fn current_semester(&self) -> Option<&SemesterSchedule> {
+
+        self.semesters.get(self.selected_semester)
+    }
+
+    pub fn current_week(&self) -> Option<&Week> {
+
+        self.current_semester()?.weeks.get(self.selected_week)
+    }
+
+    pub fn current_schedule(&self) -> Option<&crate::schedule::WeeklySchedule> {
+
+        let number = self.current_week()?.number;
+
+        self.current_semester()?.schedule_for(number)
+    }
+
+    pub fn selected_entry(&self) -> Option<&ScheduleEntry> {
+
+        self.current_schedule()?.entries.get(self.selected_entry)
+    }
+
+    pub fn visible_entries(&self) -> Vec<(usize, &ScheduleEntry)> {
+
+        let query = self.query.trim();
+
+        self.current_schedule()
+            .map(|schedule| {
+
+                schedule
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+
+                        query.is_empty()
+                            || entry.course_name.contains(query)
+                            || entry.course_code.contains(query)
+                            || entry
+                                .place
+                                .as_deref()
+                                .is_some_and(|value| value.contains(query))
+                            || entry
+                                .weeks_and_teachers
+                                .as_deref()
+                                .is_some_and(|value| value.contains(query))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn today_entries(&self) -> Vec<(usize, &ScheduleEntry)> {
+
+        let weekday = Local::now().weekday().number_from_monday() as usize;
+
+        self.visible_entries()
+            .into_iter()
+            .filter(|(_, entry)| entry.day_of_week == Some(weekday))
+            .collect()
+    }
+
+    pub fn switch_view(&mut self, view: CourseView) {
+
+        self.view = view;
+
+        self.selected_entry = 0;
+
+        self.filtering = false;
+    }
+
+    pub fn select_current_semester(&mut self) {
+
+        self.selected_semester = self
+            .semesters
+            .iter()
+            .position(|semester| semester.weeks.iter().any(|week| week.current))
+            .unwrap_or(0);
+
+        self.reset_week_selection();
+    }
+
+    pub fn select_semester(&mut self, index: usize) {
+
+        if index < self.semesters.len() {
+
+            self.selected_semester = index;
+
+            self.reset_week_selection();
+        }
+    }
+
+    pub fn move_week(&mut self, delta: isize) {
+
+        let len = self
+            .current_semester()
+            .map(|item| item.weeks.len())
+            .unwrap_or(0);
+
+        self.selected_week = clamp_step(self.selected_week, len, delta);
+
+        self.selected_entry = 0;
+    }
+
+    pub fn move_entry(&mut self, delta: isize) {
+
+        let visible = match self.view {
+            CourseView::Today => self.today_entries(),
+            CourseView::Schedule => self.visible_entries(),
+            _ => Vec::new(),
+        };
+
+        let position = visible
+            .iter()
+            .position(|(index, _)| *index == self.selected_entry)
+            .unwrap_or(0);
+
+        let next = clamp_step(position, visible.len(), delta);
+
+        self.selected_entry = visible
+            .get(next)
+            .map(|(index, _)| *index)
+            .unwrap_or_default();
+    }
+
+    fn reset_week_selection(&mut self) {
+
+        self.selected_week = self
+            .current_semester()
+            .and_then(|semester| semester.weeks.iter().position(|week| week.current))
+            .unwrap_or(0);
+
+        self.selected_entry = 0;
+    }
+
+    fn replace_semester(&mut self, schedule: SemesterSchedule) {
+
+        let code = schedule.term_code.clone();
+
+        self.semesters.retain(|item| item.term_code != code);
+
+        self.semesters.push(schedule);
+
+        self.semesters
+            .sort_by(|left, right| right.term_code.cmp(&left.term_code));
+
+        self.selected_semester = self
+            .semesters
+            .iter()
+            .position(|item| item.term_code == code)
+            .unwrap_or(0);
+
+        self.reset_week_selection();
+
+        self.loaded = true;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -173,17 +407,18 @@ impl LoginForm {
 
         let mut fields = vec![LoginFocus::UseVpn];
 
-        if !self.use_vpn {
+        if self.use_vpn {
+
+            fields.push(LoginFocus::VpnUsername);
+        } else {
 
             fields.push(LoginFocus::StudentId);
         }
 
-        if self.use_vpn {
-
-            fields.push(LoginFocus::VpnUsername);
-
-            fields.push(LoginFocus::VpnPassword);
-        }
+        // Both connection modes now establish the same SSO session.  The
+        // historical VpnPassword field is retained in the model and config so
+        // existing remembered credentials remain readable.
+        fields.push(LoginFocus::VpnPassword);
 
         if self.captcha_required {
 
@@ -498,6 +733,7 @@ pub struct App {
     pub selected_week:         usize,
     pub selected:              usize,
     pub bykc:                  BykcState,
+    pub schedule:              ScheduleState,
     pub event_log:             Vec<EventEntry>,
     pub status:                String,
     pub busy:                  bool,
@@ -533,11 +769,12 @@ impl Default for App {
             selected_week:         0,
             selected:              0,
             bykc:                  BykcState::default(),
+            schedule:              ScheduleState::default(),
             event_log:             vec![EventEntry {
                 level:   EventLevel::Info,
-                message: "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录".to_string(),
+                message: "输入统一认证账号和密码，选择访问模式后按 enter 登录".to_string(),
             }],
-            status:                "直连模式输入学号；VPN 模式输入 VPN 账号密码后按 enter 登录"
+            status:                "输入统一认证账号和密码，选择访问模式后按 enter 登录"
                 .to_string(),
             busy:                  false,
             iclass_loading:        false,
@@ -581,6 +818,38 @@ impl App {
         }
 
         app
+    }
+
+    fn load_schedule_cache(&mut self, account: String) {
+
+        match load_cached_schedules(&account) {
+            Ok(semesters) if semesters.is_empty() => {
+
+                self.schedule = ScheduleState {
+                    account: Some(account),
+                    loaded: true,
+                    classroom_campus: 1,
+                    classroom_date: Local::now().date_naive().to_string(),
+                    ..ScheduleState::default()
+                };
+            }
+            Ok(semesters) => {
+
+                self.schedule = ScheduleState::from_cache(account, semesters);
+            }
+            Err(error) => {
+
+                self.schedule = ScheduleState {
+                    account: Some(account),
+                    loaded: true,
+                    classroom_campus: 1,
+                    classroom_date: Local::now().date_naive().to_string(),
+                    ..ScheduleState::default()
+                };
+
+                self.warn(format!("读取离线课表失败: {error}"));
+            }
+        }
     }
 
     pub fn visible_course_indices(&self) -> &[usize] {
@@ -896,7 +1165,7 @@ impl App {
 
                         self.screen = Screen::Workspace;
 
-                        self.active_tab = WorkspaceTab::IClass;
+                        self.active_tab = WorkspaceTab::Schedule;
 
                         let should_prewarm_bykc =
                             data.session.use_vpn && data.session.bykc_api.is_some();
@@ -915,20 +1184,31 @@ impl App {
 
                         self.replace_courses(data.courses, None, None);
 
+                        self.load_schedule_cache(data.schedule_account);
+
                         self.bykc = BykcState::default();
 
                         self.clear_qr();
 
                         let remember_status = self.persist_remembered_login_status();
 
-                        self.success(format!(
-                            "登录成功。tab 切换 iClass / BYKC，s 直接签到，g 终端二维码，G \
-                             外部二维码，r 刷新，Shift+X 退出登录。{remember_status}"
-                        ));
-
                         if should_prewarm_bykc {
 
                             self.prewarm_bykc(data.session, tx);
+                        }
+
+                        if let Some(error) = data.course_prefetch_error {
+
+                            self.warn(format!(
+                                "登录成功，但拉取课程失败: {error}。按 r \
+                                 重试刷新课程。{remember_status}"
+                            ));
+                        } else {
+
+                            self.success(format!(
+                                "登录成功。tab 切换 iClass / BYKC，s 直接签到，g 终端二维码，G \
+                                 外部二维码，r 刷新，Shift+X 退出登录。{remember_status}"
+                            ));
                         }
                     }
                     Err(error) => {
@@ -1087,6 +1367,101 @@ impl App {
                     }
                 }
             }
+            AsyncEvent::ScheduleImport(result) => {
+
+                self.schedule.updating = false;
+
+                match result {
+                    Ok(schedule) => {
+
+                        let Some(account) = self.schedule.account.clone() else {
+
+                            self.warn("课表账号已失效，请重新登录");
+
+                            return;
+                        };
+
+                        match save_cached_schedule(&account, schedule.clone()) {
+                            Ok(()) => {
+
+                                self.schedule.replace_semester(schedule);
+
+                                self.success("整学期课表已更新，旧课表仍保留在本地缓存中");
+                            }
+                            Err(error) => {
+
+                                self.error(format!("课表已获取，但保存离线课表失败: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => {
+
+                        self.error(format!("课表更新失败，已保存课表未修改: {error}"));
+                    }
+                }
+            }
+            AsyncEvent::Exams(result) => {
+
+                self.schedule.academic_loading = false;
+
+                match result {
+                    Ok(exams) => {
+
+                        self.schedule.exams = exams;
+
+                        self.success(format!(
+                            "考试安排已加载，共 {} 条",
+                            self.schedule.exams.len()
+                        ));
+                    }
+                    Err(error) => self.error(format!("考试安排加载失败: {error}")),
+                }
+            }
+            AsyncEvent::Grades(result) => {
+
+                self.schedule.academic_loading = false;
+
+                match result {
+                    Ok(grades) => {
+
+                        self.schedule.grades = grades;
+
+                        self.success(format!("成绩已加载，共 {} 条", self.schedule.grades.len()));
+                    }
+                    Err(error) => self.error(format!("成绩加载失败: {error}")),
+                }
+            }
+            AsyncEvent::Classrooms(result) => {
+
+                self.schedule.academic_loading = false;
+
+                match result {
+                    Ok(rooms) => {
+
+                        self.schedule.classrooms = rooms;
+
+                        self.success(format!(
+                            "空教室已加载，共 {} 间",
+                            self.schedule.classrooms.len()
+                        ));
+                    }
+                    Err(error) => self.error(format!("空教室加载失败: {error}")),
+                }
+            }
+            AsyncEvent::Tasks(result) => {
+
+                self.schedule.academic_loading = false;
+
+                match result {
+                    Ok(tasks) => {
+
+                        self.schedule.tasks = tasks;
+
+                        self.success(format!("作业已加载，共 {} 条", self.schedule.tasks.len()));
+                    }
+                    Err(error) => self.error(format!("作业加载失败: {error}")),
+                }
+            }
             AsyncEvent::VersionCheck(result) => {
                 match result {
                     Ok(info) => {
@@ -1202,6 +1577,7 @@ impl App {
         }
 
         match self.active_tab {
+            WorkspaceTab::Schedule => self.handle_schedule_key(key, tx),
             WorkspaceTab::IClass => self.handle_iclass_key(key, tx),
             WorkspaceTab::Bykc => self.handle_bykc_key(key, tx),
         }
@@ -1268,7 +1644,11 @@ impl App {
 
     fn switch_workspace_tab(&mut self, delta: isize, tx: &UnboundedSender<AsyncEvent>) {
 
-        let tabs = [WorkspaceTab::IClass, WorkspaceTab::Bykc];
+        let tabs = [
+            WorkspaceTab::Schedule,
+            WorkspaceTab::IClass,
+            WorkspaceTab::Bykc,
+        ];
 
         let current_index = tabs
             .iter()
@@ -1288,6 +1668,82 @@ impl App {
         if self.active_tab == WorkspaceTab::Bykc && !self.bykc.loaded && !self.bykc.loading {
 
             self.refresh_bykc(tx);
+        }
+    }
+
+    fn handle_schedule_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.schedule.filtering {
+
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.schedule.filtering = false,
+                KeyCode::Backspace => {
+
+                    self.schedule.query.pop();
+
+                    self.schedule.selected_entry = 0;
+                }
+                KeyCode::Char(ch) => {
+
+                    self.schedule.query.push(ch);
+
+                    self.schedule.selected_entry = 0;
+                }
+                _ => {}
+            }
+
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('/') => self.schedule.filtering = true,
+            KeyCode::Char('1') => self.schedule.switch_view(CourseView::Today),
+            KeyCode::Char('2') => self.schedule.switch_view(CourseView::Schedule),
+            KeyCode::Char('3') => {
+
+                self.schedule.switch_view(CourseView::Exams);
+
+                self.refresh_academic_view(tx);
+            }
+            KeyCode::Char('4') => {
+
+                self.schedule.switch_view(CourseView::Grades);
+
+                self.refresh_academic_view(tx);
+            }
+            KeyCode::Char('5') => {
+
+                self.schedule.switch_view(CourseView::Classrooms);
+
+                self.refresh_academic_view(tx);
+            }
+            KeyCode::Char('6') => {
+
+                self.schedule.switch_view(CourseView::Tasks);
+
+                self.refresh_academic_view(tx);
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('[') => self.schedule.move_week(-1),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(']') => self.schedule.move_week(1),
+            KeyCode::Up | KeyCode::Char('k') => self.schedule.move_entry(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.schedule.move_entry(1),
+            KeyCode::Char(',') => {
+
+                let index = self.schedule.selected_semester.saturating_sub(1);
+
+                self.schedule.select_semester(index);
+            }
+            KeyCode::Char('.') => {
+
+                let index = self.schedule.selected_semester.saturating_add(1);
+
+                self.schedule.select_semester(index);
+            }
+            KeyCode::Char('u') => self.update_schedule(tx),
+            KeyCode::Char('r') => self.refresh_academic_view(tx),
+            KeyCode::Char('X') => self.logout(),
+            _ => {}
         }
     }
 
@@ -1349,9 +1805,16 @@ impl App {
             return;
         }
 
-        if input.use_vpn && (input.vpn_username.is_empty() || input.vpn_password.is_empty()) {
+        if input.vpn_password.is_empty() {
 
-            self.warn("VPN 模式需要输入账号和密码");
+            self.warn("统一认证密码不能为空");
+
+            return;
+        }
+
+        if input.use_vpn && input.vpn_username.is_empty() {
+
+            self.warn("VPN 模式需要输入统一认证账号");
 
             return;
         }
@@ -1446,6 +1909,86 @@ impl App {
         self.info("刷新课程中...");
 
         spawn_refresh(session, tx.clone());
+    }
+
+    fn update_schedule(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(session) = self.session.clone() else {
+
+            self.warn("当前未登录，无法更新课表");
+
+            self.screen = Screen::Login;
+
+            return;
+        };
+
+        if self.schedule.updating {
+
+            return;
+        }
+
+        let requested_term = self
+            .schedule
+            .current_semester()
+            .map(|semester| semester.term_code.clone());
+
+        self.schedule.updating = true;
+
+        self.info("正在导入整学期课表...");
+
+        spawn_schedule_import(session, requested_term, tx.clone());
+    }
+
+    fn refresh_academic_view(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let view = self.schedule.view;
+
+        if matches!(view, CourseView::Today | CourseView::Schedule) {
+
+            return;
+        }
+
+        let Some(session) = self.session.clone() else {
+
+            self.warn("当前未登录");
+
+            self.screen = Screen::Login;
+
+            return;
+        };
+
+        let Some(term_code) = self
+            .schedule
+            .current_semester()
+            .map(|semester| semester.term_code.clone())
+        else {
+
+            self.warn("请先按 u 导入课表，系统才能确定当前学期");
+
+            return;
+        };
+
+        if self.schedule.academic_loading {
+
+            return;
+        }
+
+        self.schedule.academic_loading = true;
+
+        match view {
+            CourseView::Exams => spawn_exams(session, term_code, tx.clone()),
+            CourseView::Grades => spawn_grades(session, term_code, tx.clone()),
+            CourseView::Classrooms => {
+                spawn_classrooms(
+                    session,
+                    self.schedule.classroom_campus,
+                    self.schedule.classroom_date.clone(),
+                    tx.clone(),
+                )
+            }
+            CourseView::Tasks => spawn_tasks(session, tx.clone()),
+            CourseView::Today | CourseView::Schedule => {}
+        }
     }
 
     fn prewarm_bykc(&mut self, session: Session, tx: &UnboundedSender<AsyncEvent>) {
@@ -1784,7 +2327,7 @@ impl App {
 
         self.screen = Screen::Login;
 
-        self.active_tab = WorkspaceTab::IClass;
+        self.active_tab = WorkspaceTab::Schedule;
 
         self.session = None;
 
@@ -2356,25 +2899,14 @@ fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
             Ok(api) => {
                 match api.start_login(&input).await {
                     Ok(LoginStart::Complete(session)) => {
-                        api.get_merged_course_details(&session, 7)
-                            .await
-                            .map(|courses| LoginSuccess { session, courses })
-                            .map_err(|error| {
 
-                                LoginFailure {
-                                    message:    format_anyhow_error(error),
-                                    diagnostic: LoginDiagnostic {
-                                        kind:        crate::model::LoginFailureKind::IclassApi,
-                                        stage:       "course_prefetch".to_string(),
-                                        summary:     "登录成功，但拉取课程失败".to_string(),
-                                        error_chain: vec!["登录成功，但拉取课程失败".to_string()],
-                                        final_url:   None,
-                                        http_status: None,
-                                        page_hint:   None,
-                                        suggestions: vec!["按 r 重试刷新课程".to_string()],
-                                    },
-                                }
-                            })
+                        let courses = api.get_merged_course_details(&session, 7).await;
+
+                        Ok(login_success_with_prefetch_result(
+                            session,
+                            courses,
+                            input.student_id.clone(),
+                        ))
                     }
                     Ok(LoginStart::Captcha(challenge)) => {
 
@@ -2431,27 +2963,14 @@ fn spawn_continue_captcha_login(
             .await
         {
             Ok(session) => {
-                pending
-                    .api
-                    .get_merged_course_details(&session, 7)
-                    .await
-                    .map(|courses| LoginSuccess { session, courses })
-                    .map_err(|error| {
 
-                        LoginFailure {
-                            message:    format_anyhow_error(error),
-                            diagnostic: LoginDiagnostic {
-                                kind:        crate::model::LoginFailureKind::IclassApi,
-                                stage:       "course_prefetch".to_string(),
-                                summary:     "登录成功，但拉取课程失败".to_string(),
-                                error_chain: vec!["登录成功，但拉取课程失败".to_string()],
-                                final_url:   None,
-                                http_status: None,
-                                page_hint:   None,
-                                suggestions: vec!["按 r 重试刷新课程".to_string()],
-                            },
-                        }
-                    })
+                let courses = pending.api.get_merged_course_details(&session, 7).await;
+
+                Ok(login_success_with_prefetch_result(
+                    session,
+                    courses,
+                    pending.input.student_id.clone(),
+                ))
             }
             Err(diagnostic) => {
                 Err(LoginFailure {
@@ -2463,6 +2982,32 @@ fn spawn_continue_captcha_login(
 
         let _ = tx.send(AsyncEvent::Login(result));
     });
+}
+
+fn login_success_with_prefetch_result(
+    session: Session,
+    courses: Result<Vec<CourseDetailItem>, anyhow::Error>,
+    schedule_account: String,
+) -> LoginSuccess {
+
+    match courses {
+        Ok(courses) => {
+            LoginSuccess {
+                session,
+                courses,
+                course_prefetch_error: None,
+                schedule_account,
+            }
+        }
+        Err(error) => {
+            LoginSuccess {
+                session,
+                courses: Vec::new(),
+                course_prefetch_error: Some(format_anyhow_error(error)),
+                schedule_account,
+            }
+        }
+    }
 }
 
 fn spawn_doctor(use_vpn: bool, tx: UnboundedSender<AsyncEvent>) {
@@ -2501,6 +3046,80 @@ fn spawn_refresh(session: Session, tx: UnboundedSender<AsyncEvent>) {
             .map_err(format_anyhow_error);
 
         let _ = tx.send(AsyncEvent::Refresh(result));
+    });
+}
+
+fn spawn_schedule_import(
+    session: Session,
+    requested_term: Option<String>,
+    tx: UnboundedSender<AsyncEvent>,
+) {
+
+    tokio::spawn(async move {
+
+        let result = session
+            .api
+            .import_semester_schedule(&session, requested_term.as_deref())
+            .await
+            .map_err(format_anyhow_error);
+
+        let _ = tx.send(AsyncEvent::ScheduleImport(result));
+    });
+}
+
+fn spawn_exams(session: Session, term_code: String, tx: UnboundedSender<AsyncEvent>) {
+
+    tokio::spawn(async move {
+
+        let result = session
+            .api
+            .get_exams(&term_code)
+            .await
+            .map_err(format_anyhow_error);
+
+        let _ = tx.send(AsyncEvent::Exams(result));
+    });
+}
+
+fn spawn_grades(session: Session, term_code: String, tx: UnboundedSender<AsyncEvent>) {
+
+    tokio::spawn(async move {
+
+        let result = session
+            .api
+            .get_grades(&term_code)
+            .await
+            .map_err(format_anyhow_error);
+
+        let _ = tx.send(AsyncEvent::Grades(result));
+    });
+}
+
+fn spawn_classrooms(session: Session, campus: i64, date: String, tx: UnboundedSender<AsyncEvent>) {
+
+    tokio::spawn(async move {
+
+        let result = session
+            .api
+            .query_classrooms(campus, &date)
+            .await
+            .map_err(format_anyhow_error);
+
+        let _ = tx.send(AsyncEvent::Classrooms(result));
+    });
+}
+
+fn spawn_tasks(session: Session, tx: UnboundedSender<AsyncEvent>) {
+
+    tokio::spawn(async move {
+
+        let result = session
+            .api
+            .get_assignments()
+            .await
+            .map_err(format_anyhow_error);
+
+        let _ = tx.send(AsyncEvent::Tasks(result));
     });
 }
 
@@ -2783,6 +3402,14 @@ fn current_week_key() -> String {
     monday_of(Local::now().date_naive())
         .format("%Y-%m-%d")
         .to_string()
+}
+
+fn date_in_range(today: NaiveDate, start: &str, end: &str) -> bool {
+
+    NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .ok()
+        .zip(NaiveDate::parse_from_str(end, "%Y-%m-%d").ok())
+        .is_some_and(|(start, end)| today >= start && today <= end)
 }
 
 async fn fetch_latest_version_info() -> anyhow::Result<VersionInfo> {

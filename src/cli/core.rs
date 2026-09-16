@@ -55,8 +55,9 @@ impl SignAction {
 #[derive(Debug, Clone)]
 
 pub(crate) struct RetryPolicy {
-    pub(crate) max_attempts:     u32,
-    pub(crate) interval_seconds: u64,
+    pub(crate) max_attempts:      u32,
+    pub(crate) interval_seconds:  u64,
+    pub(crate) max_delay_seconds: u64,
 }
 
 impl RetryPolicy {
@@ -64,7 +65,9 @@ impl RetryPolicy {
 
         let exponent = attempt.saturating_sub(1).min(8);
 
-        self.interval_seconds.saturating_mul(1_u64 << exponent)
+        self.interval_seconds
+            .saturating_mul(1_u64 << exponent)
+            .min(self.max_delay_seconds)
     }
 }
 

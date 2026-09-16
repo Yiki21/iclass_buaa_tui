@@ -102,6 +102,7 @@ ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = [
   "cookies",
   "form",
+  "hickory-dns",
   "json",
   "query",
   "rustls"

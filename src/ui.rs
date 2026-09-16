@@ -1,6 +1,6 @@
 //! Pure rendering code for the login screen, iClass workspace, and BYKC views.
 
-use chrono::{Duration, NaiveDate, TimeZone};
+use chrono::{Duration, Local, NaiveDate, TimeZone};
 use qrcode::{EcLevel, QrCode};
 use ratatui::{
     Frame,
@@ -11,7 +11,7 @@ use ratatui::{
 };
 use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
-use crate::app::{App, BykcView, EventLevel, LoginFocus, QrMode, Screen, WorkspaceTab};
+use crate::app::{App, BykcView, CourseView, EventLevel, LoginFocus, QrMode, Screen, WorkspaceTab};
 use crate::bykc::can_deselect_bykc_course;
 
 const QR_MAX_MODULE_SCALE: u16 = 1;
@@ -76,15 +76,9 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     let mut constraints = vec![Constraint::Length(5), Constraint::Length(3)];
 
-    if app.login.use_vpn {
+    constraints.push(Constraint::Length(3));
 
-        constraints.push(Constraint::Length(3));
-
-        constraints.push(Constraint::Length(3));
-    } else {
-
-        constraints.push(Constraint::Length(3));
-    }
+    constraints.push(Constraint::Length(3));
 
     if app.login.captcha_required {
 
@@ -111,8 +105,8 @@ fn render_login(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(app.version_text(), app.version_style())),
-        Line::from("登录后可在 iClass 与 BYKC 间切换"),
-        Line::from("VPN 模式下直接使用 VPN 账号登录，不再单独输入学号"),
+        Line::from("登录后可在课表、iClass 与 BYKC 间切换"),
+        Line::from("直连与 VPN 模式均使用统一认证；VPN 仅改变访问路径"),
         Line::from("tab 切换字段，space 切换选项，enter 登录，D 自检，v 失败详情，? 帮助，q 退出"),
     ]);
 
@@ -138,22 +132,13 @@ fn render_login(frame: &mut Frame, app: &App) {
         render_input(
             frame,
             chunks[2],
-            "VPN 账号",
+            "统一认证账号",
             &app.login.vpn_username,
             app.login.current_focus() == LoginFocus::VpnUsername,
             false,
         );
 
-        render_input(
-            frame,
-            chunks[3],
-            "VPN 密码",
-            &mask_password(&app.login.vpn_password),
-            app.login.current_focus() == LoginFocus::VpnPassword,
-            true,
-        );
-
-        4
+        3
     } else {
 
         render_input(
@@ -167,6 +152,17 @@ fn render_login(frame: &mut Frame, app: &App) {
 
         3
     };
+
+    render_input(
+        frame,
+        chunks[next_index],
+        "统一认证密码",
+        &mask_password(&app.login.vpn_password),
+        app.login.current_focus() == LoginFocus::VpnPassword,
+        true,
+    );
+
+    next_index += 1;
 
     if app.login.captcha_required {
 
@@ -240,6 +236,7 @@ fn render_workspace(frame: &mut Frame, app: &App) {
     render_workspace_hint(frame, chunks[1], app);
 
     match app.active_tab {
+        WorkspaceTab::Schedule => render_schedule(frame, chunks[2], app),
         WorkspaceTab::IClass => render_iclass(frame, chunks[2], app),
         WorkspaceTab::Bykc => render_bykc(frame, chunks[2], app),
     }
@@ -247,14 +244,15 @@ fn render_workspace(frame: &mut Frame, app: &App) {
 
 fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
 
-    let titles = [" iClass ", " BYKC "]
+    let titles = [" 课表 ", " iClass ", " BYKC "]
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
 
     let selected = match app.active_tab {
-        WorkspaceTab::IClass => 0,
-        WorkspaceTab::Bykc => 1,
+        WorkspaceTab::Schedule => 0,
+        WorkspaceTab::IClass => 1,
+        WorkspaceTab::Bykc => 2,
     };
 
     let tabs = Tabs::new(titles)
@@ -277,6 +275,7 @@ fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
 fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
 
     let current = match app.active_tab {
+        WorkspaceTab::Schedule => "课表",
         WorkspaceTab::IClass => "iClass",
         WorkspaceTab::Bykc => "BYKC",
     };
@@ -291,6 +290,561 @@ fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
     .wrap(Wrap { trim: true });
 
     frame.render_widget(hint, area);
+}
+
+fn render_schedule(frame: &mut Frame, area: Rect, app: &App) {
+
+    match app.schedule.view {
+        CourseView::Today => return render_today_courses(frame, area, app),
+        CourseView::Exams => return render_exams(frame, area, app),
+        CourseView::Grades => return render_grades(frame, area, app),
+        CourseView::Classrooms => return render_classrooms(frame, area, app),
+        CourseView::Tasks => return render_tasks(frame, area, app),
+        CourseView::Schedule => {}
+    }
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(12),
+            Constraint::Length(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let account = app.schedule.account.as_deref().unwrap_or("未登录");
+
+    let semester = app.schedule.current_semester();
+
+    let header = Paragraph::new(format!(
+        "账号: {} | 学期: {} | {}",
+        account,
+        semester
+            .map(|item| item.term_code.as_str())
+            .unwrap_or("未导入"),
+        if app.schedule.updating {
+
+            "正在更新"
+        } else if semester.is_some() {
+
+            "离线可读"
+        } else {
+
+            "尚未导入"
+        }
+    ))
+    .block(Block::default().title("课程课表").borders(Borders::ALL));
+
+    frame.render_widget(header, vertical[0]);
+
+    let week = app.schedule.current_week();
+
+    let controls = Paragraph::new(format!(
+        "学期: {} | 周次: {} | {} | ,/. 切学期 | [ ] 或 h/l 切周 | u 更新整学期",
+        app.schedule
+            .current_schedule()
+            .map(|item| item.term_name.as_str())
+            .or_else(|| semester.map(|item| item.term_code.as_str()))
+            .unwrap_or("无缓存"),
+        week.map(|item| item.name.as_str()).unwrap_or("无周次"),
+        week.map(|item| format!("{} ~ {}", item.start_date, item.end_date))
+            .unwrap_or_else(|| "无日期".to_string()),
+    ))
+    .block(Block::default().title("课表操作").borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(controls, vertical[1]);
+
+    let schedule = app.schedule.current_schedule();
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 7); 7])
+        .split(vertical[2]);
+
+    let labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+    for (day, column) in columns.iter().enumerate() {
+
+        let entries = schedule
+            .map(|item| {
+
+                item.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.day_of_week == Some(day + 1))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let items = if entries.is_empty() {
+
+            vec![ListItem::new("-")]
+        } else {
+
+            entries
+                .iter()
+                .map(|(index, entry)| {
+
+                    let label = format!(
+                        "{}-{}\n{}\n{}",
+                        entry.begin_time.as_deref().unwrap_or("--:--"),
+                        entry.end_time.as_deref().unwrap_or("--:--"),
+                        entry.course_name,
+                        entry.place.as_deref().unwrap_or("未填写地点"),
+                    );
+
+                    let style = if Some(*index) == Some(app.schedule.selected_entry) {
+
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+
+                        Style::default()
+                    };
+
+                    ListItem::new(label).style(style)
+                })
+                .collect()
+        };
+
+        let list = List::new(items)
+            .block(Block::default().title(labels[day]).borders(Borders::ALL))
+            .highlight_symbol("");
+
+        frame.render_widget(list, *column);
+    }
+
+    let detail = if let Some(entry) = app.schedule.selected_entry() {
+
+        Paragraph::new(vec![
+            Line::from(format!(
+                "课程: {} ({})",
+                entry.course_name, entry.course_code
+            )),
+            Line::from(format!(
+                "时间: {} - {} | 节次: {}-{}",
+                entry.begin_time.as_deref().unwrap_or("--:--"),
+                entry.end_time.as_deref().unwrap_or("--:--"),
+                entry
+                    .begin_section
+                    .map(|value| value.to_string())
+                    .as_deref()
+                    .unwrap_or("-"),
+                entry
+                    .end_section
+                    .map(|value| value.to_string())
+                    .as_deref()
+                    .unwrap_or("-")
+            )),
+            Line::from(format!(
+                "地点: {} | 教师: {}",
+                entry.place.as_deref().unwrap_or("未填写"),
+                entry.weeks_and_teachers.as_deref().unwrap_or("未填写")
+            )),
+            Line::from("课表只读；按 u 手动导入整学期，更新失败不会覆盖旧缓存"),
+        ])
+    } else {
+
+        Paragraph::new("没有当前周课程。首次使用请按 u 更新整学期课表")
+    };
+
+    frame.render_widget(
+        detail
+            .block(Block::default().title("课程详情").borders(Borders::ALL))
+            .wrap(Wrap { trim: true }),
+        vertical[3],
+    );
+
+    render_event_log_block(frame, vertical[4], app);
+}
+
+fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let today = Local::now().date_naive();
+
+    let entries = app.schedule.today_entries();
+
+    let title = if app.schedule.filtering {
+
+        format!("今日课程 | 搜索: {}_", app.schedule.query)
+    } else if app.schedule.query.is_empty() {
+
+        "今日课程 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | / 搜索".to_string()
+    } else {
+
+        format!("今日课程 | 搜索: {} | / 修改", app.schedule.query)
+    };
+
+    let header = Paragraph::new(vec![
+        Line::from(format!("日期: {} | 共 {} 门", today, entries.len())),
+        Line::from("j/k 选择课程 | r 刷新当前数据 | u 更新整学期课表 | tab 切换签到工作区"),
+    ])
+    .block(Block::default().title(title).borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(header, chunks[0]);
+
+    let items = if entries.is_empty() {
+
+        vec![ListItem::new(if app.schedule.semesters.is_empty() {
+
+            "暂无本地课表，请按 u 导入整学期课表"
+        } else {
+
+            "今天没有匹配课程"
+        })]
+    } else {
+
+        entries
+            .iter()
+            .map(|(index, entry)| {
+
+                let style = if *index == app.schedule.selected_entry {
+
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+
+                    Style::default()
+                };
+
+                let attendance = app
+                    .courses
+                    .iter()
+                    .find(|course| course.name == entry.course_name)
+                    .map(today_sign_status)
+                    .unwrap_or("未同步");
+
+                ListItem::new(format!(
+                    "{}-{}  {}  [{}] {}  {}",
+                    entry.begin_time.as_deref().unwrap_or("--:--"),
+                    entry.end_time.as_deref().unwrap_or("--:--"),
+                    entry.course_name,
+                    entry.place.as_deref().unwrap_or("未填写地点"),
+                    entry.weeks_and_teachers.as_deref().unwrap_or("未填写教师"),
+                    attendance,
+                ))
+                .style(style)
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().title("课程列表").borders(Borders::ALL)),
+        chunks[1],
+    );
+
+    let detail = app
+        .schedule
+        .selected_entry()
+        .map(|entry| {
+
+            Paragraph::new(vec![
+                Line::from(format!(
+                    "课程: {} ({})",
+                    entry.course_name, entry.course_code
+                )),
+                Line::from(format!(
+                    "地点: {}",
+                    entry.place.as_deref().unwrap_or("未填写")
+                )),
+                Line::from(format!(
+                    "教师: {}",
+                    entry.weeks_and_teachers.as_deref().unwrap_or("未填写")
+                )),
+                Line::from(format!(
+                    "签到状态: {}",
+                    app.courses
+                        .iter()
+                        .find(|course| course.name == entry.course_name)
+                        .map(today_sign_status)
+                        .unwrap_or("未同步")
+                )),
+            ])
+        })
+        .unwrap_or_else(|| Paragraph::new("未选择课程"));
+
+    frame.render_widget(
+        detail
+            .block(Block::default().title("下一步").borders(Borders::ALL))
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+
+    render_event_log_block(frame, chunks[3], app);
+}
+
+fn today_sign_status(course: &crate::model::CourseDetailItem) -> &'static str {
+
+    if course.signed() {
+
+        return "已签到";
+    }
+
+    if course.course_sched_id.trim().is_empty() {
+
+        return "缺少签到 ID";
+    }
+
+    let now = Local::now().format("%H:%M").to_string();
+
+    if !course.start_time.is_empty() && now < course.start_time {
+
+        "未开始"
+    } else if !course.end_time.is_empty() && now > course.end_time {
+
+        "已结束"
+    } else {
+
+        "可签到"
+    }
+}
+
+fn render_exams(frame: &mut Frame, area: Rect, app: &App) {
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let header = Paragraph::new(format!(
+        "考试安排 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 当前记录 {} 条",
+        app.schedule.exams.len()
+    ))
+    .block(Block::default().title("考试").borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(header, chunks[0]);
+
+    let items = if app.schedule.exams.is_empty() {
+
+        vec![ListItem::new(if app.schedule.academic_loading {
+
+            "加载考试安排中..."
+        } else {
+
+            "暂无考试数据，按 r 加载"
+        })]
+    } else {
+
+        app.schedule
+            .exams
+            .iter()
+            .map(|exam| {
+
+                ListItem::new(format!(
+                    "{}  {} {}-{}  {}  座位 {}",
+                    exam.exam_date.as_deref().unwrap_or("未定日期"),
+                    exam.course_name,
+                    exam.start_time.as_deref().unwrap_or("--:--"),
+                    exam.end_time.as_deref().unwrap_or("--:--"),
+                    exam.place.as_deref().unwrap_or("未定地点"),
+                    exam.seat.as_deref().unwrap_or("-")
+                ))
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().title("考试列表").borders(Borders::ALL)),
+        chunks[1],
+    );
+
+    render_event_log_block(frame, chunks[2], app);
+}
+
+fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let header = Paragraph::new(format!(
+        "成绩查询 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 当前记录 {} 条",
+        app.schedule.grades.len()
+    ))
+    .block(Block::default().title("成绩").borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(header, chunks[0]);
+
+    let items = if app.schedule.grades.is_empty() {
+
+        vec![ListItem::new(if app.schedule.academic_loading {
+
+            "加载成绩中..."
+        } else {
+
+            "暂无成绩数据，按 r 加载"
+        })]
+    } else {
+
+        app.schedule
+            .grades
+            .iter()
+            .map(|grade| {
+
+                ListItem::new(format!(
+                    "{}  成绩: {}  学分: {}  绩点: {}  {}",
+                    grade.course_name,
+                    grade.score.as_deref().unwrap_or("-").trim(),
+                    grade
+                        .credit
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    grade.grade_point.as_deref().unwrap_or("-"),
+                    grade.passed.as_deref().unwrap_or("-")
+                ))
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().title("成绩列表").borders(Borders::ALL)),
+        chunks[1],
+    );
+
+    render_event_log_block(frame, chunks[2], app);
+}
+
+fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let header = Paragraph::new(format!(
+        "空教室 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 校区 {} | 日期 {}",
+        app.schedule.classroom_campus, app.schedule.classroom_date
+    ))
+    .block(Block::default().title("空教室").borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(header, chunks[0]);
+
+    let items = if app.schedule.classrooms.is_empty() {
+
+        vec![ListItem::new(if app.schedule.academic_loading {
+
+            "加载空教室中..."
+        } else {
+
+            "暂无空教室数据，按 r 加载"
+        })]
+    } else {
+
+        app.schedule
+            .classrooms
+            .iter()
+            .map(|room| {
+
+                ListItem::new(format!(
+                    "{} {}  空闲节次: {}",
+                    room.building,
+                    room.name,
+                    room.free_sections
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().title("教室列表").borders(Borders::ALL)),
+        chunks[1],
+    );
+
+    render_event_log_block(frame, chunks[2], app);
+}
+
+fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let header = Paragraph::new(format!(
+        "作业 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 当前 {} 条",
+        app.schedule.tasks.len()
+    ))
+    .block(Block::default().title("作业").borders(Borders::ALL))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(header, chunks[0]);
+
+    let items = if app.schedule.tasks.is_empty() {
+
+        vec![ListItem::new(if app.schedule.academic_loading {
+
+            "加载作业中..."
+        } else {
+
+            "暂无作业数据，按 r 加载"
+        })]
+    } else {
+
+        app.schedule
+            .tasks
+            .iter()
+            .map(|task| {
+
+                ListItem::new(format!(
+                    "{}  {}  截止 {}  得分 {}  {}",
+                    task.course_name,
+                    task.title,
+                    task.due_time.as_deref().unwrap_or("未定"),
+                    task.score.as_deref().unwrap_or("-"),
+                    task.status
+                ))
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().title("作业列表").borders(Borders::ALL)),
+        chunks[1],
+    );
+
+    render_event_log_block(frame, chunks[2], app);
 }
 
 /// Renders the iClass weekly grid plus the selected-course detail panel.
@@ -1524,6 +2078,15 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("s: 直接签到"),
         Line::from("g: 打开或关闭终端二维码签到"),
         Line::from("G: 打开或关闭外部二维码签到"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "课表",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("j/k: 选择课程 | h/l 或 [ ]: 切换周"),
+        Line::from(", / .: 切换已保存学期 | u: 导入整学期课表"),
         Line::from(""),
         Line::from(Span::styled(
             "BYKC",

@@ -494,9 +494,9 @@ fn build_cas_login_form(
             .trim()
             .to_ascii_lowercase();
 
-        present_names.insert(name.to_string());
-
         if matches!(name, "username" | "password") {
+
+            present_names.insert(name.to_string());
 
             continue;
         }
@@ -504,6 +504,9 @@ fn build_cas_login_form(
         match input_type.as_str() {
             "submit" | "button" | "image" => {}
             "checkbox" => {
+
+                present_names.insert(name.to_string());
+
                 if input.value().attr("checked").is_some() {
 
                     fields.push((
@@ -512,12 +515,25 @@ fn build_cas_login_form(
                     ));
                 }
             }
-            _ => {
+            "hidden" => {
+
+                present_names.insert(name.to_string());
 
                 fields.push((
                     name.to_string(),
                     input.value().attr("value").unwrap_or_default().to_string(),
                 ));
+            }
+            _ => {
+
+                present_names.insert(name.to_string());
+
+                let value = input.value().attr("value").unwrap_or_default();
+
+                if !value.is_empty() {
+
+                    fields.push((name.to_string(), value.to_string()));
+                }
             }
         }
     }
@@ -531,10 +547,7 @@ fn build_cas_login_form(
 
     fields.push(("password".to_string(), password.to_string()));
 
-    if !present_names.contains("submit") {
-
-        fields.push(("submit".to_string(), "登录".to_string()));
-    }
+    fields.push(("submit".to_string(), "登录".to_string()));
 
     if !present_names.contains("type") {
 

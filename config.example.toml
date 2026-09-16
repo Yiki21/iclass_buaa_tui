@@ -1,7 +1,8 @@
 student_id = "2337xxxx"
-use_vpn = true
-vpn_username = "your-vpn-user"
-vpn_password = "your-vpn-password"
+use_vpn = false
+# 历史字段名保留：这里填写统一认证账号。留空时默认使用 student_id。
+vpn_username = ""
+vpn_password = "your-sso-password"
 enable_iclass = true
 enable_bykc = false
 

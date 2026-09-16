@@ -1,5 +1,6 @@
 //! Program entry point for switching between the interactive TUI and the automation CLI.
 
+mod academic;
 mod app;
 mod bykc;
 mod cli;
@@ -7,6 +8,8 @@ mod constants;
 mod iclass;
 mod logging;
 mod model;
+mod schedule;
+mod tasks;
 mod ui;
 
 use std::{env, io, time::Duration};

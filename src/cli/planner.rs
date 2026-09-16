@@ -2,20 +2,34 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{
-    DateTime, Duration as ChronoDuration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone,
-    Utc,
+    DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, NaiveDateTime,
+    TimeZone, Utc,
 };
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{Duration as StdDuration, SystemTime},
+};
 use tokio::time::{Duration, sleep};
 
 use crate::{
+    academic::{ClassroomRoom, ExamItem, GradeItem},
     bykc::{BykcChosenCourse, BykcSignAction},
     constants::network_urls,
     iclass::IClassApi,
-    model::{CourseDetailItem, LoginFailureKind, SignOutcome},
+    model::{CourseDetailItem, LoginFailureKind, Session, SignOutcome},
+    schedule::{
+        SemesterSchedule, cached_semester, diff_semesters, load_cached_schedules,
+        render_schedule_export, save_cached_schedule,
+    },
 };
 
-use super::args::{DoctorArgs, ListTodayArgs, PlanArgs, SignArgs};
+use super::args::{
+    AcademicListArgs, ClassroomArgs, DoctorArgs, ListTodayArgs, PlanArgs, ScheduleDiffArgs,
+    ScheduleExportArgs, SignArgs, TaskArgs, TodayArgs,
+};
 use super::config::{AutomationConfig, load_config, parse_planner_time};
 use super::core::{
     EvaluatedCourse, ListedTarget, PollStatusKind, RetryPolicy, SignAction, SignSource,
@@ -48,6 +62,124 @@ struct ClassifiedError {
     retryable:   bool,
     reason:      &'static str,
     description: String,
+}
+
+/// One authenticated planner cycle.  iClass and BYKC share this session so a
+/// single scheduled run does not perform two identical SSO logins.
+
+struct PlannerSession {
+    api:     IClassApi,
+    session: Session,
+}
+
+struct PlannerLock {
+    path: PathBuf,
+}
+
+impl PlannerLock {
+    fn acquire(account: &str) -> Result<Self> {
+
+        let base = if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
+
+            PathBuf::from(path)
+        } else if let Some(path) = std::env::var_os("HOME") {
+
+            PathBuf::from(path).join(".local/state")
+        } else {
+
+            bail!("找不到 planner 状态目录");
+        };
+
+        let digest = Sha1::digest(account.as_bytes());
+
+        let key = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        let path = base.join("iclass-buaa").join(format!("planner-{key}.lock"));
+
+        fs::create_dir_all(path.parent().unwrap_or(&base))?;
+
+        if path.exists() {
+
+            let stale = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age > StdDuration::from_secs(2 * 60 * 60));
+
+            if stale {
+
+                let _ = fs::remove_dir(&path);
+            }
+        }
+
+        fs::create_dir(&path)
+            .with_context(|| format!("planner 已在运行，锁目录存在: {}", path.display()))?;
+
+        fs::write(path.join("pid"), std::process::id().to_string())?;
+
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PlannerLock {
+    fn drop(&mut self) {
+
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+impl PlannerSession {
+    async fn establish(config: &AutomationConfig, debug_login: bool) -> Result<Self> {
+
+        let api = IClassApi::new(config.use_vpn)?;
+
+        let session = login_session(&api, &config.login_input(), debug_login).await?;
+
+        Ok(Self { api, session })
+    }
+
+    async fn fetch_iclass_targets(&self) -> Result<Vec<ListedTarget>> {
+
+        if self.session.api.use_vpn != self.api.use_vpn {
+
+            bail!("planner 会话连接模式不一致");
+        }
+
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+
+        let courses = self.api.get_merged_course_details(&self.session, 0).await?;
+
+        Ok(courses
+            .into_iter()
+            .filter(|course| course.date == today)
+            .map(map_iclass_course)
+            .collect())
+    }
+
+    async fn fetch_bykc_targets(&self) -> Result<Vec<ListedTarget>> {
+
+        let bykc_api = self
+            .session
+            .bykc_api
+            .as_ref()
+            .ok_or_else(|| anyhow!("BYKC 自动签到需要 VPN 模式登录"))?;
+
+        let today = Local::now().date_naive();
+
+        let chosen_courses = bykc_api.get_chosen_courses().await?;
+
+        let mut targets = Vec::new();
+
+        for course in chosen_courses {
+
+            targets.extend(map_bykc_targets(course, today));
+        }
+
+        Ok(targets)
+    }
 }
 
 impl From<SignAction> for BykcSignAction {
@@ -141,10 +273,11 @@ pub(crate) async fn sign_command(args: SignArgs) -> Result<()> {
     let config = load_config(args.config.as_deref())?;
 
     let retry = RetryPolicy {
-        max_attempts:     args.retry_count.unwrap_or(config.retry_count),
-        interval_seconds: args
+        max_attempts:      args.retry_count.unwrap_or(config.retry_count),
+        interval_seconds:  args
             .retry_interval_seconds
             .unwrap_or(config.retry_interval_seconds),
+        max_delay_seconds: 60,
     };
 
     if retry.max_attempts == 0 {
@@ -177,6 +310,7 @@ pub(crate) async fn sign_command(args: SignArgs) -> Result<()> {
                 retry,
                 Some(display_name.clone()),
                 args.debug_login,
+                None,
             )
             .await?;
 
@@ -210,6 +344,7 @@ pub(crate) async fn sign_command(args: SignArgs) -> Result<()> {
                 retry,
                 Some(display_name.clone()),
                 args.debug_login,
+                None,
             )
             .await?;
 
@@ -260,6 +395,10 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
 
     let config = load_config(args.config.as_deref())?;
 
+    let _planner_lock = PlannerLock::acquire(&config.student_id)?;
+
+    let run_id = planner_run_id();
+
     let _unit_prefix = args.unit_prefix;
 
     if args.dry_run {
@@ -279,9 +418,15 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
         .map(|entry| entry.course.clone())
         .collect();
 
+    let mut due_targets = due_targets;
+
+    due_targets.sort_by_key(|target| target_deadline(target));
+
     if due_targets.is_empty() {
 
         print_evaluated_summary(&evaluated);
+
+        log_planner_completed(&run_id, &evaluated, 0, 0);
 
         return Ok(());
     }
@@ -289,11 +434,14 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
     print_evaluated_summary(&evaluated);
 
     let retry = RetryPolicy {
-        max_attempts:     config.retry_count,
-        interval_seconds: config.retry_interval_seconds,
+        max_attempts:      config.retry_count,
+        interval_seconds:  config.retry_interval_seconds,
+        max_delay_seconds: 60,
     };
 
     let mut failures = Vec::new();
+
+    let mut succeeded = 0_u32;
 
     for target in &due_targets {
 
@@ -313,6 +461,7 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
                     retry.clone(),
                     Some(target.name.clone()),
                     args.debug_login,
+                    target_deadline(target),
                 )
                 .await
             }
@@ -332,6 +481,7 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
                             retry.clone(),
                             Some(target.name.clone()),
                             args.debug_login,
+                            target_deadline(target),
                         )
                         .await
                     }
@@ -361,6 +511,9 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
                         target.target_id,
                         outcome.message
                     ));
+                } else {
+
+                    succeeded += 1;
                 }
             }
             Err(error) => {
@@ -379,10 +532,88 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
 
     if failures.is_empty() {
 
+        log_planner_completed(&run_id, &evaluated, succeeded, 0);
+
         return Ok(());
     }
 
+    log_planner_completed(&run_id, &evaluated, succeeded, failures.len() as u32);
+
     bail!("部分课程签到失败:\n{}", failures.join("\n"))
+}
+
+fn planner_run_id() -> String {
+
+    format!(
+        "{}-{}",
+        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        std::process::id()
+    )
+}
+
+fn log_planner_completed(run_id: &str, evaluated: &[EvaluatedCourse], succeeded: u32, failed: u32) {
+
+    let due = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::DueNow)
+        .count();
+
+    let waiting = evaluated
+        .iter()
+        .filter(|entry| {
+
+            matches!(
+                entry.status,
+                PollStatusKind::WaitingForDailyStart | PollStatusKind::WaitingForCourse
+            )
+        })
+        .count();
+
+    let signed = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::Signed)
+        .count();
+
+    let expired = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::Expired)
+        .count();
+
+    let missing = evaluated
+        .iter()
+        .filter(|entry| entry.status == PollStatusKind::MissingCourseSchedId)
+        .count();
+
+    crate::logging::event(
+        crate::logging::LogLevel::Info,
+        "planner.completed",
+        format!("planner run completed: {run_id}"),
+        json!({
+            "run_id": run_id,
+            "targets": evaluated.len(),
+            "due": due,
+            "waiting": waiting,
+            "signed": signed,
+            "expired": expired,
+            "missing_target_id": missing,
+            "succeeded": succeeded,
+            "failed": failed,
+        }),
+    );
+
+    println!(
+        "planner-run\trun_id={}\ttargets={}\tdue={}\twaiting={}\tsigned={}\texpired={}\\
+         tmissing={}\tsucceeded={}\tfailed={}",
+        run_id,
+        evaluated.len(),
+        due,
+        waiting,
+        signed,
+        expired,
+        missing,
+        succeeded,
+        failed,
+    );
 }
 
 pub(crate) async fn doctor_command(args: DoctorArgs) -> Result<()> {
@@ -432,66 +663,398 @@ pub(crate) async fn doctor_command(args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
-// Target loading and planner evaluation
+pub(crate) async fn today_command(args: TodayArgs) -> Result<()> {
 
-async fn fetch_today_iclass_targets(
-    config: &AutomationConfig,
-    debug_login: bool,
-) -> Result<Vec<ListedTarget>> {
+    let config = load_config(args.config.as_deref())?;
 
-    if !config.enable_iclass {
+    let (api, session, account) = academic_session(&config, false).await?;
 
-        return Ok(Vec::new());
-    }
+    let semesters = ensure_cached_semesters(&api, &session, &account, None).await?;
 
-    let api = IClassApi::new(config.use_vpn)?;
-
-    let session = login_session(&api, &config.login_input(), debug_login).await?;
-
-    let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-
-    let courses = api.get_merged_course_details(&session, 0).await?;
-
-    Ok(courses
-        .into_iter()
-        .filter(|course| course.date == today)
-        .map(map_iclass_course)
-        .collect())
-}
-
-/// Loads today's actionable BYKC sign-in/sign-out windows from chosen courses.
-
-async fn fetch_today_bykc_targets(
-    config: &AutomationConfig,
-    debug_login: bool,
-) -> Result<Vec<ListedTarget>> {
-
-    if !config.enable_bykc {
-
-        return Ok(Vec::new());
-    }
-
-    let api = IClassApi::new(config.use_vpn)?;
-
-    let session = login_session(&api, &config.login_input(), debug_login).await?;
-
-    let bykc_api = session
-        .bykc_api
-        .ok_or_else(|| anyhow!("BYKC 自动签到需要 VPN 模式登录"))?;
+    let semester = cached_semester(&semesters, None)?;
 
     let today = Local::now().date_naive();
 
-    let chosen_courses = bykc_api.get_chosen_courses().await?;
+    let week = semester
+        .weeks
+        .iter()
+        .find(|week| date_in_range(today, &week.start_date, &week.end_date));
 
-    let mut targets = Vec::new();
+    let entries = week
+        .and_then(|week| semester.schedules.get(&week.number))
+        .map(|schedule| {
 
-    for course in chosen_courses {
+            schedule
+                .entries
+                .iter()
+                .filter(|entry| {
 
-        targets.extend(map_bykc_targets(course, today));
+                    entry.day_of_week == Some(today.weekday().number_from_monday() as usize)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+
+        return Ok(());
     }
 
-    Ok(targets)
+    if entries.is_empty() {
+
+        println!("今天没有课程");
+
+        return Ok(());
+    }
+
+    println!("time\tcourse\tplace\tteacher");
+
+    for entry in entries {
+
+        println!(
+            "{}-{}\t{}\t{}\t{}",
+            entry.begin_time.as_deref().unwrap_or("--:--"),
+            entry.end_time.as_deref().unwrap_or("--:--"),
+            entry.course_name,
+            entry.place.as_deref().unwrap_or("-"),
+            entry.weeks_and_teachers.as_deref().unwrap_or("-")
+        );
+    }
+
+    Ok(())
 }
+
+pub(crate) async fn exams_command(args: AcademicListArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let (api, session, account) = academic_session(&config, args.debug_login).await?;
+
+    let semesters = ensure_cached_semesters(&api, &session, &account, args.term.as_deref()).await?;
+
+    let term = cached_semester(&semesters, args.term.as_deref())?;
+
+    let exams = api.get_exams(&term.term_code).await?;
+
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&exams)?);
+    } else {
+
+        print_exams(&exams);
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn grades_command(args: AcademicListArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let (api, session, account) = academic_session(&config, args.debug_login).await?;
+
+    let semesters = ensure_cached_semesters(&api, &session, &account, args.term.as_deref()).await?;
+
+    let term = cached_semester(&semesters, args.term.as_deref())?;
+
+    let grades = api.get_grades(&term.term_code).await?;
+
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&grades)?);
+    } else {
+
+        print_grades(&grades);
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn classrooms_command(args: ClassroomArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let (api, _session, _account) = academic_session(&config, args.debug_login).await?;
+
+    let date = args
+        .date
+        .unwrap_or_else(|| Local::now().date_naive().to_string());
+
+    NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+        .with_context(|| format!("日期格式必须是 YYYY-MM-DD: {date}"))?;
+
+    let rooms = api.query_classrooms(args.campus, &date).await?;
+
+    let rooms = if let Some(section) = args.section {
+
+        rooms
+            .into_iter()
+            .filter(|room| room.free_sections.contains(&section))
+            .collect::<Vec<_>>()
+    } else {
+
+        rooms
+    };
+
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&rooms)?);
+    } else {
+
+        print_classrooms(&rooms, args.section);
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn tasks_command(args: TaskArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let api = IClassApi::new(config.use_vpn)?;
+
+    let _session = login_session(&api, &config.login_input(), args.debug_login).await?;
+
+    let tasks = api.get_assignments().await?;
+
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
+    } else if tasks.is_empty() {
+
+        println!("没有读取到希冀作业");
+    } else {
+
+        println!("source\tcourse\ttitle\tstart\tdue\tscore\tstatus");
+
+        for task in tasks {
+
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                task.source,
+                task.course_name,
+                task.title,
+                task.start_time.as_deref().unwrap_or("-"),
+                task.due_time.as_deref().unwrap_or("-"),
+                task.score.as_deref().unwrap_or("-"),
+                task.status,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn schedule_export_command(args: ScheduleExportArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let semesters = load_cached_schedules(&config.student_id)?;
+
+    let semester = cached_semester(&semesters, args.term.as_deref())?;
+
+    let body = render_schedule_export(semester, &args.format)?;
+
+    if let Some(path) = args.output {
+
+        fs::write(&path, body).with_context(|| format!("写入导出文件失败: {}", path.display()))?;
+
+        println!("已导出: {}", path.display());
+    } else {
+
+        print!("{body}");
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn schedule_diff_command(args: ScheduleDiffArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let semesters = load_cached_schedules(&config.student_id)?;
+
+    if semesters.len() < 2 {
+
+        bail!("至少需要两个已缓存学期才能比较");
+    }
+
+    let from = args
+        .from
+        .as_deref()
+        .and_then(|code| semesters.iter().find(|item| item.term_code == code))
+        .unwrap_or_else(|| semesters.last().unwrap());
+
+    let to = args
+        .to
+        .as_deref()
+        .and_then(|code| semesters.iter().find(|item| item.term_code == code))
+        .unwrap_or(&semesters[0]);
+
+    let changes = diff_semesters(from, to);
+
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&changes)?);
+    } else if changes.is_empty() {
+
+        println!("{} 与 {} 没有课表差异", from.term_code, to.term_code);
+    } else {
+
+        for change in changes {
+
+            println!(
+                "{}\t第{}周\t周{}\t{}\t{}",
+                change.kind,
+                change.week,
+                change
+                    .day
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                change.course_name,
+                change.detail
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn academic_session(
+    config: &AutomationConfig,
+    debug_login: bool,
+) -> Result<(IClassApi, crate::model::Session, String)> {
+
+    let api = IClassApi::new(config.use_vpn)?;
+
+    let session = login_session(&api, &config.login_input(), debug_login).await?;
+
+    Ok((api, session, config.student_id.clone()))
+}
+
+async fn ensure_cached_semesters(
+    api: &IClassApi,
+    session: &crate::model::Session,
+    account: &str,
+    requested_term: Option<&str>,
+) -> Result<Vec<SemesterSchedule>> {
+
+    let mut semesters = load_cached_schedules(account)?;
+
+    let has_requested = requested_term
+        .map(|term| semesters.iter().any(|item| item.term_code == term))
+        .unwrap_or_else(|| !semesters.is_empty());
+
+    if !has_requested {
+
+        let imported = api
+            .import_semester_schedule(session, requested_term)
+            .await?;
+
+        save_cached_schedule(account, imported)?;
+
+        semesters = load_cached_schedules(account)?;
+    }
+
+    Ok(semesters)
+}
+
+fn print_exams(exams: &[ExamItem]) {
+
+    if exams.is_empty() {
+
+        println!("没有考试安排");
+
+        return;
+    }
+
+    println!("course\tdate\ttime\tplace\tseat\ttype");
+
+    for exam in exams {
+
+        println!(
+            "{}\t{}\t{}-{}\t{}\t{}\t{}",
+            exam.course_name,
+            exam.exam_date.as_deref().unwrap_or("-"),
+            exam.start_time.as_deref().unwrap_or("--:--"),
+            exam.end_time.as_deref().unwrap_or("--:--"),
+            exam.place.as_deref().unwrap_or("-"),
+            exam.seat.as_deref().unwrap_or("-"),
+            exam.exam_type.as_deref().unwrap_or("-")
+        );
+    }
+}
+
+fn print_grades(grades: &[GradeItem]) {
+
+    if grades.is_empty() {
+
+        println!("没有成绩记录");
+
+        return;
+    }
+
+    println!("course\tcode\tcredit\tscore\tpoint\tstatus");
+
+    for grade in grades {
+
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            grade.course_name,
+            grade.course_code.as_deref().unwrap_or("-"),
+            grade
+                .credit
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            grade.score.as_deref().unwrap_or("-"),
+            grade.grade_point.as_deref().unwrap_or("-"),
+            grade.passed.as_deref().unwrap_or("-")
+        );
+    }
+}
+
+fn print_classrooms(rooms: &[ClassroomRoom], section: Option<usize>) {
+
+    if rooms.is_empty() {
+
+        println!("没有符合条件的空教室");
+
+        return;
+    }
+
+    println!("building\troom\tfree_sections");
+
+    for room in rooms {
+
+        println!(
+            "{}\t{}\t{}",
+            room.building,
+            room.name,
+            room.free_sections
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+
+    if let Some(section) = section {
+
+        println!("仅显示第 {section} 节空闲教室");
+    }
+}
+
+fn date_in_range(today: NaiveDate, start: &str, end: &str) -> bool {
+
+    NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .ok()
+        .zip(NaiveDate::parse_from_str(end, "%Y-%m-%d").ok())
+        .is_some_and(|(start, end)| today >= start && today <= end)
+}
+
+// Target loading and planner evaluation
 
 /// Fetches today's sign targets, retrying login and API calls on transient failures.
 
@@ -501,8 +1064,9 @@ async fn fetch_today_targets_with_retry(
 ) -> Result<Vec<ListedTarget>> {
 
     let retry = RetryPolicy {
-        max_attempts:     config.retry_count,
-        interval_seconds: config.retry_interval_seconds,
+        max_attempts:      config.retry_count,
+        interval_seconds:  config.retry_interval_seconds,
+        max_delay_seconds: 60,
     };
 
     let mut last_error = None;
@@ -511,11 +1075,52 @@ async fn fetch_today_targets_with_retry(
 
         let result = async {
 
-            let mut targets = fetch_today_iclass_targets(config, debug_login).await?;
+            let planner = PlannerSession::establish(config, debug_login).await?;
 
-            targets.extend(fetch_today_bykc_targets(config, debug_login).await?);
+            let mut targets = Vec::new();
 
-            Ok::<Vec<ListedTarget>, anyhow::Error>(targets)
+            let mut failures = Vec::new();
+
+            let mut successful_sources = 0_u8;
+
+            if config.enable_iclass {
+
+                match planner.fetch_iclass_targets().await {
+                    Ok(items) => {
+
+                        successful_sources += 1;
+
+                        targets.extend(items);
+                    }
+                    Err(error) => failures.push(format!("iClass: {error}")),
+                }
+            }
+
+            if config.enable_bykc {
+
+                match planner.fetch_bykc_targets().await {
+                    Ok(items) => {
+
+                        successful_sources += 1;
+
+                        targets.extend(items);
+                    }
+                    Err(error) => failures.push(format!("BYKC: {error}")),
+                }
+            }
+
+            if successful_sources > 0 {
+
+                for failure in failures {
+
+                    eprintln!("目标来源暂时不可用，继续处理其他来源: {failure}");
+                }
+
+                Ok::<Vec<ListedTarget>, anyhow::Error>(targets)
+            } else {
+
+                bail!("所有签到目标来源均失败: {}", failures.join("; "))
+            }
         }
         .await;
 
@@ -1086,12 +1691,43 @@ fn print_retry_decision(
 
 // Sign execution and diagnostics
 
+fn target_deadline(target: &ListedTarget) -> Option<DateTime<Local>> {
+
+    build_local_time(&target.date, &target.end_time)
+        .ok()
+        .flatten()
+}
+
+fn bounded_retry_delay(
+    retry: &RetryPolicy,
+    attempt: u32,
+    deadline: Option<DateTime<Local>>,
+) -> u64 {
+
+    let requested = retry.delay_seconds(attempt);
+
+    let Some(deadline) = deadline else {
+
+        return requested;
+    };
+
+    let remaining = deadline.signed_duration_since(Local::now()).num_seconds();
+
+    if remaining <= 0 {
+
+        return 0;
+    }
+
+    requested.min(remaining as u64)
+}
+
 async fn sign_iclass_with_retry(
     config: &AutomationConfig,
     course_sched_id: &str,
     retry: RetryPolicy,
     display_name: Option<String>,
     debug_login: bool,
+    deadline: Option<DateTime<Local>>,
 ) -> Result<SignOutcome> {
 
     let mut last_error = None;
@@ -1119,11 +1755,11 @@ async fn sign_iclass_with_retry(
 
                         let should_retry = classified.retryable && attempt < retry.max_attempts;
 
-                        let delay_seconds = retry.delay_seconds(attempt);
+                        let delay_seconds = bounded_retry_delay(&retry, attempt, deadline);
 
                         last_error = Some(classified.error);
 
-                        if should_retry {
+                        if should_retry && delay_seconds > 0 {
 
                             sleep(Duration::from_secs(delay_seconds)).await;
                         } else {
@@ -1146,11 +1782,11 @@ async fn sign_iclass_with_retry(
 
                 let should_retry = classified.retryable && attempt < retry.max_attempts;
 
-                let delay_seconds = retry.delay_seconds(attempt);
+                let delay_seconds = bounded_retry_delay(&retry, attempt, deadline);
 
                 last_error = Some(classified.error);
 
-                if should_retry {
+                if should_retry && delay_seconds > 0 {
 
                     sleep(Duration::from_secs(delay_seconds)).await;
                 } else {
@@ -1175,6 +1811,7 @@ async fn sign_bykc_with_retry(
     retry: RetryPolicy,
     display_name: Option<String>,
     debug_login: bool,
+    deadline: Option<DateTime<Local>>,
 ) -> Result<SignOutcome> {
 
     let mut last_error = None;
@@ -1223,11 +1860,11 @@ async fn sign_bykc_with_retry(
 
                         let should_retry = classified.retryable && attempt < retry.max_attempts;
 
-                        let delay_seconds = retry.delay_seconds(attempt);
+                        let delay_seconds = bounded_retry_delay(&retry, attempt, deadline);
 
                         last_error = Some(classified.error);
 
-                        if should_retry {
+                        if should_retry && delay_seconds > 0 {
 
                             sleep(Duration::from_secs(delay_seconds)).await;
                         } else {
@@ -1253,11 +1890,11 @@ async fn sign_bykc_with_retry(
 
                 let should_retry = classified.retryable && attempt < retry.max_attempts;
 
-                let delay_seconds = retry.delay_seconds(attempt);
+                let delay_seconds = bounded_retry_delay(&retry, attempt, deadline);
 
                 last_error = Some(classified.error);
 
-                if should_retry {
+                if should_retry && delay_seconds > 0 {
 
                     sleep(Duration::from_secs(delay_seconds)).await;
                 } else {
@@ -1774,8 +2411,9 @@ mod tests {
     fn retry_policy_uses_exponential_backoff_with_cap() {
 
         let retry = RetryPolicy {
-            max_attempts:     10,
-            interval_seconds: 3,
+            max_attempts:      10,
+            interval_seconds:  3,
+            max_delay_seconds: 60,
         };
 
         assert_eq!(retry.delay_seconds(1), 3);
@@ -1784,7 +2422,7 @@ mod tests {
 
         assert_eq!(retry.delay_seconds(4), 24);
 
-        assert_eq!(retry.delay_seconds(20), 768);
+        assert_eq!(retry.delay_seconds(20), 60);
     }
 
     #[test]
