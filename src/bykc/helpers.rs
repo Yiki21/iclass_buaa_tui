@@ -25,11 +25,42 @@ type Aes128EcbEnc = ecb::Encryptor<Aes128>;
 type Aes128EcbDec = ecb::Decryptor<Aes128>;
 
 /// Extracts the BYKC auth token from the login redirect URL.
+///
+/// Why:
+/// The upstream CAS redirect does not guarantee `token` is the first query
+/// parameter. The previous `?token=` split returned `None` whenever another
+/// parameter came first, which made the caller fall through to a second
+/// credential submission and get the account locked.
 
 pub(super) fn extract_bykc_token(url: &str) -> Option<String> {
 
-    url.split_once("?token=")
-        .map(|(_, token)| token.to_string())
+    let (_, query) = url.split_once('?')?;
+
+    let query = query.split('#').next().unwrap_or(query);
+
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "token")
+        .map(|(_, value)| value.to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Detects the gateway lock response returned after repeated login attempts.
+///
+/// Why:
+/// The school locks an account for a while once it sees several credential
+/// submissions, and answers with HTTP 423 plus a JSON body. That is not a bad
+/// password, so treating it as retryable keeps hammering a locked account.
+
+pub(super) fn is_locked_response(body: &str) -> bool {
+
+    let lower = body.to_ascii_lowercase();
+
+    lower.contains("\"status\":423")
+        || lower.contains("\"status\": 423")
+        || lower.contains("423 locked")
+        || lower.contains("access denied")
 }
 
 /// Resolves the correct BYKC base URL for direct and VPN modes.
@@ -422,9 +453,19 @@ pub(super) async fn vpn_login(
         bail!("VPN 登录失败：账号或密码错误");
     }
 
+    let locked_status = response.status() == reqwest::StatusCode::LOCKED;
+
     let final_url = response.url().to_string();
 
     let body = response.text().await.context("读取 VPN 登录响应失败")?;
+
+    // A locked gateway returns 423 with a JSON body, not a CAS form. Reporting
+    // it as a generic "still on the login page" failure hid the real cause and
+    // invited another credential submission.
+    if locked_status || is_locked_response(&body) {
+
+        bail!("VPN 登录被学校网关暂时锁定（HTTP 423 Locked）。请稍后再试，期间不要重复提交登录。");
+    }
 
     if final_url.contains("/login")
         || body.contains(r#"name="execution""#)
@@ -823,4 +864,46 @@ fn destination_point(lat: f64, lng: f64, dist: f64, angle: f64) -> (f64, f64) {
             .atan2(radius.cos() - lat_radians.sin() * dest_lat.sin());
 
     (dest_lat.to_degrees(), dest_lng.to_degrees())
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use super::{extract_bykc_token, is_locked_response};
+
+    #[test]
+
+    fn extracts_bykc_token_from_any_query_position() {
+
+        assert_eq!(
+            extract_bykc_token("https://bykc.buaa.edu.cn/sscv/cas/login?token=abc123").as_deref(),
+            Some("abc123")
+        );
+
+        // The token may follow another parameter; the old `?token=` split missed this.
+        assert_eq!(
+            extract_bykc_token("https://bykc.buaa.edu.cn/x?service=bykc&token=def456").as_deref(),
+            Some("def456")
+        );
+
+        assert_eq!(
+            extract_bykc_token("https://bykc.buaa.edu.cn/x?service=bykc"),
+            None
+        );
+    }
+
+    #[test]
+
+    fn detects_locked_account_gateway_response() {
+
+        // Shape observed from WebVPN after repeated credential submissions.
+        let locked = r#"{"timestamp":1789541240635,"status":423,"error":"Locked","message":"Access Denied for user [<student-id>] from IP Address [<ip>]"}"#;
+
+        assert!(is_locked_response(locked));
+
+        assert!(is_locked_response("<html>423 Locked</html>"));
+
+        assert!(!is_locked_response(r#"{"status":200,"error":"OK"}"#));
+    }
 }

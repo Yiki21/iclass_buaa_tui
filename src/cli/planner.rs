@@ -1603,6 +1603,9 @@ fn classify_anyhow_error(error: anyhow::Error) -> ClassifiedError {
         || normalized.contains("需要 vpn 模式")
         || normalized.contains("验证码")
         || normalized.contains("账号或密码")
+        || normalized.contains("423")
+        || normalized.contains("locked")
+        || normalized.contains("access denied")
     {
 
         (false, "non-retryable-input")
@@ -2423,6 +2426,19 @@ mod tests {
         assert_eq!(retry.delay_seconds(4), 24);
 
         assert_eq!(retry.delay_seconds(20), 60);
+    }
+
+    #[test]
+
+    fn lock_response_is_not_retried() {
+
+        let locked = classify_anyhow_error(anyhow!(
+            "博雅登录被学校网关暂时锁定（HTTP 423 Locked），Access Denied"
+        ));
+
+        assert!(!locked.retryable);
+
+        assert_eq!(locked.reason, "non-retryable-input");
     }
 
     #[test]

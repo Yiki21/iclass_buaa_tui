@@ -3,7 +3,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
 use reqwest::cookie::Jar;
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
+use reqwest::header::{
+    ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, LOCATION, REFERER, USER_AGENT,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -13,9 +15,9 @@ use crate::model::LoginInput;
 
 use super::helpers::{
     bykc_base_url, calculate_course_status, decrypt_response, encrypt_request, extract_bykc_token,
-    html_to_text, parse_sign_config, random_sign_location, resolve_attendance_availability,
-    resolve_sign_in_unavailable_reason, resolve_sign_out_unavailable_reason,
-    sanitize_bykc_error_message, vpn_login,
+    html_to_text, is_locked_response, parse_sign_config, random_sign_location,
+    resolve_attendance_availability, resolve_sign_in_unavailable_reason,
+    resolve_sign_out_unavailable_reason, sanitize_bykc_error_message, vpn_login,
 };
 use super::raw::{
     BykcAllConfig, BykcApiResponse, BykcChosenCoursePayload, BykcChosenCourseRaw,
@@ -477,6 +479,14 @@ impl BykcApi {
     }
 
     /// Ensures the BYKC auth token exists and refreshes it when the session expires.
+    ///
+    /// Why:
+    /// The main login already established the unified-auth cookie session. BYKC
+    /// does not need its own credential submission; it only needs the CAS
+    /// redirect that carries `token`. Posting the password again here was the
+    /// cause of the school's `423 Locked` response, so this path reads the token
+    /// from the existing session and never resubmits credentials unless the
+    /// session is genuinely gone.
 
     async fn ensure_login(&self, force_refresh: bool) -> Result<()> {
 
@@ -496,13 +506,6 @@ impl BykcApi {
             return Ok(());
         }
 
-        vpn_login(
-            &self.client,
-            self.login_input.vpn_username.as_str(),
-            self.login_input.vpn_password.as_str(),
-        )
-        .await?;
-
         let login_url = format!("{}/sscv/cas/login", bykc_base_url(true));
 
         let response = self
@@ -516,34 +519,71 @@ impl BykcApi {
 
         let header_location = response
             .headers()
-            .get("Location")
+            .get(LOCATION)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
 
-        let token = extract_bykc_token(&final_url).or_else(|| extract_bykc_token(&header_location));
+        if let Some(token) =
+            extract_bykc_token(&final_url).or_else(|| extract_bykc_token(&header_location))
+        {
 
-        let token = match token {
-            Some(token) => token,
-            None => {
+            *self.auth_token.lock().expect("token mutex poisoned") = Some(token);
 
-                let fallback_response = self
-                    .client
-                    .get(&login_url)
-                    .send()
-                    .await
-                    .context("博雅登录重试失败")?;
+            return Ok(());
+        }
 
-                let fallback_url = fallback_response.url().to_string();
+        let body = response.text().await.unwrap_or_default();
 
-                extract_bykc_token(&fallback_url)
-                    .ok_or_else(|| anyhow!("博雅登录成功但未获取到 auth_token"))?
-            }
-        };
+        if is_locked_response(&body) {
 
-        *self.auth_token.lock().expect("token mutex poisoned") = Some(token);
+            bail!(
+                "博雅登录被学校网关暂时锁定（HTTP 423 Locked）。请稍后再试，期间避免重复提交登录。"
+            );
+        }
 
-        Ok(())
+        // No token and no lock: the shared session is gone, so re-establish it
+        // once. A lock response here is reported instead of retried.
+        vpn_login(
+            &self.client,
+            self.login_input.vpn_username.as_str(),
+            self.login_input.vpn_password.as_str(),
+        )
+        .await?;
+
+        let retry = self
+            .login_client
+            .get(&login_url)
+            .send()
+            .await
+            .context("博雅登录重试失败")?;
+
+        let retry_url = retry.url().to_string();
+
+        let retry_location = retry
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+
+        if let Some(token) =
+            extract_bykc_token(&retry_url).or_else(|| extract_bykc_token(&retry_location))
+        {
+
+            *self.auth_token.lock().expect("token mutex poisoned") = Some(token);
+
+            return Ok(());
+        }
+
+        let retry_body = retry.text().await.unwrap_or_default();
+
+        if is_locked_response(&retry_body) {
+
+            bail!("博雅登录被学校网关暂时锁定（HTTP 423 Locked）。请稍后再试。");
+        }
+
+        bail!("博雅登录成功但未获取到 auth_token");
     }
 
     /// Calls the paged course-list API and validates the business response.

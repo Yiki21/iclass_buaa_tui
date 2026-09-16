@@ -157,3 +157,34 @@
 - [x] P2.1 单次运行摘要
 - [x] P2.2 目标紧迫程度排序
 - [ ] P2.3 更严格配置校验
+
+## 2026-09-16 BYKC 423 与 iClass STATUS=2
+
+报告现象（测试账号，已脱敏）：
+
+- BYKC：`VPN 登录失败，仍停留在统一认证页面`，最终 URL 落在 WebVPN `/login`，响应体为 `status:423, error:Locked, Access Denied`。
+- iClass：`登录成功，但拉取课程失败: 课程列表: iClass API 返回错误: {"STATUS":"2"}`。
+
+根因：
+
+1. BYKC 在统一认证会话已建立之后，又用独立的 Cookie Jar 提交了一次账号密码。学校网关把重复的凭据提交判定为风险并返回 `423 Locked`。上游 UBAA 的 BYKC 实现只在已验证的会话上读取 CAS 重定向里的 `token`，不会重复提交密码。
+2. `extract_bykc_token` 只识别 `?token=`。当 `token` 出现在其他参数之后（`&token=`）时解析为空，代码会退回到再一次的凭据提交。
+3. iClass 的 `ensure_status_ok` 把任何非 `0` 的 `STATUS` 都当作接口错误，于是 `STATUS=2`（该学期没有数据）被报成「拉取课程失败」，即使合并结果里另一个来源已经有课程。
+
+修复：
+
+- BYKC `ensure_login` 先读现有会话的 CAS 重定向取 `token`，不再默认重复提交密码；只有在会话确实失效时才重新建立一次会话。
+- `extract_bykc_token` 支持任意查询参数位置的 `token`，并去掉 `#fragment`。
+- 新增 `is_locked_response`，在 BYKC 登录和 `vpn_login` 两处识别 423/Locked，返回明确的「暂时锁定，稍后重试」提示。
+- planner 的重试分类把 423/Locked/Access Denied 视为不可重试，避免继续冲击已锁定的账号。
+- iClass 新增 `status_means_no_data`，`STATUS=2` 按「该学期无数据」处理，不再当作接口失败。
+
+验证：
+
+- 新增 4 个测试：BYKC token 参数位置、423 锁定识别、`STATUS=2` 语义、planner 锁定不重试。
+- `cargo fmt --check`、`cargo check`、`cargo test` 全部通过（31 passed）。
+
+未验证：
+
+- 真实账号在本机复测尚未执行，因为读取仓库外 `~/.config/iclass-buaa/config.toml` 被工具权限阻止，未擅自绕过。因此「重复提交密码导致 423」是基于代码路径与上游实现的判断，仍需用真实账号确认。
+- 如果学校侧仍在锁定窗口内，复测前需要等待锁定过期。

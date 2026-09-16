@@ -1181,6 +1181,11 @@ impl IClassApi {
         )
         .await?;
 
+        if status_means_no_data(&data) {
+
+            return Ok(Vec::new());
+        }
+
         ensure_status_ok(&data)?;
 
         let result = data
@@ -2300,6 +2305,22 @@ fn ensure_status_ok(data: &Value) -> Result<()> {
     bail!("iClass API 返回错误: {}", data);
 }
 
+/// Reports whether iClass signalled "no data" rather than a real failure.
+///
+/// Why:
+/// The course-list endpoint answers `STATUS=2` when the semester legitimately
+/// has no rows. Treating that as an API error made a normal empty term look like
+/// a broken course fetch, and the merge then reported failure even when the
+/// date-based source had already returned data.
+
+fn status_means_no_data(data: &Value) -> bool {
+
+    data.get("STATUS")
+        .map(|value| value_to_string(Some(value)))
+        .as_deref()
+        == Some("2")
+}
+
 /// Builds a user-facing explanation for iClass sign responses.
 
 fn sign_response_message(
@@ -2479,8 +2500,21 @@ mod tests {
         append_captcha_fields, build_cas_login_form, build_ignore_password_expiry_form,
         collect_captcha_field_names, detect_captcha_id, extract_execution_value,
         extract_iclass_login_name, find_login_error, is_ignorable_password_expiry_page,
-        needs_vpn_captcha, resolve_login_form_action, summarize_login_page,
+        needs_vpn_captcha, resolve_login_form_action, status_means_no_data, summarize_login_page,
     };
+
+    #[test]
+
+    fn treats_status_two_as_empty_semester_not_api_error() {
+
+        assert!(status_means_no_data(&serde_json::json!({ "STATUS": "2" })));
+
+        assert!(status_means_no_data(&serde_json::json!({ "STATUS": 2 })));
+
+        assert!(!status_means_no_data(&serde_json::json!({ "STATUS": "0" })));
+
+        assert!(!status_means_no_data(&serde_json::json!({ "result": [] })));
+    }
 
     #[test]
 
