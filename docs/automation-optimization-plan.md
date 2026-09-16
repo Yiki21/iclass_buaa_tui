@@ -186,5 +186,26 @@
 
 未验证：
 
-- 真实账号在本机复测尚未执行，因为读取仓库外 `~/.config/iclass-buaa/config.toml` 被工具权限阻止，未擅自绕过。因此「重复提交密码导致 423」是基于代码路径与上游实现的判断，仍需用真实账号确认。
+- 真实账号在本机复测尚未执行，因为读取仓库外 `~/.config/iclass-buaa/config.toml` 被工具权限阻止，未擅自绕过。
 - 如果学校侧仍在锁定窗口内，复测前需要等待锁定过期。
+
+### 后续确认：cookie 会话未共享（真正根因）
+
+iClass 侧已由真实账号确认修复。BYKC 仍未确认，但对照上游 UBAA 实现后发现了更直接的根因：
+
+- UBAA 的 BYKC 客户端复用共享的 `LocalUpstreamClientProvider.shared()`，也就是同一个已认证的 cookie 存储。
+- 我们的 `BykcApi` 自己新建了空的 `Jar`。它的 CAS 请求因此没有 SSO 会话，拿不到 `token`，然后落到「重新提交一次密码」，换来 423。
+
+修复：
+
+- `IClassApi` 现在持有自己的 cookie jar，并通过 `session_cookie_jar()` 暴露。
+- `BykcApi` 改为 `with_cookie_jar(...)`，与主登录共享同一个 jar。
+- 删除了会自行建 jar 的 `BykcApi::new`，防止后续再引入同一个错误。
+
+验证：
+
+- `cargo fmt --check`、`cargo check`、`cargo test` 全部通过（31 passed），无编译警告。
+
+仍未验证：
+
+- 真实账号下的 BYKC 课程列表与已选课程拉取尚未复测，需要你在授权配置读取后或自行运行一次确认。

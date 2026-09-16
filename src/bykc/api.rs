@@ -64,9 +64,17 @@ pub struct BykcApi {
 }
 
 impl BykcApi {
-    /// Creates a BYKC client bound to the login form used by the TUI.
+    /// Creates a BYKC client that reuses an already-authenticated SSO session.
+    ///
+    /// Why:
+    /// The main login owns the SSO cookies. BYKC only needs the CAS redirect
+    /// that carries `token`, so it must read that session's cookies rather than
+    /// authenticate separately. There is deliberately no constructor that
+    /// builds its own jar: doing so left the CAS request unauthenticated, which
+    /// produced a redundant password submission and the school's `423 Locked`
+    /// response.
 
-    pub fn new(login_input: LoginInput) -> Result<Self> {
+    pub fn with_cookie_jar(login_input: LoginInput, cookie_jar: Arc<Jar>) -> Result<Self> {
 
         let mut headers = HeaderMap::new();
 
@@ -84,8 +92,6 @@ impl BykcApi {
             ACCEPT,
             HeaderValue::from_static("application/json, text/plain;q=0.9, */*;q=0.8"),
         );
-
-        let cookie_jar = Arc::new(Jar::default());
 
         let default_headers = headers.clone();
 

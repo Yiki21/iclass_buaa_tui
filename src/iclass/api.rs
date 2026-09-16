@@ -29,6 +29,13 @@ pub struct IClassApi {
     pub(crate) client:             reqwest::Client,
     pub(crate) no_redirect_client: reqwest::Client,
     pub(crate) use_vpn:            bool,
+    /// Cookie jar shared with every client built from this API.
+    ///
+    /// Why:
+    /// BYKC reuses the same BUAA SSO session instead of authenticating on its
+    /// own. Building it with a fresh jar left its CAS request unauthenticated,
+    /// so no token ever came back.
+    pub(crate) cookie_jar:         Arc<reqwest::cookie::Jar>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +89,7 @@ impl IClassApi {
             .context("failed to build reqwest client")?;
 
         let no_redirect_client = reqwest::Client::builder()
-            .cookie_provider(cookie_jar)
+            .cookie_provider(cookie_jar.clone())
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -92,7 +99,15 @@ impl IClassApi {
             client,
             no_redirect_client,
             use_vpn,
+            cookie_jar,
         })
+    }
+
+    /// Shares this API's authenticated cookie session with another client.
+
+    pub(crate) fn session_cookie_jar(&self) -> Arc<reqwest::cookie::Jar> {
+
+        self.cookie_jar.clone()
     }
 
     /// Logs in and captures the server clock offset needed by later sign requests.
@@ -923,17 +938,17 @@ impl IClassApi {
             });
         }
 
-        let bykc_api =
-            if input.use_vpn {
+        let bykc_api = if input.use_vpn {
 
-                Some(BykcApi::new(input.clone()).map_err(|error| {
+            Some(
+                BykcApi::with_cookie_jar(input.clone(), self.session_cookie_jar()).map_err(
+                    |error| diagnose_login_error("bykc_bootstrap", error, None, None, None),
+                )?,
+            )
+        } else {
 
-                    diagnose_login_error("bykc_bootstrap", error, None, None, None)
-                })?)
-            } else {
-
-                None
-            };
+            None
+        };
 
         Ok(Session {
             api: self.clone(),
