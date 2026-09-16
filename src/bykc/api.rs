@@ -3,9 +3,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
 use reqwest::cookie::Jar;
-use reqwest::header::{
-    ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, LOCATION, REFERER, USER_AGENT,
-};
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -14,10 +12,10 @@ use crate::constants::BYKC_PAGE_SIZE;
 use crate::model::LoginInput;
 
 use super::helpers::{
-    bykc_base_url, calculate_course_status, decrypt_response, encrypt_request, extract_bykc_token,
-    html_to_text, is_locked_response, parse_sign_config, random_sign_location,
-    resolve_attendance_availability, resolve_sign_in_unavailable_reason,
-    resolve_sign_out_unavailable_reason, sanitize_bykc_error_message, vpn_login,
+    activate_bykc_session, bykc_base_url, calculate_course_status, decrypt_response,
+    encrypt_request, extract_bykc_token, html_to_text, is_locked_response, parse_sign_config,
+    random_sign_location, resolve_attendance_availability, resolve_sign_in_unavailable_reason,
+    resolve_sign_out_unavailable_reason, sanitize_bykc_error_message,
 };
 use super::raw::{
     BykcAllConfig, BykcApiResponse, BykcChosenCoursePayload, BykcChosenCourseRaw,
@@ -57,7 +55,6 @@ impl BykcSignAction {
 
 pub struct BykcApi {
     client:                 reqwest::Client,
-    login_client:           reqwest::Client,
     login_input:            LoginInput,
     auth_token:             Arc<Mutex<Option<String>>>,
     current_semester_dates: Arc<Mutex<Option<(String, String)>>>,
@@ -93,24 +90,14 @@ impl BykcApi {
             HeaderValue::from_static("application/json, text/plain;q=0.9, */*;q=0.8"),
         );
 
-        let default_headers = headers.clone();
-
         let client = reqwest::Client::builder()
             .cookie_provider(cookie_jar.clone())
             .default_headers(headers)
             .build()
             .context("failed to build bykc reqwest client")?;
 
-        let login_client = reqwest::Client::builder()
-            .cookie_provider(cookie_jar)
-            .default_headers(default_headers)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .context("failed to build bykc login reqwest client")?;
-
         Ok(Self {
             client,
-            login_client,
             login_input,
             auth_token: Arc::new(Mutex::new(None)),
             current_semester_dates: Arc::new(Mutex::new(None)),
@@ -487,12 +474,11 @@ impl BykcApi {
     /// Ensures the BYKC auth token exists and refreshes it when the session expires.
     ///
     /// Why:
-    /// The main login already established the unified-auth cookie session. BYKC
-    /// does not need its own credential submission; it only needs the CAS
-    /// redirect that carries `token`. Posting the password again here was the
-    /// cause of the school's `423 Locked` response, so this path reads the token
-    /// from the existing session and never resubmits credentials unless the
-    /// session is genuinely gone.
+    /// BYKC reuses the SSO session established by the main login; it does not
+    /// authenticate on its own. The token lives in the CAS redirect that lands
+    /// back on BYKC, so this only reads that redirect and activates the session.
+    /// It never submits credentials, which previously caused `423 Locked`, and
+    /// it never parses the account portal as a login form.
 
     async fn ensure_login(&self, force_refresh: bool) -> Result<()> {
 
@@ -512,10 +498,15 @@ impl BykcApi {
             return Ok(());
         }
 
+        *self.auth_token.lock().expect("token mutex poisoned") = None;
+
         let login_url = format!("{}/sscv/cas/login", bykc_base_url(true));
 
+        // Follow redirects here: the token is carried on the redirect target,
+        // not on the first response. The old no-redirect client missed it and
+        // fell through to a credential re-submission.
         let response = self
-            .login_client
+            .client
             .get(&login_url)
             .send()
             .await
@@ -523,23 +514,16 @@ impl BykcApi {
 
         let final_url = response.url().to_string();
 
-        let header_location = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
+        let body = response.text().await.unwrap_or_default();
 
-        if let Some(token) =
-            extract_bykc_token(&final_url).or_else(|| extract_bykc_token(&header_location))
-        {
+        if let Some(token) = extract_bykc_token(&final_url) {
+
+            activate_bykc_session(&self.client, Some(token.as_str())).await?;
 
             *self.auth_token.lock().expect("token mutex poisoned") = Some(token);
 
             return Ok(());
         }
-
-        let body = response.text().await.unwrap_or_default();
 
         if is_locked_response(&body) {
 
@@ -548,48 +532,11 @@ impl BykcApi {
             );
         }
 
-        // No token and no lock: the shared session is gone, so re-establish it
-        // once. A lock response here is reported instead of retried.
-        vpn_login(
-            &self.client,
-            self.login_input.vpn_username.as_str(),
-            self.login_input.vpn_password.as_str(),
-        )
-        .await?;
+        // No token in the redirect: activate best effort and let the following
+        // BYKC API call report whether the session is actually usable.
+        activate_bykc_session(&self.client, None).await?;
 
-        let retry = self
-            .login_client
-            .get(&login_url)
-            .send()
-            .await
-            .context("博雅登录重试失败")?;
-
-        let retry_url = retry.url().to_string();
-
-        let retry_location = retry
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-
-        if let Some(token) =
-            extract_bykc_token(&retry_url).or_else(|| extract_bykc_token(&retry_location))
-        {
-
-            *self.auth_token.lock().expect("token mutex poisoned") = Some(token);
-
-            return Ok(());
-        }
-
-        let retry_body = retry.text().await.unwrap_or_default();
-
-        if is_locked_response(&retry_body) {
-
-            bail!("博雅登录被学校网关暂时锁定（HTTP 423 Locked）。请稍后再试。");
-        }
-
-        bail!("博雅登录成功但未获取到 auth_token");
+        Ok(())
     }
 
     /// Calls the paged course-list API and validates the business response.

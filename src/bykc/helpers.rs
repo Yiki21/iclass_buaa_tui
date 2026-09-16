@@ -6,15 +6,13 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Local, NaiveDateTime};
 use ecb::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyInit, block_padding::Pkcs7};
 use rand::{RngExt, prelude::IndexedRandom, rng};
-use reqwest::header::{ORIGIN, REFERER};
 use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
-use scraper::{Html, Selector};
+use scraper::Html;
 use sha1::{Digest, Sha1};
-use std::collections::HashSet;
 use std::f64::consts::PI;
 
 use crate::constants::{
-    BYKC_DIRECT_BASE, BYKC_KEY_CHARS, BYKC_RSA_PUBLIC_KEY_BASE64, sso_vpn_entry, to_webvpn_url,
+    BYKC_DIRECT_BASE, BYKC_KEY_CHARS, BYKC_RSA_PUBLIC_KEY_BASE64, to_webvpn_url,
 };
 
 use super::raw::{BykcCourseRaw, BykcSignConfigRaw};
@@ -42,7 +40,7 @@ pub(super) fn extract_bykc_token(url: &str) -> Option<String> {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .find(|(key, _)| *key == "token")
-        .map(|(_, value)| value.to_string())
+        .map(|(_, value)| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
@@ -377,285 +375,38 @@ pub(crate) fn can_deselect_bykc_course(course_cancel_end_date: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Logs into BUAA VPN and establishes the cookie session needed by BYKC.
+/// Activates the BYKC session on the already-authenticated SSO cookie session.
 ///
 /// Why:
-/// BYKC reuses BUAA SSO/VPN cookies rather than offering a separate API token.
-/// Running this before BYKC requests lets the later API calls stay simple and
-/// assume the shared `reqwest::Client` already carries the required session.
+/// BYKC reuses BUAA SSO cookies rather than offering a separate credential
+/// login. The previous implementation POSTed the unified-auth password again
+/// here, which the school answered with `423 Locked`, and it parsed the account
+/// portal page as if it were a CAS form, which produced
+/// "无法从 SSO 登录页面解析登录表单".
+///
+/// How:
+/// Read the final URL of the CAS redirect for `token`, then hit BYKC's own
+/// `cas-login` activation endpoint. A missing token is not fatal: the activation
+/// call is best effort, and the following BYKC API request decides whether the
+/// session is usable.
 
-pub(super) async fn vpn_login(
+pub(super) async fn activate_bykc_session(
     client: &reqwest::Client,
-    username: &str,
-    password: &str,
+    token: Option<&str>,
 ) -> Result<()> {
 
-    if username.trim().is_empty() || password.is_empty() {
+    let activation_url = format!(
+        "{}/cas-login?token={}",
+        bykc_base_url(true),
+        token.unwrap_or_default()
+    );
 
-        bail!("博雅功能需要 VPN 账号和密码");
-    }
-
-    let login_entry = sso_vpn_entry();
-
-    let response = client
-        .get(&login_entry)
+    client
+        .get(activation_url)
         .send()
         .await
-        .with_context(|| format!("获取 SSO 登录页失败，入口: {login_entry}"))?;
-
-    let status = response.status();
-
-    let login_url = response.url().to_string();
-
-    let body = response
-        .text()
-        .await
-        .with_context(|| format!("读取 SSO 登录页失败，最终 URL: {login_url}"))?;
-
-    if !status.is_success() {
-
-        bail!(
-            "获取 SSO 登录页失败，HTTP 状态: {status}, 最终 URL: {login_url}, 页面线索: {}",
-            summarize_vpn_login_page(&body)
-        );
-    }
-
-    let (action_url, form) = {
-
-        let document = Html::parse_document(&body);
-
-        let action_url = resolve_login_form_action(&login_url, &document)
-            .with_context(|| format!("解析 SSO 登录表单提交地址失败，最终 URL: {login_url}"))?;
-
-        let form = build_cas_login_form(&document, username, password).ok_or_else(|| {
-
-            anyhow!(
-                "无法从 SSO 登录页面解析登录表单，最终 URL: {}, 页面线索: {}",
-                login_url,
-                summarize_vpn_login_page(&body)
-            )
-        })?;
-
-        (action_url, form)
-    };
-
-    let response = client
-        .post(&action_url)
-        .header(ORIGIN, "https://d.buaa.edu.cn")
-        .header(REFERER, &login_url)
-        .form(&form)
-        .send()
-        .await
-        .with_context(|| format!("VPN 登录请求失败，提交地址: {action_url}"))?;
-
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-
-        bail!("VPN 登录失败：账号或密码错误");
-    }
-
-    let locked_status = response.status() == reqwest::StatusCode::LOCKED;
-
-    let final_url = response.url().to_string();
-
-    let body = response.text().await.context("读取 VPN 登录响应失败")?;
-
-    // A locked gateway returns 423 with a JSON body, not a CAS form. Reporting
-    // it as a generic "still on the login page" failure hid the real cause and
-    // invited another credential submission.
-    if locked_status || is_locked_response(&body) {
-
-        bail!("VPN 登录被学校网关暂时锁定（HTTP 423 Locked）。请稍后再试，期间不要重复提交登录。");
-    }
-
-    if final_url.contains("/login")
-        || body.contains(r#"name="execution""#)
-        || body.contains("统一身份认证")
-    {
-
-        bail!(
-            "VPN 登录失败，仍停留在统一认证页面，最终 URL: {}, 页面线索: {}",
-            final_url,
-            summarize_vpn_login_page(&body)
-        );
-    }
-
-    Ok(())
-}
-
-fn resolve_login_form_action(login_url: &str, document: &Html) -> Result<String> {
-
-    let selector = Selector::parse(r#"form#loginForm, form#fm1, form[action]"#)
-        .map_err(|_| anyhow!("SSO 表单选择器构造失败"))?;
-
-    let Some(action) = document
-        .select(&selector)
-        .next()
-        .and_then(|node| node.value().attr("action"))
-        .filter(|value| !value.trim().is_empty())
-    else {
-
-        return Ok(login_url.to_string());
-    };
-
-    reqwest::Url::parse(login_url)
-        .and_then(|base| base.join(action))
-        .map(|url| url.to_string())
-        .with_context(|| format!("解析 SSO 登录表单提交地址失败: {action}"))
-}
-
-fn build_cas_login_form(
-    document: &Html,
-    username: &str,
-    password: &str,
-) -> Option<Vec<(String, String)>> {
-
-    let form_selector = Selector::parse(r#"form#loginForm, form#fm1, form[action]"#).ok()?;
-
-    let input_selector = Selector::parse("input[name]").ok()?;
-
-    let form = document.select(&form_selector).next()?;
-
-    let mut fields = Vec::new();
-
-    let mut present_names = HashSet::new();
-
-    for input in form.select(&input_selector) {
-
-        let name = input.value().attr("name")?.trim();
-
-        if name.is_empty() {
-
-            continue;
-        }
-
-        let input_type = input
-            .value()
-            .attr("type")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-
-        if matches!(name, "username" | "password") {
-
-            present_names.insert(name.to_string());
-
-            continue;
-        }
-
-        match input_type.as_str() {
-            "submit" | "button" | "image" => {}
-            "checkbox" => {
-
-                present_names.insert(name.to_string());
-
-                if input.value().attr("checked").is_some() {
-
-                    fields.push((
-                        name.to_string(),
-                        input.value().attr("value").unwrap_or("on").to_string(),
-                    ));
-                }
-            }
-            "hidden" => {
-
-                present_names.insert(name.to_string());
-
-                fields.push((
-                    name.to_string(),
-                    input.value().attr("value").unwrap_or_default().to_string(),
-                ));
-            }
-            _ => {
-
-                present_names.insert(name.to_string());
-
-                let value = input.value().attr("value").unwrap_or_default();
-
-                if !value.is_empty() {
-
-                    fields.push((name.to_string(), value.to_string()));
-                }
-            }
-        }
-    }
-
-    if !present_names.contains("execution") {
-
-        return None;
-    }
-
-    fields.push(("username".to_string(), username.trim().to_string()));
-
-    fields.push(("password".to_string(), password.to_string()));
-
-    fields.push(("submit".to_string(), "登录".to_string()));
-
-    if !present_names.contains("type") {
-
-        fields.push(("type".to_string(), "username_password".to_string()));
-    }
-
-    if !present_names.contains("_eventId") {
-
-        fields.push(("_eventId".to_string(), "submit".to_string()));
-    }
-
-    Some(fields)
-}
-
-fn summarize_vpn_login_page(body: &str) -> String {
-
-    let title = Html::parse_document(body)
-        .select(&Selector::parse("title").expect("valid title selector"))
-        .next()
-        .map(|node| node.text().collect::<String>().trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    let markers = [
-        (
-            "captcha",
-            body.contains("captcha?captchaId=") || body.contains("config.captcha"),
-        ),
-        (
-            "bad_credentials",
-            [
-                "认证信息无效",
-                "账号或密码错误",
-                "用户名或密码错误",
-                "Invalid credentials",
-            ]
-            .iter()
-            .any(|marker| body.contains(marker)),
-        ),
-        (
-            "cas_form",
-            body.contains("loginForm") || body.contains("统一身份认证"),
-        ),
-        (
-            "portal",
-            body.contains("wengine-vpn") || body.contains("免客户端VPN"),
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(name, present)| present.then_some(name))
-    .collect::<Vec<_>>()
-    .join(",");
-
-    format!(
-        "title={}, markers={}, body_prefix={}",
-        title.unwrap_or_else(|| "<none>".to_string()),
-        if markers.is_empty() {
-
-            "<none>"
-        } else {
-
-            &markers
-        },
-        body.chars()
-            .take(120)
-            .collect::<String>()
-            .replace(char::is_whitespace, " ")
-    )
+        .context("博雅会话激活请求失败")
+        .map(|_| ())
 }
 
 /// Course status shown in the selectable-course list.
