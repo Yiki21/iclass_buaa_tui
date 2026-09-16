@@ -44,7 +44,7 @@ jobs:
         run: |
           mkdir -p dist
           package_path=$(find target/packager -maxdepth 1 -name '*.dmg' -print -quit)
-          cp "$package_path" "dist/iclass-buaa-tui-macos-${{ matrix.arch }}.dmg"
+          cp "$package_path" "dist/iclass_buaa_tui-macos-${{ matrix.arch }}.dmg"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
@@ -84,7 +84,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/release/iclass-buaa-tui.exe "dist/iclass-buaa-tui-windows-${{ matrix.arch }}.exe"
+          Copy-Item target/release/iclass_buaa_tui.exe "dist/iclass_buaa_tui-windows-${{ matrix.arch }}.exe"
 
       - name: Upload exe artifact
         uses: actions/upload-artifact@v7

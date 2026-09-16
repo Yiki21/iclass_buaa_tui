@@ -704,7 +704,7 @@ fn print_trimmed_output(label: &str, stream: &str, text: &str) {
 
 fn print_status_hint(unit_prefix: &str) {
 
-    println!("健康检查: iclass-buaa-tui autologin-status --unit-prefix {unit_prefix}");
+    println!("健康检查: iclass_buaa_tui autologin-status --unit-prefix {unit_prefix}");
 }
 
 #[cfg(target_os = "macos")]
