@@ -21,10 +21,10 @@
 - 如果 macOS 提示“磁盘映像损坏”或 App 已损坏，通常是因为当前 release 未做 Apple Developer ID 签名和公证，被 Gatekeeper 加了隔离标记。确认文件来自本项目 Releases 后，可在终端执行：
 
 ```bash
-xattr -dr com.apple.quarantine ~/Downloads/iclass_buaa_tui-macos-arm64.dmg
+xattr -dr com.apple.quarantine ~/Downloads/iclass-buaa-tui-macos-arm64.dmg
 ```
 
-Intel 版本请把文件名改成 `iclass_buaa_tui-macos-x64.dmg`。如果已经拖入 Applications 后仍打不开，再执行：
+Intel 版本请把文件名改成 `iclass-buaa-tui-macos-x64.dmg`。如果已经拖入 Applications 后仍打不开，再执行：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/iClass\ BUAA\ TUI.app
@@ -33,7 +33,7 @@ xattr -dr com.apple.quarantine /Applications/iClass\ BUAA\ TUI.app
 - 如果你使用的是旧版本，双击没有反应时，请在终端手动运行：
 
 ```bash
-/Applications/iClass\ BUAA\ TUI.app/Contents/MacOS/iclass_buaa_tui
+/Applications/iClass\ BUAA\ TUI.app/Contents/MacOS/iclass-buaa-tui
 ```
 
 ### Windows
@@ -47,26 +47,26 @@ xattr -dr com.apple.quarantine /Applications/iClass\ BUAA\ TUI.app
 下载 `.deb` 后安装：
 
 ```bash
-sudo apt install iclass_buaa_tui_<version>_amd64.deb
+sudo apt install iclass-buaa-tui_<version>_amd64.deb
 ```
 
 ARM64 设备请改用：
 
 ```bash
-sudo apt install iclass_buaa_tui_<version>_arm64.deb
+sudo apt install iclass-buaa-tui_<version>_arm64.deb
 ```
 
 ### Fedora / RHEL
 下载 `.rpm` 后安装：
 
 ```bash
-sudo dnf install iclass_buaa_tui-<version>-1.x86_64.rpm
+sudo dnf install iclass-buaa-tui-<version>-1.x86_64.rpm
 ```
 
 ARM64 设备请改用：
 
 ```bash
-sudo dnf install iclass_buaa_tui-<version>-1.aarch64.rpm
+sudo dnf install iclass-buaa-tui-<version>-1.aarch64.rpm
 ```
 
 ### Default
@@ -150,38 +150,38 @@ planner_interval_minutes = 10
 
 ```bash
 # 输出今日匹配签到目标（iClass + 可选 BYKC，含 BYKC 签退）
-iclass_buaa_tui list-today --json
+iclass-buaa-tui list-today --json
 
 # iClass 直接签到，失败后按配置重试
-iclass_buaa_tui sign --course-sched-id 123456789
+iclass-buaa-tui sign --course-sched-id 123456789
 
 # BYKC 手动签到
-iclass_buaa_tui sign --source bykc --bykc-course-id 12345 --course-name "博雅课程名"
+iclass-buaa-tui sign --source bykc --bykc-course-id 12345 --course-name "博雅课程名"
 
 # BYKC 手动签退
-iclass_buaa_tui sign --source bykc --action sign-out --bykc-course-id 12345
+iclass-buaa-tui sign --source bykc --action sign-out --bykc-course-id 12345
 
 # 执行一次自动签到轮询：抓今天签到/签退目标并直接尝试执行到点项目
-iclass_buaa_tui plan
+iclass-buaa-tui plan
 
 # 今日课程、考试、成绩、空教室和作业
-iclass_buaa_tui today
-iclass_buaa_tui exams --term 2025-2026-1
-iclass_buaa_tui grades --term 2025-2026-1
-iclass_buaa_tui classrooms --campus 2 --date 2026-09-14 --section 3
-iclass_buaa_tui tasks
+iclass-buaa-tui today
+iclass-buaa-tui exams --term 2025-2026-1
+iclass-buaa-tui grades --term 2025-2026-1
+iclass-buaa-tui classrooms --campus 2 --date 2026-09-14 --section 3
+iclass-buaa-tui tasks
 
 # 课表导出与缓存差异
-iclass_buaa_tui schedule-export --format markdown --term 2025-2026-1
-iclass_buaa_tui schedule-export --format ics --output schedule.ics
-iclass_buaa_tui schedule-diff --json
+iclass-buaa-tui schedule-export --format markdown --term 2025-2026-1
+iclass-buaa-tui schedule-export --format ics --output schedule.ics
+iclass-buaa-tui schedule-diff --json
 
 # 查看完整参数
-iclass_buaa_tui --help
-iclass_buaa_tui plan --help
-iclass_buaa_tui install-autologin --help
-iclass_buaa_tui autologin-status --help
-iclass_buaa_tui uninstall-autologin --help
+iclass-buaa-tui --help
+iclass-buaa-tui plan --help
+iclass-buaa-tui install-autologin --help
+iclass-buaa-tui autologin-status --help
+iclass-buaa-tui uninstall-autologin --help
 ```
 
 课程工作区快捷键：
@@ -207,13 +207,13 @@ iclass_buaa_tui uninstall-autologin --help
 先安装自动签到调度器：
 
 ```bash
-iclass_buaa_tui install-autologin
+iclass-buaa-tui install-autologin
 ```
 
 安装后可以立即检查调度器健康状态：
 
 ```bash
-iclass_buaa_tui autologin-status
+iclass-buaa-tui autologin-status
 ```
 
 各平台行为：
@@ -236,7 +236,7 @@ systemctl --user enable --now iclass-buaa-planner.timer
 卸载自动签到：
 
 ```bash
-iclass_buaa_tui uninstall-autologin
+iclass-buaa-tui uninstall-autologin
 ```
 
 自动签到流程：

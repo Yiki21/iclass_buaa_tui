@@ -1,6 +1,6 @@
 [package]
-name = "iclass_buaa_tui"
-version = "0.5.1"
+name = "iclass-buaa-tui"
+version = "0.6.0"
 edition = "2024"
 description = "BUAA class check TUI software"
 homepage = "https://github.com/Yiki21/iclass_buaa_tui"
@@ -38,25 +38,25 @@ release = "1"
 auto-req = "yes"
 
 [[package.metadata.generate-rpm.assets]]
-source = "target/release/iclass_buaa_tui"
-dest = "/usr/bin/iclass_buaa_tui"
+source = "target/release/iclass-buaa-tui"
+dest = "/usr/bin/iclass-buaa-tui"
 mode = "755"
 
 [[package.metadata.generate-rpm.assets]]
 source = "LICENSE"
-dest = "/usr/share/licenses/iclass_buaa_tui/LICENSE"
+dest = "/usr/share/licenses/iclass-buaa-tui/LICENSE"
 mode = "644"
 doc = true
 
 [[package.metadata.generate-rpm.assets]]
 source = "README.md"
-dest = "/usr/share/doc/iclass_buaa_tui/README.md"
+dest = "/usr/share/doc/iclass-buaa-tui/README.md"
 mode = "644"
 doc = true
 
 [[package.metadata.generate-rpm.assets]]
 source = "config.example.toml"
-dest = "/usr/share/doc/iclass_buaa_tui/config.example.toml"
+dest = "/usr/share/doc/iclass-buaa-tui/config.example.toml"
 mode = "644"
 doc = true
 
@@ -80,12 +80,12 @@ license-file = ["LICENSE", "0"]
 
 assets = [
   # binary
-  ["target/release/iclass_buaa_tui", "usr/bin/iclass_buaa_tui", "755"],
+  ["target/release/iclass-buaa-tui", "usr/bin/iclass-buaa-tui", "755"],
 
   # docs
-  ["README.md", "usr/share/doc/iclass_buaa_tui/README.md", "644"],
-  ["LICENSE", "usr/share/doc/iclass_buaa_tui/LICENSE", "644"],
-  ["config.example.toml", "usr/share/doc/iclass_buaa_tui/config.example.toml", "644"],
+  ["README.md", "usr/share/doc/iclass-buaa-tui/README.md", "644"],
+  ["LICENSE", "usr/share/doc/iclass-buaa-tui/LICENSE", "644"],
+  ["config.example.toml", "usr/share/doc/iclass-buaa-tui/config.example.toml", "644"],
 ]
 
 [dependencies]
