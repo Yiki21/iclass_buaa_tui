@@ -11,6 +11,11 @@
 - **`install-autologin` / `uninstall-autologin` 也需要 `--yes`**。
 - 直连模式配置里带有统一认证密码时，配置文件权限现在也必须是 `600`。此前该校验只在 `use_vpn = true` 时生效，而直连模式同样使用统一认证密码。
 
+### 安全
+
+- 升级依赖修掉 Dependabot 报的 high 漏洞：`quinn-proto` 0.11.14 → 0.11.18（远程内存耗尽）、`rustls` 0.23.40 → 0.23.45（TLS 1.3 握手跨加密层接受消息）、`crossbeam-epoch` 0.9.18 → 0.9.21。`cargo audit` 现在无漏洞告警。
+- `rsa` 的 Marvin Attack 计时侧信道在 `.cargo/audit.toml` 里显式忽略并写明原因：本仓库只用它做公钥加密（BYKC 密码），不涉及私钥解密运算，没有可泄漏的私钥；上游无修复版本。
+
 ### 新增
 
 - 失败时输出稳定错误码：带 `--json` 调用失败会在 stderr 输出 `{ error, command, retryable, code }`，`code` 取值如 `not_authenticated` / `invalid_argument` / `rate_limited` / `upstream_timeout` / `account_locked` / `resource_unavailable` / `network_error` / `config_invalid` / `unknown`，并给出 `retryable`。调用方不必解析人类可读的错误文本就能决定重试还是重新登录。

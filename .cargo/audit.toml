@@ -1,0 +1,19 @@
+# cargo-audit configuration.
+#
+# Each ignored advisory carries the reason it does not apply. Anything not
+# listed here still fails the audit, which is the point of keeping this file
+# short.
+
+[advisories]
+
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack, a timing side channel in RSA
+    # *decryption* that can leak the private key.
+    #
+    # This crate is used only to encrypt with a server-provided public key
+    # (src/bykc/helpers.rs builds an RsaPublicKey and encrypts there); no
+    # private-key operation happens in this codebase, so there is no key to
+    # leak. Upstream has no fix available, so ignoring it is the only option
+    # until that changes.
+    "RUSTSEC-2023-0071",
+]
