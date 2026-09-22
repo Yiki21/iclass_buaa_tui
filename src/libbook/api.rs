@@ -19,6 +19,25 @@ use crate::iclass::IClassApi;
 
 const BASE_URL: &str = "https://booking.lib.buaa.edu.cn";
 
+/// Intermediate certificate the library server fails to send.
+///
+/// Why:
+/// `booking.lib.buaa.edu.cn` presents only its leaf certificate, with no
+/// intermediate and no AIA URL to fetch one from, so no standard client can
+/// build a chain: `curl` fails with "unable to get local issuer certificate"
+/// and rustls reports `UnknownIssuer`. The intermediate is not in the system
+/// trust store either, and installing it there needs root.
+///
+/// How:
+/// The missing intermediate is bundled and trusted explicitly for this one
+/// host. Verification is not disabled — the chain is still fully validated,
+/// just against a store that contains the certificate the server should have
+/// sent. The reference implementation takes the same approach, scoped to the
+/// library client.
+
+const LIBRARY_INTERMEDIATE_PEM: &[u8] =
+    include_bytes!("../../assets/certs/globalsign-gcc-r3-dv-tls-ca-2020.pem");
+
 /// CAS entry point that yields a ticket for the booking service.
 
 const CAS_LOGIN_URL: &str =
@@ -117,13 +136,36 @@ impl IClassApi {
     /// expects (`bearer<token>`), and business failures are read from `code`
     /// rather than from the HTTP status.
 
+    /// A client that additionally trusts the library's missing intermediate.
+    ///
+    /// Why:
+    /// The relaxation is scoped to this host rather than applied globally, so
+    /// no other service is affected by the library's broken chain.
+
+    fn libbook_client(&self) -> Result<reqwest::Client> {
+
+        let certificate = reqwest::Certificate::from_pem(LIBRARY_INTERMEDIATE_PEM)
+            .context("内置的图书馆中间证书无法解析")?;
+
+        reqwest::Client::builder()
+            .user_agent(concat!("iclass_buaa_tui/", env!("CARGO_PKG_VERSION")))
+            .add_root_certificate(certificate)
+            .build()
+            .context("构建图书馆专用 HTTP 客户端失败")
+    }
+
     async fn libbook_post(&self, path: &str, body: Value, token: Option<&str>) -> Result<Value> {
 
         let url = libbook_url(self.use_vpn, &format!("{BASE_URL}/v4/{path}"));
 
+        // The service rejects requests that do not look like its own XHR:
+        // without these headers the login answers `{"code":1,"message":
+        // "操作失败"}` even with a valid ticket.
         let mut request = self
-            .client
+            .libbook_client()?
             .post(&url)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("X-Requested-With", "XMLHttpRequest")
             .header("Referer", libbook_url(self.use_vpn, BASE_URL))
             .header("Origin", libbook_url(self.use_vpn, BASE_URL))
             .json(&body);
@@ -177,10 +219,22 @@ impl IClassApi {
 
         let ticket = self.libbook_cas_ticket().await?;
 
+        if std::env::var_os("ICLASS_LIBBOOK_DEBUG").is_some() {
+
+            eprintln!("图书馆 CAS ticket 长度: {}", ticket.len());
+        }
+
         let response = self
             .libbook_post("login/user", json!({ "cas": ticket }), None)
             .await
             .context("图书馆登录失败")?;
+
+        if std::env::var_os("ICLASS_LIBBOOK_DEBUG").is_some() {
+
+            let full = serde_json::to_string(&response).unwrap_or_default();
+
+            eprintln!("图书馆登录响应: {}", &full[..full.len().min(600)]);
+        }
 
         response
             .pointer("/data/member/token")
@@ -223,7 +277,17 @@ impl IClassApi {
                 .and_then(|value| value.to_str().ok())
             else {
 
-                bail!("图书馆 CAS 未返回 ticket，请确认统一认证登录有效");
+                // Report what the SSO page actually is: a login form here means
+                // the shared session is not authenticated for this service,
+                // which is a different problem from a missing redirect.
+                let status = response.status();
+
+                let body = response.text().await.unwrap_or_default();
+
+                bail!(
+                    "图书馆 CAS 未返回 ticket，请确认统一认证登录有效：HTTP {status}，                     页面线索: {}",
+                    summarize_cas_page(&body)
+                );
             };
 
             current = reqwest::Url::parse(&url)
@@ -523,7 +587,55 @@ fn libbook_url(use_vpn: bool, raw: &str) -> String {
     }
 }
 
-/// Pulls the CAS ticket out of a URL's query string.
+/// Pulls the CAS ticket out of a URL.
+///
+/// Why the parameter is called `cas`:
+/// The booking service does not use the standard `ticket` name for the value it
+/// passes to its login endpoint. Looking for `ticket` finds nothing, the login
+/// is posted without a valid ticket, and the service answers
+/// `{"code":1,"message":"操作失败"}` — which looks like an auth failure rather
+/// than a parsing mistake.
+///
+/// The value also arrives URL-encoded and possibly inside a WebVPN-wrapped URL,
+/// so both the decoded form and the raw string are checked.
+
+/// Short description of what a CAS page contains, for error messages.
+
+fn summarize_cas_page(body: &str) -> String {
+
+    let lower = body.to_ascii_lowercase();
+
+    let mut clues = Vec::new();
+
+    if lower.contains("name=\"execution\"") {
+
+        clues.push("登录表单");
+    }
+
+    if body.contains("统一身份认证") {
+
+        clues.push("统一身份认证");
+    }
+
+    if lower.contains("captcha") {
+
+        clues.push("验证码");
+    }
+
+    if body.contains("锁定") || lower.contains("locked") {
+
+        clues.push("账号锁定");
+    }
+
+    if clues.is_empty() {
+
+        let preview: String = body.chars().take(80).collect();
+
+        return format!("无法识别（{}）", preview.replace('\n', " "));
+    }
+
+    clues.join(", ")
+}
 
 fn extract_cas_ticket(url: &str) -> Option<String> {
 
@@ -531,9 +643,30 @@ fn extract_cas_ticket(url: &str) -> Option<String> {
 
     parsed
         .query_pairs()
-        .find(|(key, _)| key == "ticket")
+        .find(|(key, _)| key == "cas" || key == "ticket")
         .map(|(_, value)| value.to_string())
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+
+            // Fall back to a plain text search, but only for a query-style
+            // parameter: the SSO service URL itself contains `login%2Fcas`, so
+            // a bare `cas=` substring match returns that path fragment as if it
+            // were a ticket, and the login then fails with an opaque
+            // "操作失败".
+            ["?cas=", "&cas=", "?ticket=", "&ticket="]
+                .iter()
+                .find_map(|marker| {
+
+                    let rest = url.split(marker).nth(1)?;
+
+                    let value: String = rest
+                        .chars()
+                        .take_while(|c| !matches!(c, '&' | '#'))
+                        .collect();
+
+                    (!value.is_empty()).then_some(value)
+                })
+        })
 }
 
 fn data_list(response: &Value, key: &str) -> Option<Vec<Value>> {
@@ -601,16 +734,34 @@ mod tests {
 
     fn reads_the_cas_ticket_from_a_redirect_url() {
 
-        let url = "https://booking.lib.buaa.edu.cn/v4/login/cas?ticket=ST-123-abc";
+        // The booking service names this parameter `cas`, not `ticket`.
+        let url = "https://booking.lib.buaa.edu.cn/v4/login/cas?cas=ST-123-abc";
 
         assert_eq!(extract_cas_ticket(url).as_deref(), Some("ST-123-abc"));
 
-        // No ticket, or an empty one, must not be treated as success.
+        // The standard name still works, for robustness.
+        assert_eq!(
+            extract_cas_ticket("https://x/v4/login/cas?ticket=ST-9").as_deref(),
+            Some("ST-9")
+        );
+
+        // Missing or empty must not be treated as success.
         assert!(extract_cas_ticket("https://booking.lib.buaa.edu.cn/v4/login/cas").is_none());
 
         assert!(
-            extract_cas_ticket("https://x/?ticket=").is_none(),
-            "空 ticket 不应视为成功"
+            extract_cas_ticket("https://x/?cas=").is_none(),
+            "空 cas 不应视为成功"
+        );
+
+        // The SSO entry URL embeds the service path, which contains
+        // "login/cas"; a loose substring search returns that fragment as the
+        // ticket and the login then fails with an opaque "操作失败".
+        assert!(
+            extract_cas_ticket(
+                "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Fbooking.lib.buaa.edu.cn%2Fv4%2Flogin%2Fcas"
+            )
+            .is_none(),
+            "服务地址不应被当成 ticket"
         );
     }
 

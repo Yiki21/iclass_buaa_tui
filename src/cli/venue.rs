@@ -443,10 +443,6 @@ fn print_day(day: &DayInfo) {
 
             let slot = day.time_slots.iter().find(|slot| slot.id == status.time_id);
 
-            let label = slot
-                .map(|slot| format!("{}-{} {}", slot.begin_time, slot.end_time, slot.label))
-                .unwrap_or_else(|| format!("时段 {}", status.time_id));
-
             let state = if status.reservable {
 
                 "可预约"
@@ -458,7 +454,13 @@ fn print_day(day: &DayInfo) {
                 "不可预约"
             };
 
-            println!("\t{}\t{}\t{}", status.time_id, label, state);
+            println!(
+                "\t{}\t{}-{}\t{}",
+                status.time_id,
+                slot.map(|s| s.begin_time.as_str()).unwrap_or("--:--"),
+                slot.map(|s| s.end_time.as_str()).unwrap_or("--:--"),
+                state
+            );
         }
     }
 }

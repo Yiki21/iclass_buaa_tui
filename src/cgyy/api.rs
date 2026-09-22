@@ -30,10 +30,18 @@ const REFERRER: &str = "https://cgyy.buaa.edu.cn/venue-zhjs/mobileReservation";
 const SSO_COOKIE_NAME: &str = "sso_buaa_zhjs_token";
 
 /// A bookable room.
+///
+/// Why the flat shape:
+/// The service returns venues, each holding a list of rooms, but every later
+/// call (`reservation/day/info`, order submission) takes a *room* id. Flattening
+/// at parse time means callers hold the id they can actually use, and cannot
+/// mistake a venue id for one — passing a venue id is answered with
+/// `code=250 无效的场地ID`, which is what happened before.
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 
 pub struct VenueSite {
+    /// Room id. This is what `venue-slots` and reservation calls require.
     pub id:          i64,
     pub site_name:   String,
     pub venue_name:  String,
@@ -138,6 +146,27 @@ impl IClassApi {
         force_refresh: bool,
     ) -> Result<Value> {
 
+        self.cgyy_request_with_headers(method, path, params, token, force_refresh, &[])
+            .await
+    }
+
+    /// Signed request with extra headers.
+    ///
+    /// Why:
+    /// The login call additionally carries `Sso-Token`, the only call that
+    /// does. It still needs the standard signature, so it goes through the same
+    /// path rather than duplicating the signing.
+
+    async fn cgyy_request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        params: &[(&str, String)],
+        token: Option<&str>,
+        force_refresh: bool,
+        extra: &[(&str, &str)],
+    ) -> Result<Value> {
+
         let url = cgyy_url(
             self.use_vpn,
             &format!("{BASE_URL}{}", path.trim_start_matches('/')),
@@ -190,6 +219,11 @@ impl IClassApi {
         if let Some(token) = token {
 
             request = request.header("cgAuthorization", token);
+        }
+
+        for (name, value) in extra {
+
+            request = request.header(*name, *value);
         }
 
         let response = request
@@ -308,16 +342,19 @@ impl IClassApi {
             })
             .ok_or_else(|| anyhow!("未获取到研讨室 SSO Token，请重新登录统一认证"))?;
 
-        let response = self
-            .client
-            .post(format!("{BASE_URL}api/login"))
-            .header("Sso-Token", sso_token)
-            .header("app-key", APP_KEY)
-            .send()
+        // The login itself must be signed like every other call; without the
+        // signature the service answers `{"code":400,"message":"Bad Request"}`.
+        let body = self
+            .cgyy_request_with_headers(
+                "post",
+                "/api/login",
+                &[],
+                None,
+                false,
+                &[("Sso-Token", sso_token.as_str())],
+            )
             .await
             .context("研讨室登录失败")?;
-
-        let body: Value = response.json().await.context("研讨室登录响应格式异常")?;
 
         body.pointer("/data/token/access_token")
             .and_then(Value::as_str)
@@ -333,7 +370,9 @@ impl IClassApi {
         let response = self
             .cgyy_request(
                 "get",
-                "/api/venue/site",
+                // The public web endpoint, not the app one: the app path
+                // returns the SSO login page instead of JSON.
+                "/api/front/website/venues",
                 &[
                     ("page", "-1".to_string()),
                     ("size", "-1".to_string()),
@@ -349,7 +388,7 @@ impl IClassApi {
             .or_else(|| response.get("data").and_then(Value::as_array).cloned())
             .unwrap_or_default();
 
-        Ok(rows.iter().filter_map(parse_venue_site).collect())
+        Ok(rows.iter().flat_map(parse_venue_sites).collect())
     }
 
     /// Lists the reservation purposes offered by the service.
@@ -748,27 +787,69 @@ fn flexible_string(value: &Value) -> Option<String> {
         .or_else(|| value.as_i64().map(|number| number.to_string()))
 }
 
-fn parse_venue_site(row: &Value) -> Option<VenueSite> {
+/// Flattens one venue entry into one row per room.
+///
+/// Why:
+/// The list response groups rooms under a venue, but everything downstream
+/// addresses a room. Returning one row per room here means the id in the table
+/// is the id the next command wants.
 
-    Some(VenueSite {
-        id:          row.get("id").and_then(flexible_i64)?,
-        site_name:   row
-            .get("siteName")
-            .and_then(Value::as_str)
-            .unwrap_or("未命名场地")
-            .to_string(),
-        venue_name:  row
-            .get("venueName")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        campus_name: row
-            .get("campusName")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        seat_count:  row.get("seatCount").and_then(flexible_i64),
-    })
+fn parse_venue_sites(row: &Value) -> Vec<VenueSite> {
+
+    let campus_name = row
+        .get("campusName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    let venue_name = row
+        .get("venueName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    let rooms = row.get("siteList").and_then(Value::as_array);
+
+    let Some(rooms) = rooms else {
+
+        // No room list: fall back to the venue itself so the row is still
+        // visible, even though it cannot be booked directly.
+        let Some(id) = row.get("id").and_then(flexible_i64) else {
+
+            return Vec::new();
+        };
+
+        return vec![VenueSite {
+            id,
+            site_name: venue_name.clone(),
+            venue_name,
+            campus_name,
+            seat_count: None,
+        }];
+    };
+
+    rooms
+        .iter()
+        .filter_map(|room| {
+
+            // Room ids arrive as strings in this response.
+            let id = room.get("id").and_then(flexible_i64)?;
+
+            let room_name = room
+                .get("siteName")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+
+            Some(VenueSite {
+                id,
+                site_name: room_name,
+                venue_name: venue_name.clone(),
+                campus_name: campus_name.clone(),
+                seat_count: None,
+            })
+        })
+        .collect()
 }
 
 fn parse_order(row: &Value) -> Option<Order> {
@@ -786,15 +867,24 @@ fn parse_order(row: &Value) -> Option<Order> {
     })
 }
 
+/// Parses the reservation day-info response.
+///
+/// Why:
+/// The shape is not the one the DTO field names suggest. Availability is nested
+/// as `data.reservationDateSpaceInfo[date][space][slotId]`, where each room
+/// names its own id and each time slot is a keyed object rather than an array
+/// entry. Rooms also repeat across spaces, so they are keyed by name.
+///
+/// `reservationStatus` is the reservable flag: 1 means bookable, 4 means not.
+
 fn parse_day_info(response: &Value, venue_site_id: i64, date: &str) -> Result<DayInfo> {
 
     let data = response
         .get("data")
-        .cloned()
         .ok_or_else(|| anyhow!("研讨室时段响应缺少 data"))?;
 
     let available_dates = data
-        .get("availableDates")
+        .get("ableReservationDateList")
         .and_then(Value::as_array)
         .map(|rows| {
 
@@ -804,31 +894,32 @@ fn parse_day_info(response: &Value, venue_site_id: i64, date: &str) -> Result<Da
         })
         .unwrap_or_default();
 
-    let time_slots = data
-        .get("timeSlots")
+    // Time slot definitions are shared across rooms.
+    let time_slots: Vec<TimeSlot> = data
+        .get("spaceTimeInfo")
         .and_then(Value::as_array)
         .map(|rows| {
 
             rows.iter()
                 .filter_map(|row| {
 
+                    let id = row.get("id").and_then(flexible_i64)?;
+
+                    let begin = row
+                        .get("beginTime")
+                        .and_then(flexible_string)
+                        .unwrap_or_default();
+
+                    let end = row
+                        .get("endTime")
+                        .and_then(flexible_string)
+                        .unwrap_or_default();
+
                     Some(TimeSlot {
-                        id:         row.get("id").and_then(flexible_i64)?,
-                        begin_time: row
-                            .get("beginTime")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        end_time:   row
-                            .get("endTime")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        label:      row
-                            .get("label")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
+                        id,
+                        label: format!("{begin}-{end}"),
+                        begin_time: begin,
+                        end_time: end,
                     })
                 })
                 .collect()
@@ -836,35 +927,43 @@ fn parse_day_info(response: &Value, venue_site_id: i64, date: &str) -> Result<Da
         .unwrap_or_default();
 
     let spaces = data
-        .get("spaces")
+        .get("reservationDateSpaceInfo")
+        .and_then(Value::as_object)
+        .and_then(|by_date| by_date.get(date))
         .and_then(Value::as_array)
         .map(|rows| {
 
             rows.iter()
                 .filter_map(|row| {
 
-                    let space_id = row.get("spaceId").and_then(flexible_i64)?;
+                    let space_id = row.get("id").and_then(flexible_i64)?;
 
+                    // Slot entries are the numeric keys of the room object.
                     let slots = row
-                        .get("slots")
-                        .and_then(Value::as_array)
-                        .map(|slots| {
+                        .as_object()
+                        .map(|fields| {
 
-                            slots
+                            fields
                                 .iter()
-                                .filter_map(|slot| {
+                                .filter(|(key, _)| key.chars().all(|c| c.is_ascii_digit()))
+                                .filter_map(|(key, value)| {
+
+                                    let time_id = key.parse::<i64>().ok()?;
+
+                                    // 1 is bookable; anything else is not.
+                                    let status = value
+                                        .get("reservationStatus")
+                                        .and_then(flexible_i64)
+                                        .unwrap_or(0);
 
                                     Some(SlotStatus {
-                                        time_id:    row_time_id(slot)?,
-                                        reservable: slot
-                                            .get("isReservable")
-                                            .and_then(Value::as_bool)
-                                            .unwrap_or(false),
-                                        take_up:    slot
+                                        time_id,
+                                        reservable: status == 1,
+                                        take_up: value
                                             .get("takeUp")
                                             .and_then(Value::as_bool)
                                             .unwrap_or(false),
-                                        order_id:   slot.get("orderId").and_then(flexible_i64),
+                                        order_id: value.get("orderId").and_then(flexible_i64),
                                     })
                                 })
                                 .collect()
@@ -873,10 +972,12 @@ fn parse_day_info(response: &Value, venue_site_id: i64, date: &str) -> Result<Da
 
                     Some(SpaceAvailability {
                         space_id,
+                        // Room names carry surrounding quotes upstream.
                         space_name: row
                             .get("spaceName")
-                            .and_then(Value::as_str)
-                            .unwrap_or("未命名房间")
+                            .and_then(flexible_string)
+                            .unwrap_or_else(|| format!("房间 {space_id}"))
+                            .trim_matches('"')
                             .to_string(),
                         slots,
                     })
@@ -892,104 +993,129 @@ fn parse_day_info(response: &Value, venue_site_id: i64, date: &str) -> Result<Da
         time_slots,
         spaces,
         reservation_token: data
-            .get("reservationToken")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+            .get("token")
+            .and_then(flexible_string)
+            .filter(|value| !value.is_empty()),
     })
-}
-
-fn row_time_id(slot: &Value) -> Option<i64> {
-
-    slot.get("timeId")
-        .and_then(flexible_i64)
-        .or_else(|| slot.get("id").and_then(flexible_i64))
 }
 
 #[cfg(test)]
 
 mod tests {
 
-    use super::{parse_day_info, parse_order, parse_venue_site};
+    use super::{parse_day_info, parse_order, parse_venue_sites};
     use serde_json::json;
 
     #[test]
 
-    fn reads_a_venue_site_row() {
+    fn flattens_a_venue_into_one_row_per_room() {
 
-        let site = parse_venue_site(&json!({
+        // The list response groups rooms under a venue, but the id every later
+        // call needs is the room's.
+        let sites = parse_venue_sites(&json!({
+            "id": 111,
+            "venueName": "三号楼研讨室",
+            "campusName": "学院路校区",
+            "siteList": [
+                {"id": "12", "siteName": "一层"},
+                {"id": "13", "siteName": "二层"}
+            ]
+        }));
+
+        assert_eq!(sites.len(), 2, "每个房间一行");
+
+        assert_eq!(sites[0].id, 12, "房间 id，不是场地 id");
+
+        assert_eq!(sites[0].site_name, "一层");
+
+        assert_eq!(sites[0].venue_name, "三号楼研讨室");
+    }
+
+    #[test]
+
+    fn a_venue_without_rooms_still_appears() {
+
+        let sites = parse_venue_sites(&json!({
             "id": 7,
-            "siteName": "研讨室 A",
-            "venueName": "沙河图书馆",
-            "campusName": "沙河",
-            "seatCount": 8
-        }))
-        .expect("应能解析场地");
+            "venueName": "研讨室 A",
+            "campusName": "沙河"
+        }));
 
-        assert_eq!(site.id, 7);
+        assert_eq!(sites.len(), 1);
 
-        assert_eq!(site.site_name, "研讨室 A");
-
-        assert_eq!(site.seat_count, Some(8));
+        assert_eq!(sites[0].site_name, "研讨室 A");
     }
 
     #[test]
 
-    fn numeric_ids_may_arrive_as_strings() {
+    fn room_ids_arrive_as_strings() {
 
-        // The service mixes number and string encodings between endpoints.
-        let site = parse_venue_site(&json!({
-            "id": "42",
-            "siteName": "研讨室 B",
-            "venueName": "学院路",
-            "campusName": "学院路"
-        }))
-        .expect("字符串 id 也应可解析");
+        // The live response encodes room ids as strings.
+        let sites = parse_venue_sites(&json!({
+            "id": 111,
+            "venueName": "三号楼",
+            "campusName": "学院路",
+            "siteList": [{"id": "42", "siteName": "一层"}]
+        }));
 
-        assert_eq!(site.id, 42);
+        assert_eq!(sites[0].id, 42);
     }
 
     #[test]
 
-    fn reads_day_info_with_availability() {
+    fn reads_day_info_in_the_shape_the_service_returns() {
 
+        // Room ids and slot ids are keys here, not array entries, and
+        // reservationStatus 1 is the only bookable value.
         let response = json!({
-            "code": 0,
+            "code": 200,
             "data": {
-                "availableDates": ["2026-03-10", "2026-03-11"],
-                "reservationToken": "tok-1",
-                "timeSlots": [
-                    {"id": 1, "beginTime": "08:00", "endTime": "10:00", "label": "上午一"},
-                    {"id": 2, "beginTime": "10:00", "endTime": "12:00", "label": "上午二"}
+                "ableReservationDateList": ["2026-09-23", "2026-09-24"],
+                "token": "tok-1",
+                "spaceTimeInfo": [
+                    {"id": 1724, "beginTime": "08:00", "endTime": "09:35"},
+                    {"id": 1725, "beginTime": "09:50", "endTime": "12:15"}
                 ],
-                "spaces": [
-                    {
-                        "spaceId": 100,
-                        "spaceName": "A101",
-                        "slots": [
-                            {"timeId": 1, "isReservable": true, "takeUp": false},
-                            {"timeId": 2, "isReservable": false, "takeUp": true, "orderId": 55}
-                        ]
-                    }
-                ]
+                "reservationDateSpaceInfo": {
+                    "2026-09-23": [
+                        {
+                            "id": "58",
+                            "spaceName": "\"(三)108\"",
+                            "venueSiteId": "12",
+                            "1724": {"reservationStatus": 1, "takeUp": false},
+                            "1725": {"reservationStatus": 4, "takeUp": false, "orderId": 55}
+                        }
+                    ]
+                }
             }
         });
 
-        let day = parse_day_info(&response, 7, "2026-03-10").expect("应能解析");
+        let day = parse_day_info(&response, 12, "2026-09-23").expect("应能解析");
 
         assert_eq!(day.reservation_token.as_deref(), Some("tok-1"));
+
+        assert_eq!(day.available_dates.len(), 2);
 
         assert_eq!(day.time_slots.len(), 2);
 
         assert_eq!(day.spaces.len(), 1);
 
-        assert_eq!(day.spaces[0].space_name, "A101");
+        // Surrounding quotes are stripped for display.
+        assert_eq!(day.spaces[0].space_name, "(三)108");
 
-        assert!(day.spaces[0].slots[0].reservable);
+        let slots = &day.spaces[0].slots;
 
-        assert!(!day.spaces[0].slots[1].reservable);
+        assert_eq!(slots.len(), 2);
 
-        assert_eq!(day.spaces[0].slots[1].order_id, Some(55));
+        let first = slots.iter().find(|s| s.time_id == 1724).expect("应有 1724");
+
+        assert!(first.reservable, "status 1 表示可预约");
+
+        let second = slots.iter().find(|s| s.time_id == 1725).expect("应有 1725");
+
+        assert!(!second.reservable, "status 4 表示不可预约");
+
+        assert_eq!(second.order_id, Some(55));
     }
 
     #[test]
