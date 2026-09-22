@@ -5,6 +5,7 @@ mod autologin;
 mod config;
 mod core;
 mod planner;
+mod venue;
 
 use std::ffi::OsString;
 
@@ -43,6 +44,10 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::Plan(args) => planner::plan_command(args).await,
         CommandKind::Doctor(args) => planner::doctor_command(args).await,
         CommandKind::Notify(args) => planner::notify_command(args),
+        CommandKind::Venues(args) => venue::venues_command(args).await,
+        CommandKind::VenueSlots(args) => venue::venue_slots_command(args).await,
+        CommandKind::VenueReserve(args) => venue::venue_reserve_command(args).await,
+        CommandKind::VenueOrders(args) => venue::venue_orders_command(args).await,
         CommandKind::Today(args) => planner::today_command(args).await,
         CommandKind::Exams(args) => planner::exams_command(args).await,
         CommandKind::Grades(args) => planner::grades_command(args).await,

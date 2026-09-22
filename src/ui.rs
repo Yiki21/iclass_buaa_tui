@@ -17,6 +17,14 @@ use crate::app::{
 use crate::bykc::can_deselect_bykc_course;
 use crate::theme;
 
+/// App name shown in the top bar and login card.
+///
+/// Why:
+/// A shared constant keeps the clickable tab regions aligned with the text that
+/// is actually drawn, and lets the hotspot test assert against the same value.
+
+const BRAND: &str = " 智慧北航 ";
+
 const QR_MAX_MODULE_SCALE: u16 = 1;
 
 /// Renders the whole frame, then overlays transient popups in a fixed z-order.
@@ -104,7 +112,7 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(" iClass BUAA ", theme::title_style()),
+            Span::styled(" 智慧北航 ", theme::title_style()),
             Span::styled("统一认证登录 ", theme::subtitle_style()),
         ]))
         .borders(Borders::ALL)
@@ -337,21 +345,27 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
     // Three regions: tabs, the todo indicator, then identity. Separate areas
     // stop the indicator from running into the right-aligned identity text and
     // being silently truncated.
+    // Tabs get whatever is left after the indicator and identity; the fixed
+    // columns are sized so the three tab labels survive a 80-column terminal.
+    // The tabs row is the only one that cannot lose content gracefully: a
+    // clipped tab label is unreadable, while the indicator and identity can
+    // lose a trailing detail. Budget for 80 columns: the brand is 10 cells and
+    // each of the three tabs is 7, so tabs need 31 and get priority.
     let [tabs_area, todo_area, identity_area] = Layout::horizontal([
-        Constraint::Min(24),
-        Constraint::Length(50),
-        Constraint::Length(34),
+        Constraint::Min(31),
+        Constraint::Length(28),
+        Constraint::Length(20),
     ])
     .areas(area);
 
-    let brand = " iClass BUAA  ";
+    let brand = BRAND;
 
     let mut spans = vec![Span::styled(brand, theme::title_style())];
 
     let tabs = [
         (WorkspaceTab::Schedule, app.schedule.portal_label()),
-        (WorkspaceTab::IClass, "iClass"),
-        (WorkspaceTab::Bykc, "BYKC"),
+        (WorkspaceTab::IClass, "签到"),
+        (WorkspaceTab::Bykc, "博雅"),
     ];
 
     // Track each label's columns so the same text the user sees is what they
@@ -514,14 +528,11 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(session.user_name.clone(), theme::text_style()),
             Span::styled(format!(" ({})", session.user_id), theme::muted_style()),
             Span::styled(" · ", theme::muted_style()),
+            Span::styled(" · ", theme::muted_style()),
             Span::styled(
                 if session.use_vpn { "VPN" } else { "直连" },
                 Style::default().fg(theme::INFO),
             ),
-            Span::styled(" · ", theme::muted_style()),
-            // Compact form; a pending update still shows here as vX → vY, so
-            // the warning survives the slimmer bar.
-            Span::styled(app.version_short(), app.version_style()),
             Span::raw(" "),
         ])
     } else {
@@ -590,7 +601,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("?", theme::label_style()),
         Span::styled(" 帮助  ", theme::muted_style()),
         Span::styled("q", theme::label_style()),
-        Span::styled(" 退出 ", theme::muted_style()),
+        Span::styled(" 退出  ", theme::muted_style()),
+        // Version moved here from the top bar, which needed the room for the
+        // tab labels. A pending update still shows as vX → vY.
+        Span::styled(app.version_short(), app.version_style()),
+        Span::raw(" "),
     ]);
 
     frame.render_widget(Paragraph::new(keys).alignment(Alignment::Right), keys_area);
@@ -714,7 +729,7 @@ fn iclass_status_line(app: &App) -> Line<'static> {
         app.iclass_loading,
         if app.iclass_loading {
 
-            "正在加载课程"
+            "正在加载签到课程"
         } else {
 
             "就绪"
@@ -2202,7 +2217,7 @@ fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
 
         vec![ListItem::new(if app.bykc.loading {
 
-            "加载 BYKC 可选课程中..."
+            "正在加载博雅可选课程..."
         } else {
 
             "暂无课程"
@@ -2292,7 +2307,7 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
 
         vec![ListItem::new(if app.bykc.loading {
 
-            "加载 BYKC 已选课程中..."
+            "正在加载博雅已选课程..."
         } else {
 
             "暂无已选课程"
@@ -3622,13 +3637,13 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("tab / shift+tab: 切换字段"),
         Line::from("space: 切换 VPN 模式或记住我"),
         Line::from("enter: 登录"),
-        Line::from("D: 执行 WebVPN / SSO / iClass / BYKC 自检"),
+        Line::from("D: 执行 WebVPN / SSO / 签到 / 博雅自检"),
         Line::from("v: 查看最近一次登录失败详情"),
         Line::from("y: 复制最近错误（事件日志打开时）"),
         Line::from("C: 清空事件日志（事件日志打开时）"),
         Line::from(""),
         Line::from(Span::styled(
-            "iClass",
+            "签到",
             Style::default()
                 .fg(theme::WARN)
                 .add_modifier(Modifier::BOLD),
@@ -3650,7 +3665,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from(", / .: 切换已保存学期 | u: 导入整学期课表"),
         Line::from(""),
         Line::from(Span::styled(
-            "BYKC",
+            "博雅",
             Style::default()
                 .fg(theme::WARN)
                 .add_modifier(Modifier::BOLD),
@@ -4364,9 +4379,11 @@ mod tests {
             .find(|hotspot| matches!(hotspot.action, HotAction::WorkspaceTab(_)))
             .expect("应有页签热区");
 
-        // " iClass BUAA  " is 14 cells, so the first tab label starts there.
+        // The first tab starts immediately after the brand text, whatever its
+        // width happens to be.
         assert_eq!(
-            first.area.x, 14,
+            first.area.x,
+            display_width(&BRAND) as u16,
             "首个页签热区应紧接应用名之后：{:?}",
             first.area
         );
@@ -4524,9 +4541,18 @@ mod tests {
         let rows: Vec<&str> = output.lines().collect();
 
         assert!(
-            rows[0].contains("iClassBUAA"),
-            "顶栏应显示应用名：\n{output}"
+            rows[0].contains("智慧北航"),
+            "顶栏应显示中文应用名：\n{output}"
         );
+
+        // English abbreviations must not reach the user.
+        for leaked in ["iClassBUAA", "iClass", "BYKC"] {
+
+            assert!(
+                !output.contains(leaked),
+                "顶栏不应出现英文缩写 {leaked}：\n{output}"
+            );
+        }
 
         assert!(!rows[0].contains('┌'), "顶栏不应有边框：\n{output}");
 
@@ -4542,6 +4568,21 @@ mod tests {
         assert!(last.contains("切换"), "页脚应给出快捷键：\n{output}");
 
         assert!(!last.contains('└'), "页脚不应是边框：\n{output}");
+
+        // The tabs must survive a narrow terminal; a wider Chinese brand name
+        // pushed them off the end when this was introduced.
+        for width in [100u16, 90, 80] {
+
+            let narrow = render_text(width, 24, |frame| render_workspace(frame, &app));
+
+            assert!(
+                narrow.lines().next().is_some_and(|row| {
+
+                    row.contains("课表") && row.contains("签到") && row.contains("博雅")
+                }),
+                "{width} 列宽时应仍能看到全部页签：\n{narrow}"
+            );
+        }
 
         for gone in ["工作区", "切换提示", "会话", "周视图", "事件"] {
 

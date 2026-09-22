@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::captcha::{CaptchaChallenge, solve as solve_captcha};
-use super::signer::{APP_KEY, Params, add_nocache, sign};
+use super::signer::{APP_KEY, add_nocache, sign};
 use crate::constants::to_webvpn_url;
 use crate::iclass::IClassApi;
 
@@ -537,6 +537,16 @@ impl IClassApi {
         let solved = tokio::task::spawn_blocking(move || solve_captcha(&challenge))
             .await
             .context("验证码求解任务失败")??;
+
+        // The plaintext point is what the server decrypts; logging it alongside
+        // the offset makes a rejected captcha diagnosable.
+        if std::env::var_os("ICLASS_CGYY_CAPTCHA_DEBUG").is_some() {
+
+            eprintln!(
+                "研讨室验证码: 偏移={} 明文={}",
+                solved.move_distance, solved.point_json_data
+            );
+        }
 
         let _ = self
             .cgyy_request(

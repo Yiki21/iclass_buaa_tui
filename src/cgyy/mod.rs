@@ -9,8 +9,7 @@ mod api;
 mod captcha;
 mod signer;
 
-pub use api::{
-    DayInfo, Order, ReservationRequest, SlotStatus, SpaceAvailability, TimeSlot, VenueSite,
-};
-pub use captcha::{CaptchaChallenge, SolvedCaptcha, solve as solve_captcha};
-pub use signer::{APP_KEY, add_nocache, sign, sign_payload};
+// Public surface. `Order` and `VenueSite` are named even though callers often
+// infer them from method returns, so the types have a stable import path.
+#[allow(unused_imports)]
+pub use api::{DayInfo, Order, ReservationRequest, VenueSite};

@@ -34,6 +34,14 @@ pub(crate) enum CommandKind {
     Doctor(DoctorArgs),
     /// Send a test desktop notification to verify notifications work here.
     Notify(NotifyArgs),
+    /// List seminar rooms (研讨室) available for booking.
+    Venues(VenueArgs),
+    /// Show one room's bookable time slots on a date.
+    VenueSlots(VenueSlotsArgs),
+    /// Reserve a seminar room. Requires --yes; this claims a real room.
+    VenueReserve(VenueReserveArgs),
+    /// List and optionally cancel your seminar-room reservations.
+    VenueOrders(VenueOrdersArgs),
     /// Show today's cached academic courses and next class.
     Today(TodayArgs),
     /// Show exam arrangements for one academic term.
@@ -120,6 +128,108 @@ pub(crate) struct PlanArgs {
     /// Only print today's evaluation without attempting sign.
     #[arg(long)]
     pub(crate) dry_run:     bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct VenueArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Filter to rooms whose name contains this text.
+    #[arg(long)]
+    pub(crate) query:       Option<String>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct VenueSlotsArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Room id from `venues`.
+    #[arg(long)]
+    pub(crate) site:        i64,
+    /// Date in YYYY-MM-DD format. Defaults to today.
+    #[arg(long)]
+    pub(crate) date:        Option<String>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct VenueReserveArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:       Option<PathBuf>,
+    /// Room id from `venues`.
+    #[arg(long)]
+    pub(crate) site:         i64,
+    /// Date in YYYY-MM-DD format.
+    #[arg(long)]
+    pub(crate) date:         String,
+    /// Time-slot ids from `venue-slots`, comma separated or repeated.
+    #[arg(long, value_delimiter = ',', required = true)]
+    pub(crate) slots:        Vec<i64>,
+    /// Contact phone number required by the service.
+    #[arg(long)]
+    pub(crate) phone:        String,
+    /// Purpose type id from `venue-slots`.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) purpose:      i64,
+    /// Short title for the reservation.
+    #[arg(long)]
+    pub(crate) theme:        String,
+    /// Number of attendees.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) joiners:      i64,
+    /// Activity description.
+    #[arg(long, default_value = "小组讨论")]
+    pub(crate) activity:     String,
+    /// Names of the other attendees, comma separated.
+    #[arg(long, default_value = "")]
+    pub(crate) joiner_names: String,
+    /// Confirm the reservation. Without this the command only previews.
+    ///
+    /// Why:
+    /// Reserving claims a physical room that other students cannot then use.
+    /// Requiring an explicit flag means a mistyped command cannot take one.
+    #[arg(long)]
+    pub(crate) yes:          bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login:  bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct VenueOrdersArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Cancel this order id. Requires --yes.
+    #[arg(long)]
+    pub(crate) cancel:      Option<i64>,
+    /// Confirm the cancellation.
+    #[arg(long)]
+    pub(crate) yes:         bool,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,
