@@ -2250,9 +2250,14 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
         return;
     };
 
-    let area = centered_rect(76, 78, frame.area());
+    // Take the whole screen rather than floating a three-quarter box over the
+    // list. A floating box left the workspace's own borders and text visible on
+    // every side, which read as the detail being covered even though it was
+    // drawn last. Clearing the entire frame removes the background outright, so
+    // there is no competing text to be confused with the panel's own.
+    frame.render_widget(Clear, frame.area());
 
-    frame.render_widget(Clear, area);
+    let area = frame.area();
 
     let (sign_text, sign_style) = bykc_sign_state(detail);
 
@@ -2287,7 +2292,11 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
 
     lines.extend(field("教师", detail.course_teacher.clone()));
 
-    lines.extend(field("地点", detail.course_position.clone()));
+    lines.extend(field_styled(
+        "地点",
+        detail.course_position.clone(),
+        Style::default().fg(theme::INFO),
+    ));
 
     if let Some(contact) = contact_line(detail) {
 
@@ -2323,9 +2332,17 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
         .to_string(),
     ));
 
-    lines.extend(field("签到窗口", window_text(detail, true)));
+    lines.extend(field_styled(
+        "签到窗口",
+        window_text(detail, true),
+        window_style(detail, true),
+    ));
 
-    lines.extend(field("签退窗口", window_text(detail, false)));
+    lines.extend(field_styled(
+        "签退窗口",
+        window_text(detail, false),
+        window_style(detail, false),
+    ));
 
     if let Some(config) = detail.sign_config.as_ref()
         && !config.sign_points.is_empty()
@@ -2341,7 +2358,11 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
 
     lines.push(section("选课"));
 
-    lines.extend(field("状态", detail.status.clone()));
+    lines.extend(field_styled(
+        "状态",
+        detail.status.clone(),
+        bykc_status_style(&detail.status),
+    ));
 
     lines.extend(field(
         "选课时间",
@@ -2352,17 +2373,25 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
         ),
     ));
 
-    lines.extend(field(
+    lines.extend(field_styled(
         "退选截止",
         empty_dash(&detail.course_cancel_end_date),
+        if can_deselect_bykc_course(&detail.course_cancel_end_date) {
+
+            Style::default().fg(theme::WARN)
+        } else {
+
+            theme::muted_style()
+        },
     ));
 
-    lines.extend(field(
+    lines.extend(field_styled(
         "人数",
         format!(
             "{}/{}",
             detail.course_current_count, detail.course_max_count
         ),
+        capacity_style(detail.course_current_count, detail.course_max_count),
     ));
 
     if !detail.course_desc.trim().is_empty() {
@@ -2412,6 +2441,22 @@ fn section(title: &str) -> Line<'static> {
 
 fn field(label: &str, value: impl Into<String>) -> Option<Line<'static>> {
 
+    field_styled(label, value, theme::text_style())
+}
+
+/// A label/value row with a caller-chosen value style.
+///
+/// Why:
+/// Most rows are neutral, but a handful carry the answer to "can I act on
+/// this now": status, sign windows, capacity, deadlines. Coloring those by
+/// meaning lets the panel be scanned instead of read.
+
+fn field_styled(
+    label: &str,
+    value: impl Into<String>,
+    value_style: Style,
+) -> Option<Line<'static>> {
+
     let value = value.into();
 
     let value = value.trim();
@@ -2423,8 +2468,123 @@ fn field(label: &str, value: impl Into<String>) -> Option<Line<'static>> {
 
     Some(Line::from(vec![
         Span::styled(format!("  {label:<10}"), theme::muted_style()),
-        Span::styled(value.to_string(), theme::text_style()),
+        Span::styled(value.to_string(), value_style),
     ]))
+}
+
+/// Style for a BYKC selection status string.
+///
+/// Why:
+/// "已报" and "已过退选" are the two states that change what the user can do
+/// next, so they get color; everything else stays neutral.
+
+fn bykc_status_style(status: &str) -> Style {
+
+    if status.contains("已报") || status.contains("已选") {
+
+        Style::default().fg(theme::OK)
+    } else if status.contains("已满") || status.contains("过期") || status.contains("截止") {
+
+        Style::default().fg(theme::ERROR)
+    } else if status.contains("可报") || status.contains("报名中") {
+
+        Style::default().fg(theme::ACCENT)
+    } else {
+
+        theme::text_style()
+    }
+}
+
+/// Style for a sign or sign-out window, by whether it is open now.
+///
+/// Why:
+/// The window text is a date range, and whether it is currently open is the
+/// only thing that matters about it. Parsing the range and coloring it by
+/// open/upcoming/closed saves the reader from comparing timestamps by eye.
+
+fn window_style(detail: &crate::bykc::BykcCourseDetail, sign_in: bool) -> Style {
+
+    let Some(config) = detail.sign_config.as_ref() else {
+
+        return theme::muted_style();
+    };
+
+    let (start, end) = if sign_in {
+
+        (&config.sign_start_date, &config.sign_end_date)
+    } else {
+
+        (&config.sign_out_start_date, &config.sign_out_end_date)
+    };
+
+    if start.trim().is_empty() && end.trim().is_empty() {
+
+        return theme::muted_style();
+    }
+
+    match (
+        parse_bykc_datetime(start.as_str()),
+        parse_bykc_datetime(end.as_str()),
+    ) {
+        (Some(opened), Some(closes)) => {
+
+            let now = Local::now().naive_local();
+
+            if now < opened {
+
+                Style::default().fg(theme::INFO)
+            } else if now > closes {
+
+                theme::muted_style()
+            } else {
+
+                Style::default().fg(theme::OK).add_modifier(Modifier::BOLD)
+            }
+        }
+        _ => theme::text_style(),
+    }
+}
+
+/// Parses the timestamp formats BYKC uses in sign windows.
+
+fn parse_bykc_datetime(value: &str) -> Option<chrono::NaiveDateTime> {
+
+    let value = value.trim();
+
+    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+
+        if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(value, format) {
+
+            return Some(parsed);
+        }
+    }
+
+    // Date-only values mean midnight, which is what the upstream sends when a
+    // window has no time component.
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+}
+
+/// Style for a `current/max` capacity string.
+
+fn capacity_style(current: i32, max: i32) -> Style {
+
+    if max <= 0 {
+
+        return theme::muted_style();
+    }
+
+    if current >= max {
+
+        Style::default().fg(theme::ERROR)
+    } else if current * 10 >= max * 9 {
+
+        Style::default().fg(theme::WARN)
+    } else {
+
+        Style::default().fg(theme::OK)
+    }
 }
 
 /// Joins the contact name and phone when either is present.
@@ -3346,6 +3506,41 @@ mod tests {
 
     #[test]
 
+    fn bykc_detail_popup_is_not_overlapped_by_workspace_text() {
+
+        let detail = fixture();
+
+        let mut app = app_with_detail(detail);
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Bykc;
+
+        for height in [18u16, 24, 30, 40, 50] {
+
+            let out = render_text(100, height, |frame| render(frame, &app));
+
+            // The panel takes the whole screen, so no workspace chrome may
+            // survive anywhere in the frame.
+            for (row, line) in out.lines().enumerate() {
+
+                for chrome in ["iClassBUAA", "可选课程", "课程列表", "tab切换"] {
+
+                    assert!(
+                        !line.contains(chrome),
+                        "第 {row} 行仍有工作区内容 {chrome}，详情面板未独占屏幕：\n{out}"
+                    );
+                }
+            }
+
+            assert!(out.contains("选课详情"), "详情面板应占据整屏：\n{out}");
+
+            let _ = height;
+        }
+    }
+
+    #[test]
+
     fn workspace_chrome_is_borderless_rows_around_one_frame() {
 
         let mut app = App::default();
@@ -3443,6 +3638,95 @@ mod tests {
         app
     }
 
+    /// Returns the foreground color of the first character of `needle`.
+    ///
+    /// How:
+    /// Wide glyphs occupy two cells and the second holds a filler space, and
+    /// labels are padded with real spaces. Both are dropped, leaving the visible
+    /// characters in order; the needle is located in that string and mapped back
+    /// to the cell it came from.
+
+    fn color_of(width: u16, height: u16, app: &App, needle: &str) -> Option<Color> {
+
+        let backend = TestBackend::new(width, height);
+
+        let mut terminal = Terminal::new(backend).expect("终端应可创建");
+
+        terminal
+            .draw(|frame| render_bykc_detail_popup(frame, app))
+            .expect("应可渲染");
+
+        let buffer = terminal.backend().buffer().clone();
+
+        for y in 0..buffer.area.height {
+
+            let mut text = String::new();
+
+            let mut source: Vec<(usize, u16)> = Vec::new();
+
+            for x in 0..buffer.area.width {
+
+                let symbol = buffer[(x, y)].symbol();
+
+                if symbol.is_empty() || symbol == " " {
+
+                    continue;
+                }
+
+                for character in symbol.chars() {
+
+                    text.push(character);
+
+                    source.push((text.chars().count() - 1, x));
+                }
+            }
+
+            if let Some(byte_index) = text.find(needle) {
+
+                let char_index = text[..byte_index].chars().count();
+
+                if let Some((_, column)) = source.iter().find(|(index, _)| *index == char_index) {
+
+                    return Some(buffer[(*column, y)].fg);
+                }
+            }
+        }
+
+        None
+    }
+
+    #[test]
+
+    fn detail_popup_highlights_status_and_capacity_by_meaning() {
+
+        let signed_up = app_with_detail(fixture());
+
+        // "已报" is a positive state and must not render in plain body text.
+        let status = color_of(100, 40, &signed_up, "已报").expect("应找到状态");
+
+        assert_eq!(status, theme::OK, "已报应用 OK 色高亮");
+
+        // 63/80 is under 90% capacity, so it is comfortably open.
+        let capacity = color_of(100, 40, &signed_up, "63/80").expect("应找到人数");
+
+        assert_eq!(capacity, theme::OK, "未满的人数应用 OK 色");
+
+        // A full course must read as a problem.
+        let full = app_with_detail(BykcCourseDetail {
+            course_current_count: 80,
+            ..fixture()
+        });
+
+        let capacity = color_of(100, 40, &full, "80/80").expect("应找到人数");
+
+        assert_eq!(capacity, theme::ERROR, "已满的人数应用 ERROR 色");
+
+        // A place is scanned for, so it gets the info color rather than body.
+        let place = color_of(100, 40, &signed_up, "沙河").expect("应找到地点");
+
+        assert_eq!(place, theme::INFO, "地点应用 INFO 色");
+    }
+
     #[test]
 
     fn detail_popup_draws_a_single_frame_and_shows_sign_state() {
@@ -3509,39 +3793,43 @@ mod tests {
 
     #[test]
 
-    fn detail_popup_reaches_a_description_that_does_not_fit() {
+    fn detail_popup_reaches_the_end_of_a_long_description() {
 
         let mut app = app_with_detail(fixture());
 
-        // The fixture description is far taller than the popup, so its opening
-        // line sits below the fold. That is exactly the case the old layout
-        // clipped with no way to reach the rest.
-        let top = render_popup(&app, 90, 28);
+        // The fixture description is far taller than any terminal, so the last
+        // line must only become visible after scrolling.
+        let last = "第40行课程简介内容";
 
-        assert!(!top.contains("第1行"), "简介开头本应在首屏之下：\n{top}");
+        let top = render_popup(&app, 100, 30);
 
-        let mut found = false;
+        assert!(!top.contains(last), "简介末行本应需要滚动才能看到：\n{top}");
 
-        for offset in 1..=60 {
+        let mut found = None;
+
+        for offset in 1..=80 {
 
             app.bykc.detail_scroll = offset;
 
-            if render_popup(&app, 90, 28).contains("第1行") {
+            if render_popup(&app, 100, 30).contains(last) {
 
-                found = true;
+                found = Some(offset);
 
                 break;
             }
         }
 
-        assert!(found, "滚动后应能看到简介开头");
+        assert!(found.is_some(), "滚动后应能看到简介末行");
 
-        // At the bottom the last line must also be reachable.
-        app.bykc.detail_scroll = 60;
+        // Scrolling past the end must still show the footer hint rather than
+        // painting garbage.
+        app.bykc.detail_scroll = 500;
+
+        let past_end = render_popup(&app, 100, 30);
 
         assert!(
-            render_popup(&app, 90, 28).contains("已滚动60行"),
-            "滚动后应提示偏移量"
+            past_end.contains("esc/o/enter关闭"),
+            "滚动超出末尾后页脚提示应仍在：\n{past_end}"
         );
     }
 }
