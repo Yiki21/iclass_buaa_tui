@@ -334,8 +334,15 @@ fn render_workspace(frame: &mut Frame, app: &App) {
 
 fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
 
-    let [tabs_area, identity_area] =
-        Layout::horizontal([Constraint::Min(30), Constraint::Length(48)]).areas(area);
+    // Three regions: tabs, the todo indicator, then identity. Separate areas
+    // stop the indicator from running into the right-aligned identity text and
+    // being silently truncated.
+    let [tabs_area, todo_area, identity_area] = Layout::horizontal([
+        Constraint::Min(24),
+        Constraint::Length(38),
+        Constraint::Length(34),
+    ])
+    .areas(area);
 
     let brand = " iClass BUAA  ";
 
@@ -383,6 +390,94 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
 
+    // Todo indicator. It only speaks about sources that have been loaded, so it
+    // stays silent on a fresh login rather than reporting a false all-clear.
+    let todo = app.todo_summary();
+
+    if todo.any_loaded() {
+
+        let mut todo_spans: Vec<Span> = Vec::new();
+
+        // Track the column so each item can be clicked to jump to its tab.
+        // The leading "⚑ " is two cells wide.
+        let mut column = todo_area.x + 2;
+
+        let mut push_item = |count: Option<usize>, label: &str, action: HotAction| {
+
+            let Some(count) = count else {
+
+                return;
+            };
+
+            if count == 0 {
+
+                return;
+            }
+
+            if !todo_spans.is_empty() {
+
+                todo_spans.push(Span::styled("  ", theme::muted_style()));
+
+                column += 2;
+            }
+
+            // Compact form: the count carries the meaning and the label names
+            // the source. The tab it belongs to is visible right beside it.
+            let text = format!("{count} {label}");
+
+            let width = display_width(&text) as u16;
+
+            todo_spans.push(Span::styled(
+                count.to_string(),
+                Style::default()
+                    .fg(theme::WARN)
+                    .add_modifier(Modifier::BOLD),
+            ));
+
+            todo_spans.push(Span::styled(format!(" {label}"), theme::text_style()));
+
+            app.record_hotspot(
+                Rect {
+                    x: column,
+                    y: todo_area.y,
+                    width,
+                    height: 1,
+                },
+                action,
+            );
+
+            column += width;
+        };
+
+        push_item(
+            todo.unsigned_classes,
+            "未签到",
+            HotAction::WorkspaceTab(WorkspaceTab::IClass),
+        );
+
+        push_item(todo.pending_tasks, "待交", HotAction::CourseTasks);
+
+        push_item(
+            todo.signable_bykc,
+            "可签",
+            HotAction::WorkspaceTab(WorkspaceTab::Bykc),
+        );
+
+        let indicator = if todo_spans.is_empty() {
+
+            Line::from(Span::styled("✓ 今日无待办", Style::default().fg(theme::OK)))
+        } else {
+
+            let mut line = vec![Span::styled("⚑ ", Style::default().fg(theme::WARN))];
+
+            line.extend(todo_spans);
+
+            Line::from(line)
+        };
+
+        frame.render_widget(Paragraph::new(indicator), todo_area);
+    }
+
     let identity = if let Some(session) = &app.session {
 
         Line::from(vec![
@@ -394,6 +489,8 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(theme::INFO),
             ),
             Span::styled(" · ", theme::muted_style()),
+            // Compact form; a pending update still shows here as vX → vY, so
+            // the warning survives the slimmer bar.
             Span::styled(app.version_short(), app.version_style()),
             Span::raw(" "),
         ])
@@ -3685,6 +3782,195 @@ mod tests {
     fn render_into(app: &App, width: u16, height: u16) -> String {
 
         render_text(width, height, |frame| render_workspace(frame, app))
+    }
+
+    #[test]
+
+    fn todo_indicator_items_are_clickable_and_route_to_their_tab() {
+
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.schedule.tasks_loaded = true;
+
+        app.schedule.tasks = vec![crate::tasks::AssignmentItem {
+            title: "待交".to_string(),
+            status: "未提交".to_string(),
+            due_time: Some("2099-01-01 23:59".to_string()),
+            ..Default::default()
+        }];
+
+        // Start on the BYKC tab so the jump has to change tabs too.
+        app.active_tab = WorkspaceTab::Bykc;
+
+        render_into(&app, 120, 30);
+
+        let target = app
+            .hotspots
+            .borrow()
+            .iter()
+            .find(|hotspot| hotspot.action == HotAction::CourseTasks)
+            .map(|hotspot| hotspot.area)
+            .expect("待交项应有热区");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.handle_mouse(
+            MouseEvent {
+                kind:      MouseEventKind::Down(MouseButton::Left),
+                column:    target.x,
+                row:       target.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &tx,
+        );
+
+        assert_eq!(app.active_tab, WorkspaceTab::Schedule, "应跳到课表页签");
+
+        assert_eq!(app.schedule.view, CourseView::Tasks, "应跳到作业视图");
+    }
+
+    #[test]
+
+    fn todo_indicator_is_silent_until_a_source_is_loaded() {
+
+        // A fresh login knows nothing yet. The indicator must not claim
+        // "no todo" or show zeros for data it has never fetched.
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        let summary = app.todo_summary();
+
+        assert!(!summary.any_loaded(), "未加载任何来源时不应声称已加载");
+
+        assert_eq!(summary.unsigned_classes, None);
+
+        assert_eq!(summary.pending_tasks, None);
+
+        assert_eq!(summary.signable_bykc, None);
+
+        let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+        assert!(
+            !out.contains("今日无待办"),
+            "未加载时不应显示“今日无待办”：\n{out}"
+        );
+
+        assert!(!out.contains("⚑"), "未加载时不应显示待办标记：\n{out}");
+    }
+
+    #[test]
+
+    fn todo_indicator_counts_only_actionable_items() {
+
+        use crate::tasks::AssignmentItem;
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        // iClass: two of today's classes, one already signed.
+        let today = Local::now().date_naive().to_string();
+
+        app.courses = vec![
+            crate::model::CourseDetailItem {
+                name: "已签的课".to_string(),
+                course_sched_id: "1".to_string(),
+                date: today.clone(),
+                sign_status: "1".to_string(),
+                ..Default::default()
+            },
+            crate::model::CourseDetailItem {
+                name: "未签的课".to_string(),
+                course_sched_id: "2".to_string(),
+                date: today.clone(),
+                sign_status: "0".to_string(),
+                ..Default::default()
+            },
+            // Yesterday's class must not count toward today.
+            crate::model::CourseDetailItem {
+                name: "昨天的课".to_string(),
+                course_sched_id: "3".to_string(),
+                date: "2000-01-01".to_string(),
+                sign_status: "0".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        // Assignments: one open, one overdue, one already submitted.
+        app.schedule.tasks_loaded = true;
+
+        app.schedule.tasks = vec![
+            AssignmentItem {
+                title: "待交作业".to_string(),
+                status: "未提交".to_string(),
+                due_time: Some("2099-01-01 23:59".to_string()),
+                ..Default::default()
+            },
+            AssignmentItem {
+                title: "已过期".to_string(),
+                status: "未提交".to_string(),
+                due_time: Some("2000-01-01 23:59".to_string()),
+                ..Default::default()
+            },
+            AssignmentItem {
+                title: "已交作业".to_string(),
+                status: "已提交".to_string(),
+                due_time: Some("2099-01-01 23:59".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let summary = app.todo_summary();
+
+        assert_eq!(
+            summary.unsigned_classes,
+            Some(1),
+            "只应统计今天且未签到的课"
+        );
+
+        assert_eq!(
+            summary.pending_tasks,
+            Some(1),
+            "过期作业不再是待办，已交作业也不算"
+        );
+
+        let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+        assert!(out.contains("1未签到"), "应显示未签到课程数：\n{out}");
+
+        assert!(out.contains("1待交"), "应显示待交作业数：\n{out}");
+
+        // Zero-count sources are omitted rather than shown as "0 可签".
+        assert!(
+            !out.contains("0 未签到") && !out.contains("可签"),
+            "没有的事项不应出现在指示条里：\n{out}"
+        );
+    }
+
+    #[test]
+
+    fn todo_indicator_shows_a_clear_state_when_nothing_is_due() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        // Loaded, and genuinely nothing to do.
+        app.schedule.tasks_loaded = true;
+
+        app.courses.clear();
+
+        let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+        assert!(
+            out.contains("今日无待办"),
+            "已加载且无待办时应给出明确状态：\n{out}"
+        );
     }
 
     #[test]

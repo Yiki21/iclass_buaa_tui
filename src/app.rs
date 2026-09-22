@@ -164,6 +164,13 @@ pub struct ScheduleState {
 
     pub classrooms:          Vec<ClassroomRoom>,
     pub tasks:               Vec<AssignmentItem>,
+    /// Whether `tasks` reflects a completed fetch.
+    ///
+    /// Why:
+    /// An empty list means either "nothing due" or "never asked". The todo
+    /// indicator must not report zero pending assignments when the truth is
+    /// that assignments were never loaded.
+    pub tasks_loaded:        bool,
     pub academic_loading:    bool,
     /// Whether the assignment detail panel is open.
     pub show_task_detail:    bool,
@@ -765,6 +772,31 @@ pub struct EventEntry {
     pub message: String,
 }
 
+/// Counts of everything actionable right now, per source.
+///
+/// Why:
+/// `None` means the source was never loaded, which is a different fact from
+/// zero. The indicator renders the two differently so it cannot mislead.
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+
+pub struct TodoSummary {
+    pub unsigned_classes: Option<usize>,
+    pub pending_tasks:    Option<usize>,
+    pub signable_bykc:    Option<usize>,
+}
+
+impl TodoSummary {
+    /// Whether at least one source has been loaded.
+
+    pub fn any_loaded(&self) -> bool {
+
+        self.unsigned_classes.is_some()
+            || self.pending_tasks.is_some()
+            || self.signable_bykc.is_some()
+    }
+}
+
 /// A clickable region reported by the renderer.
 ///
 /// Why:
@@ -790,6 +822,12 @@ pub enum HotAction {
     CourseView(CourseView),
     /// Switch the BYKC view.
     BykcView(BykcView),
+    /// Jump to the assignments view, switching tab if needed.
+    ///
+    /// Why:
+    /// The todo indicator's "待交" item lives on the schedule tab's 作业 view,
+    /// which is two hops from anywhere else. One action does both hops.
+    CourseTasks,
     /// Select a row of the active list.
     ///
     /// How:
@@ -1341,6 +1379,85 @@ impl App {
         }
     }
 
+    /// Aggregates everything actionable right now into one summary.
+    ///
+    /// Why:
+    /// UBAA's home screen lists unsigned classes, pending assignments and
+    /// signable BYKC courses in one place. A dedicated page is overkill in a
+    /// terminal; the same facts belong in the top bar, visible on every tab,
+    /// so the user never has to go looking.
+    ///
+    /// How:
+    /// Each source is reported only when it has actually been loaded. A source
+    /// that was never fetched is `None`, not zero, so the indicator can never
+    /// claim "nothing pending" about data it does not have.
+
+    pub fn todo_summary(&self) -> TodoSummary {
+
+        let today = Local::now().date_naive().to_string();
+
+        // iClass: today's classes with a sign-in id that have not been signed.
+        let unsigned_classes = if self.courses.is_empty() {
+
+            None
+        } else {
+
+            Some(
+                self.courses
+                    .iter()
+                    .filter(|course| course.date == today)
+                    .filter(|course| !course.course_sched_id.trim().is_empty())
+                    .filter(|course| !course.signed())
+                    .count(),
+            )
+        };
+
+        // Assignments: unsubmitted and not yet past due.
+        let pending_tasks = if self.schedule.tasks_loaded {
+
+            let now = Local::now().naive_local();
+
+            Some(
+                self.schedule
+                    .tasks
+                    .iter()
+                    .filter(|task| task.status.contains("未提交") || task.status.contains("未作答"))
+                    .filter(|task| {
+
+                        task.due_time
+                            .as_deref()
+                            .and_then(crate::tasks::parse_deadline)
+                            .is_none_or(|deadline| deadline >= now)
+                    })
+                    .count(),
+            )
+        } else {
+
+            None
+        };
+
+        // BYKC: chosen courses the portal says can be signed in or out now.
+        let signable_bykc = if self.bykc.loaded {
+
+            Some(
+                self.bykc
+                    .chosen_courses
+                    .iter()
+                    .filter(|course| course.can_sign || course.can_sign_out)
+                    .count(),
+            )
+        } else {
+
+            None
+        };
+
+        TodoSummary {
+            unsigned_classes,
+            pending_tasks,
+            signable_bykc,
+        }
+    }
+
     /// Records a clickable region for the frame being drawn.
     ///
     /// Why:
@@ -1523,6 +1640,18 @@ impl App {
                 }
             }
             HotAction::BykcView(view) => self.bykc.set_view(view),
+            HotAction::CourseTasks => {
+
+                if self.active_tab != WorkspaceTab::Schedule {
+
+                    self.set_workspace_tab(WorkspaceTab::Schedule, tx);
+                }
+
+                if self.schedule.view != CourseView::Tasks {
+
+                    self.schedule.switch_view(CourseView::Tasks);
+                }
+            }
             HotAction::ListRow { index } => {
 
                 // The renderer already resolved the screen row to a real item,
@@ -1955,6 +2084,8 @@ impl App {
                     Ok(tasks) => {
 
                         self.schedule.tasks = tasks;
+
+                        self.schedule.tasks_loaded = true;
 
                         self.success(format!("作业已加载，共 {} 条", self.schedule.tasks.len()));
                     }
