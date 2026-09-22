@@ -16,6 +16,12 @@
 - 升级依赖修掉 Dependabot 报的 high 漏洞：`quinn-proto` 0.11.14 → 0.11.18（远程内存耗尽）、`rustls` 0.23.40 → 0.23.45（TLS 1.3 握手跨加密层接受消息）、`crossbeam-epoch` 0.9.18 → 0.9.21。`cargo audit` 现在无漏洞告警。
 - `rsa` 的 Marvin Attack 计时侧信道在 `.cargo/audit.toml` 里显式忽略并写明原因：本仓库只用它做公钥加密（BYKC 密码），不涉及私钥解密运算，没有可泄漏的私钥；上游无修复版本。
 
+### 修复
+
+- **Tab 键切不到全部页签**：`switch_workspace_tab` 里还留着一份写死的三个页签数组，所以顶栏能看到七个页签，但用 `tab` / `shift+tab` 只能在课表 / 签到 / 博雅之间循环。现在改为从 `WorkspaceTab::ALL` 生成，并加了遍历一整轮的回归测试。
+- **研讨室在 VPN 模式下报「未获取到研讨室 SSO Token」**：`sso/manageLogin` 与 `api/login` 被错误地走了 WebVPN（`d.buaa.edu.cn/...`），而 `sso_buaa_zhjs_token` 是投给 `cgyy.buaa.edu.cn` 的，于是既拿不到 cookie 也找不到它。现在与上游实现一致：这两个握手请求始终直连，cookie 也从直连地址读取。设置 `ICLASS_CGYY_DEBUG=1` 可打印实际存在的 cookie 名称。
+- **登录失败信息不再误导**：iClass 使用校内地址（`iclass.buaa.edu.cn` 解析到 `10.x`），校外网络会在 TLS 握手阶段被直接断开。此前这种情况只报「网络异常」并当作可重试；现在单独识别为「无法建立加密连接」且不再重试，并明确提示需要校园网或改用 WebVPN。
+
 ### 新增
 
 - 失败时输出稳定错误码：带 `--json` 调用失败会在 stderr 输出 `{ error, command, retryable, code }`，`code` 取值如 `not_authenticated` / `invalid_argument` / `rate_limited` / `upstream_timeout` / `account_locked` / `resource_unavailable` / `network_error` / `config_invalid` / `unknown`，并给出 `retryable`。调用方不必解析人类可读的错误文本就能决定重试还是重新登录。

@@ -1916,6 +1916,9 @@ fn classify_login_failure_kind(kind: &LoginFailureKind) -> (bool, &'static str) 
         LoginFailureKind::Network | LoginFailureKind::Timeout | LoginFailureKind::Dns => {
             (true, "transient-login-network")
         }
+        // Not retryable: the network cannot reach the host at all, so every
+        // attempt fails identically until the user changes networks.
+        LoginFailureKind::Unreachable => (false, "unreachable-host"),
         LoginFailureKind::Http | LoginFailureKind::IclassApi | LoginFailureKind::Unknown => {
             (true, "transient-login-upstream")
         }

@@ -1508,6 +1508,14 @@ fn diagnose_login_error(
     let summary = match kind {
         LoginFailureKind::Dns => format!("登录失败：DNS 解析失败，阶段: {stage}"),
         LoginFailureKind::Timeout => format!("登录失败：请求超时，阶段: {stage}"),
+        LoginFailureKind::Unreachable => {
+
+            format!(
+                "登录失败：无法建立到 iClass 服务器的加密连接，阶段: \
+                 {stage}。该服务使用校内地址（iclass.buaa.edu.cn 解析到 \
+                 10.x），当前网络访问不到它，或它在 TLS 握手阶段直接断开连接。"
+            )
+        }
         LoginFailureKind::Captcha => "登录失败：当前需要验证码".to_string(),
         LoginFailureKind::Credentials => "登录失败：账号或密码错误".to_string(),
         LoginFailureKind::SsoChanged => "登录失败：SSO 页面结构可能已变化".to_string(),
@@ -1589,6 +1597,19 @@ fn classify_login_failure(message: &str, http_status: Option<u16>) -> LoginFailu
         return LoginFailureKind::Http;
     }
 
+    // A TLS handshake that is reset or truncated means the host is not
+    // reachable from this network — a different problem from a transient
+    // fault, with a different remedy.
+    if lower.contains("unexpected eof")
+        || lower.contains("tls connect error")
+        || lower.contains("ssl routines")
+        || lower.contains("connection reset")
+        || lower.contains("os error 104")
+    {
+
+        return LoginFailureKind::Unreachable;
+    }
+
     if lower.contains("connect") || lower.contains("network") || lower.contains("tls") {
 
         return LoginFailureKind::Network;
@@ -1605,6 +1626,14 @@ fn login_suggestions(kind: LoginFailureKind) -> Vec<String> {
             vec![
                 "检查本机 DNS 与网络连接".to_string(),
                 "若在校外，请先连接 WebVPN".to_string(),
+            ]
+        }
+        LoginFailureKind::Unreachable => {
+
+            vec![
+                "确认已接入校园网；iclass.buaa.edu.cn 是校内地址，校外无法直连".to_string(),
+                "在校外或访客网络下改用在 WebVPN 模式下登录".to_string(),
+                "用 `doctor` 检查各上游服务的连通性".to_string(),
             ]
         }
         LoginFailureKind::Timeout | LoginFailureKind::Network => {
@@ -2501,6 +2530,45 @@ fn encode_component(value: &str) -> String {
     }
 
     encoded
+}
+
+#[cfg(test)]
+
+mod unreachable_tests {
+
+    use super::{LoginFailureKind, classify_login_failure};
+
+    #[test]
+
+    fn a_reset_tls_handshake_is_unreachable_not_transient() {
+
+        // The exact error curl and rustls report when a campus-only host is
+        // contacted from a network that cannot reach it.
+        let cases = [
+            "error:0A000126:SSL routines::unexpected eof while reading",
+            "tls connect error",
+            "connection reset by peer",
+        ];
+
+        for case in cases {
+
+            assert_eq!(
+                classify_login_failure(case, None),
+                LoginFailureKind::Unreachable,
+                "应识别为不可达: {case}"
+            );
+        }
+    }
+
+    #[test]
+
+    fn ordinary_timeouts_keep_their_own_kind() {
+
+        assert_eq!(
+            classify_login_failure("operation timed out", None),
+            LoginFailureKind::Timeout
+        );
+    }
 }
 
 #[cfg(test)]

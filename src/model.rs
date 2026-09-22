@@ -85,11 +85,19 @@ pub enum LoginStart {
     Captcha(LoginCaptchaChallenge),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 
 pub enum LoginFailureKind {
     Validation,
     Network,
+    /// The host cannot be reached from this network at all.
+    ///
+    /// Why:
+    /// Distinct from a transient network fault: the iClass host resolves to a
+    /// campus address, so a network without access to it fails every attempt
+    /// the same way. Retrying will not help, and telling the user "网络异常"
+    /// hides the actual remedy.
+    Unreachable,
     Timeout,
     Dns,
     Http,

@@ -249,7 +249,18 @@ impl IClassApi {
 
     pub async fn cgyy_login(&self) -> Result<String> {
 
-        let manage_url = cgyy_url(self.use_vpn, &format!("{BASE_URL}sso/manageLogin"));
+        // The SSO handshake is always direct, never through WebVPN, and the
+        // cookie is read back at the direct URL.
+        //
+        // Why:
+        // CGYY and the unified-auth SSO are both reachable from the campus
+        // network without WebVPN, and the service sets `sso_buaa_zhjs_token`
+        // on its own host during the redirect chain. Routing this request
+        // through d.buaa.edu.cn changes the host the cookie is issued for, so
+        // reading it back at the rewritten URL finds nothing and the login
+        // fails with "未获取到研讨室 SSO Token" — which is what happened in VPN
+        // mode. The reference implementation notes the same thing.
+        let manage_url = format!("{BASE_URL}sso/manageLogin");
 
         let _ = self
             .client
@@ -260,28 +271,46 @@ impl IClassApi {
 
         // `Jar` reads cookies only through the CookieStore trait, which returns
         // the whole `Cookie` header value for a URL.
-        let sso_token = {
+        let cookie_header = {
 
             use reqwest::cookie::CookieStore;
 
-            let base = reqwest::Url::parse(&cgyy_url(self.use_vpn, BASE_URL))?;
+            let base = reqwest::Url::parse(BASE_URL)?;
 
             self.session_cookie_jar()
                 .cookies(&base)
                 .and_then(|header| header.to_str().ok().map(str::to_string))
-        }
-        .and_then(|text| {
+        };
 
-            text.split(';')
+        // Which cookies are present is the difference between "the session is
+        // not authenticated" and "the cookie is on another path"; without this
+        // the failure is a single opaque message.
+        if std::env::var_os("ICLASS_CGYY_DEBUG").is_some() {
+
+            let names: Vec<&str> = cookie_header
+                .as_deref()
+                .unwrap_or("")
+                .split(';')
                 .filter_map(|pair| pair.trim().split_once('='))
-                .find(|(name, _)| *name == SSO_COOKIE_NAME)
-                .map(|(_, value)| value.to_string())
-        })
-        .ok_or_else(|| anyhow!("未获取到研讨室 SSO Token，请重新登录统一认证"))?;
+                .map(|(name, _)| name)
+                .collect();
+
+            eprintln!("研讨室 Cookie 名称: {names:?}");
+        }
+
+        let sso_token = cookie_header
+            .and_then(|text| {
+
+                text.split(';')
+                    .filter_map(|pair| pair.trim().split_once('='))
+                    .find(|(name, _)| *name == SSO_COOKIE_NAME)
+                    .map(|(_, value)| value.to_string())
+            })
+            .ok_or_else(|| anyhow!("未获取到研讨室 SSO Token，请重新登录统一认证"))?;
 
         let response = self
             .client
-            .post(cgyy_url(self.use_vpn, &format!("{BASE_URL}api/login")))
+            .post(format!("{BASE_URL}api/login"))
             .header("Sso-Token", sso_token)
             .header("app-key", APP_KEY)
             .send()
