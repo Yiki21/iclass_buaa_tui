@@ -5657,6 +5657,49 @@ mod tests {
 
     #[test]
 
+    fn tab_key_reaches_every_tab_not_just_the_first_three() {
+
+        // A hardcoded tab array in the cycling function meant the later tabs
+        // were unreachable by keyboard; this walks a full cycle.
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut seen = vec![app.active_tab];
+
+        for _ in 0..WorkspaceTab::ALL.len() - 1 {
+
+            // The workspace screen is required: switching to a tab that needs a
+            // session would bounce back to the login screen, which is correct
+            // behaviour but not what this test is about.
+            app.screen = Screen::Workspace;
+
+            app.handle_key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Tab,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+                &tx,
+            );
+
+            seen.push(app.active_tab);
+        }
+
+        for tab in WorkspaceTab::ALL {
+
+            assert!(
+                seen.contains(&tab),
+                "tab 键无法到达 {tab:?}；实际经过 {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+
     fn every_tab_renders_without_panicking() {
 
         // Each tab has its own layout; an empty state must still draw.

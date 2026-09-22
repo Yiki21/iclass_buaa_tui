@@ -3280,11 +3280,9 @@ impl App {
 
     fn switch_workspace_tab(&mut self, delta: isize, tx: &UnboundedSender<AsyncEvent>) {
 
-        let tabs = [
-            WorkspaceTab::Schedule,
-            WorkspaceTab::IClass,
-            WorkspaceTab::Bykc,
-        ];
+        // Built from the enum, not a local list: a hardcoded array here meant
+        // tab/shift+tab could never reach the tabs added later.
+        let tabs = WorkspaceTab::ALL;
 
         let current_index = tabs
             .iter()
