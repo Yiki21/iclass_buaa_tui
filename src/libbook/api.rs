@@ -17,6 +17,15 @@ use super::crypto::{EncryptedReserveBody, encrypt_reserve};
 use crate::constants::to_webvpn_url;
 use crate::iclass::IClassApi;
 
+/// User agent the service expects.
+///
+/// Why:
+/// It answers requests from a browser-like client and appears to reject some
+/// others outright, so the value matches what the site itself is served to.
+
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, \
+                          like Gecko) Chrome/134.0.0.0 Safari/537.36";
+
 const BASE_URL: &str = "https://booking.lib.buaa.edu.cn";
 
 /// Intermediate certificate the library server fails to send.
@@ -148,7 +157,11 @@ impl IClassApi {
             .context("内置的图书馆中间证书无法解析")?;
 
         reqwest::Client::builder()
-            .user_agent(concat!("iclass_buaa_tui/", env!("CARGO_PKG_VERSION")))
+            // The shared cookie jar is required: the CAS handshake deposits the
+            // session cookies the login POST must present, and a fresh jar
+            // would arrive without them.
+            .cookie_provider(self.session_cookie_jar())
+            .user_agent(USER_AGENT)
             .add_root_certificate(certificate)
             .build()
             .context("构建图书馆专用 HTTP 客户端失败")
@@ -224,8 +237,12 @@ impl IClassApi {
             eprintln!("图书馆 CAS ticket 长度: {}", ticket.len());
         }
 
+        // The ticket arrives percent-encoded from the redirect; the endpoint
+        // expects the decoded value.
+        let decoded = percent_decode(&ticket);
+
         let response = self
-            .libbook_post("login/user", json!({ "cas": ticket }), None)
+            .libbook_post("login/user", json!({ "cas": decoded }), None)
             .await
             .context("图书馆登录失败")?;
 
@@ -585,6 +602,44 @@ fn libbook_url(use_vpn: bool, raw: &str) -> String {
 
         raw.to_string()
     }
+}
+
+/// Decodes percent escapes, leaving other characters alone.
+///
+/// Why:
+/// The ticket comes back percent-encoded in the redirect URL. Posting the
+/// encoded form makes the service reject an otherwise valid ticket.
+
+fn percent_decode(value: &str) -> String {
+
+    let bytes = value.as_bytes();
+
+    let mut output = Vec::with_capacity(bytes.len());
+
+    let mut index = 0;
+
+    while index < bytes.len() {
+
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+
+            let hex = &value[index + 1..index + 3];
+
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+
+                output.push(byte);
+
+                index += 3;
+
+                continue;
+            }
+        }
+
+        output.push(bytes[index]);
+
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 /// Pulls the CAS ticket out of a URL.
