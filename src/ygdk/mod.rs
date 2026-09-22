@@ -93,12 +93,16 @@ impl Count {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 
 pub struct Record {
-    pub id:        i64,
-    pub item_name: String,
-    pub place:     String,
-    pub start:     Option<i64>,
-    pub end:       Option<i64>,
-    pub create_at: String,
+    pub id:          i64,
+    pub item_name:   String,
+    pub place:       String,
+    pub start:       Option<i64>,
+    pub end:         Option<i64>,
+    pub create_at:   String,
+    /// Start time as the service formats it (HH:MM).
+    pub start_label: String,
+    /// End time as the service formats it (HH:MM).
+    pub end_label:   String,
 }
 
 /// Result of a submitted clock-in.
@@ -137,7 +141,7 @@ impl IClassApi {
 
         let value = unwrap(&body)?;
 
-        let data = value.get("data").cloned().unwrap_or(value);
+        let data = value;
 
         let uid = data
             .get("uid")
@@ -360,21 +364,34 @@ impl IClassApi {
                     .filter_map(|row| {
 
                         Some(Record {
-                            id:        flexible_i64(row.get("record_id")?)?,
-                            item_name: row
-                                .get("item_name")
+                            id:          flexible_i64(row.get("record_id")?)?,
+                            // The service names this `item_fmt`, not `item_name`.
+                            item_name:   row
+                                .get("item_fmt")
+                                .or_else(|| row.get("item_name"))
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
-                            place:     row
+                            place:       row
                                 .get("place")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
-                            start:     row.get("start_time").and_then(flexible_i64),
-                            end:       row.get("end_time").and_then(flexible_i64),
-                            create_at: row
+                            start:       row.get("start_time").and_then(flexible_i64),
+                            end:         row.get("end_time").and_then(flexible_i64),
+                            create_at:   row
                                 .get("create_time_fmt")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            // Wall-clock labels the service formats itself.
+                            start_label: row
+                                .get("start_time_fmt")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            end_label:   row
+                                .get("end_time_fmt")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
@@ -650,8 +667,16 @@ fn unwrap(body: &str) -> Result<Value> {
         bail!("{message} (code={code})");
     }
 
-    // Some responses nest the payload; callers read from the unwrapped value.
-    Ok(value.get("data").cloned().unwrap_or(value))
+    // The service nests payloads one level down, and the level's name varies:
+    // list endpoints answer `result`, the login answers `result.data`. Both are
+    // unwrapped so callers see the same shape.
+    let result = value.get("result").cloned().unwrap_or(value);
+
+    Ok(result
+        .get("data")
+        .cloned()
+        .filter(|data| data.is_object() || data.is_array())
+        .unwrap_or(result))
 }
 
 fn flexible_i64(value: &Value) -> Option<i64> {

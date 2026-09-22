@@ -176,13 +176,27 @@ pub(crate) async fn clockin_command(args: ClockinArgs) -> Result<()> {
 
             for record in &records {
 
+                // Prefer the labels the service formats; fall back to the raw
+                // epoch when it does not send them.
+                let span = if record.start_label.is_empty() {
+
+                    format!(
+                        "{} ~ {}",
+                        format_stamp(record.start),
+                        format_stamp(record.end)
+                    )
+                } else {
+
+                    format!("{} ~ {}", record.start_label, record.end_label)
+                };
+
                 println!(
-                    "\t{}\t{}\t{}\t{} ~ {}",
+                    "\t{}\t{:<10}\t{:<8}\t{}  {}",
                     record.id,
                     record.item_name,
                     dash(&record.place),
-                    format_stamp(record.start),
-                    format_stamp(record.end),
+                    record.create_at,
+                    span,
                 );
             }
         }
