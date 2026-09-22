@@ -26,7 +26,7 @@ use std::{
 use anyhow::Result;
 use app::{App, AsyncEvent, spawn_version_check};
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -177,7 +177,7 @@ async fn run_app() -> Result<()> {
 
     let mut stdout = io::stdout();
 
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
 
@@ -193,7 +193,11 @@ async fn run_app() -> Result<()> {
 
     disable_raw_mode()?;
 
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
 
     terminal.show_cursor()?;
 
@@ -230,12 +234,13 @@ fn event_loop(
             break;
         }
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
+        if event::poll(Duration::from_millis(100))? {
 
-            app.handle_key(key, tx);
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key, tx),
+                Event::Mouse(mouse) => app.handle_mouse(mouse, tx),
+                _ => {}
+            }
         }
     }
 

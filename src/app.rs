@@ -1,10 +1,12 @@
 //! Application state, async event routing, and keyboard-driven TUI behavior.
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use qrcode::{EcLevel, QrCode, render::svg};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
@@ -742,11 +744,54 @@ pub struct EventEntry {
     pub message: String,
 }
 
+/// A clickable region reported by the renderer.
+///
+/// Why:
+/// Mouse clicks arrive as absolute screen coordinates, but only the renderer
+/// knows where things ended up. Recording regions as they are drawn means the
+/// layout is computed exactly once, in the drawing code, and hit testing can
+/// never drift out of sync with what is on screen.
+#[derive(Clone, Debug, PartialEq)]
+
+pub struct Hotspot {
+    pub area:   Rect,
+    pub action: HotAction,
+}
+
+/// What a click inside a [`Hotspot`] should do.
+
+#[derive(Clone, Debug, PartialEq)]
+
+pub enum HotAction {
+    /// Switch the workspace tab.
+    WorkspaceTab(WorkspaceTab),
+    /// Switch the course view inside the schedule tab.
+    CourseView(CourseView),
+    /// Switch the BYKC view.
+    BykcView(BykcView),
+    /// Select a row of the active list.
+    ///
+    /// How:
+    /// `index` is absolute: a position in the underlying data the tab selects
+    /// from. For the iClass grid that is a course index across the whole week;
+    /// for a flat list it is a row index. Both name a real item, so a click can
+    /// never select something that is not there.
+    ListRow { index: usize },
+}
+
 #[derive(Debug)]
 
 pub struct App {
     pub screen:                Screen,
     pub active_tab:            WorkspaceTab,
+    /// Clickable regions recorded during the last render.
+    ///
+    /// Why:
+    /// Stored on `App` because the renderer borrows it immutably while the
+    /// event loop needs the regions to route a click. Interior mutability keeps
+    /// that one-way flow intact instead of threading a collector through every
+    /// render function.
+    pub hotspots:              RefCell<Vec<Hotspot>>,
     /// Frame counter advanced on every tick.
     ///
     /// Why:
@@ -781,6 +826,8 @@ pub struct App {
     pub doctor_report:         Option<DoctorReport>,
     pub show_doctor_details:   bool,
     pub show_event_log:        bool,
+    /// First visible line of the event log popup.
+    pub event_log_offset:      usize,
     next_qr_refresh_at:        Option<Instant>,
 }
 
@@ -791,6 +838,7 @@ impl Default for App {
             screen:                Screen::Login,
             active_tab:            WorkspaceTab::IClass,
             tick:                  0,
+            hotspots:              RefCell::new(Vec::new()),
             login:                 LoginForm::default(),
             session:               None,
             courses:               Vec::new(),
@@ -822,6 +870,7 @@ impl Default for App {
             doctor_report:         None,
             show_doctor_details:   false,
             show_event_log:        false,
+            event_log_offset:      0,
             next_qr_refresh_at:    None,
         }
     }
@@ -1219,6 +1268,218 @@ impl App {
             Screen::Login => self.handle_login_key(key, tx),
             Screen::Workspace => self.handle_workspace_key(key, tx),
         }
+    }
+
+    /// Records a clickable region for the frame being drawn.
+    ///
+    /// Why:
+    /// Called from the renderer, which knows the real geometry. Clearing happens
+    /// once per frame.
+
+    pub fn record_hotspot(&self, area: Rect, action: HotAction) {
+
+        self.hotspots.borrow_mut().push(Hotspot { area, action });
+    }
+
+    /// Forgets every region recorded for the previous frame.
+
+    pub fn clear_hotspots(&self) {
+
+        self.hotspots.borrow_mut().clear();
+    }
+
+    /// Resolves a screen position to the action it lands on.
+
+    fn hotspot_at(&self, column: u16, row: u16) -> Option<HotAction> {
+
+        let hotspots = self.hotspots.borrow();
+
+        hotspots
+            .iter()
+            .rev()
+            .find(|hotspot| {
+
+                column >= hotspot.area.x
+                    && column < hotspot.area.x + hotspot.area.width
+                    && row >= hotspot.area.y
+                    && row < hotspot.area.y + hotspot.area.height
+            })
+            .map(|hotspot| hotspot.action.clone())
+    }
+
+    /// Number of selectable rows in the list the active tab is showing.
+
+    fn active_list_len(&self) -> usize {
+
+        match self.active_tab {
+            WorkspaceTab::Schedule => {
+                match self.schedule.view {
+                    CourseView::Today => self.schedule.today_entries().len(),
+                    CourseView::Schedule => self.schedule.visible_entries().len(),
+                    CourseView::Exams => self.schedule.exams.len(),
+                    CourseView::Grades => self.schedule.grades.len(),
+                    CourseView::Classrooms => self.schedule.classrooms.len(),
+                    CourseView::Tasks => self.schedule.tasks.len(),
+                }
+            }
+            WorkspaceTab::IClass => self.visible_courses_len(),
+            WorkspaceTab::Bykc => {
+                match self.bykc.view {
+                    BykcView::Courses => self.bykc.courses.len(),
+                    BykcView::Chosen => self.bykc.chosen_courses.len(),
+                }
+            }
+        }
+    }
+
+    /// Selects a row by position in the active list.
+
+    fn select_list_row(&mut self, index: usize) {
+
+        if index >= self.active_list_len() {
+
+            return;
+        }
+
+        match self.active_tab {
+            WorkspaceTab::Schedule => self.schedule.selected_entry = index,
+            WorkspaceTab::IClass => self.selected = index,
+            WorkspaceTab::Bykc => {
+                match self.bykc.view {
+                    BykcView::Courses => self.bykc.selected_course = index,
+                    BykcView::Chosen => self.bykc.selected_chosen = index,
+                }
+            }
+        }
+    }
+
+    /// Routes a mouse event.
+    ///
+    /// How:
+    /// Clicks resolve through the regions the renderer recorded, so hit testing
+    /// and drawing can never disagree. The wheel falls back to the same
+    /// movement the arrow keys perform, which keeps every list scrollable
+    /// without per-widget handling.
+
+    pub fn handle_mouse(&mut self, event: MouseEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.busy {
+
+            return;
+        }
+
+        // A popup owns the mouse while it is open.
+        if self.show_event_log {
+
+            match event.kind {
+                MouseEventKind::ScrollDown => self.scroll_event_log(3),
+                MouseEventKind::ScrollUp => self.scroll_event_log(-3),
+                MouseEventKind::Down(MouseButton::Left) => self.show_event_log = false,
+                _ => {}
+            }
+
+            return;
+        }
+
+        if self.active_tab == WorkspaceTab::Bykc && self.bykc.show_detail_popup {
+
+            match event.kind {
+                MouseEventKind::ScrollDown => {
+
+                    self.bykc.detail_scroll = self.bykc.detail_scroll.saturating_add(3);
+                }
+                MouseEventKind::ScrollUp => {
+
+                    self.bykc.detail_scroll = self.bykc.detail_scroll.saturating_sub(3);
+                }
+                MouseEventKind::Down(MouseButton::Left) => self.bykc.show_detail_popup = false,
+                _ => {}
+            }
+
+            return;
+        }
+
+        if self.show_help {
+
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+
+                self.show_help = false;
+            }
+
+            return;
+        }
+
+        match event.kind {
+            MouseEventKind::ScrollDown => self.scroll_active(-1, tx),
+            MouseEventKind::ScrollUp => self.scroll_active(1, tx),
+            MouseEventKind::Down(MouseButton::Left) => {
+
+                let Some(action) = self.hotspot_at(event.column, event.row) else {
+
+                    return;
+                };
+
+                self.apply_hot_action(action, tx);
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_hot_action(&mut self, action: HotAction, tx: &UnboundedSender<AsyncEvent>) {
+
+        match action {
+            HotAction::WorkspaceTab(tab) => {
+                if tab != self.active_tab {
+
+                    self.set_workspace_tab(tab, tx);
+                }
+            }
+            HotAction::CourseView(view) => {
+                if view != self.schedule.view {
+
+                    self.schedule.switch_view(view);
+
+                    if matches!(
+                        view,
+                        CourseView::Exams
+                            | CourseView::Grades
+                            | CourseView::Classrooms
+                            | CourseView::Tasks
+                    ) {
+
+                        self.refresh_academic_view(tx);
+                    }
+                }
+            }
+            HotAction::BykcView(view) => self.bykc.set_view(view),
+            HotAction::ListRow { index } => {
+
+                // The renderer already resolved the screen row to a real item,
+                // including any list scroll offset, so this is a plain lookup.
+                self.select_list_row(index);
+            }
+        }
+    }
+
+    /// Moves the active list, or scrolls the BYKC detail when it is showing.
+
+    fn scroll_active(&mut self, delta: isize, _tx: &UnboundedSender<AsyncEvent>) {
+
+        match self.active_tab {
+            WorkspaceTab::Schedule => self.schedule.move_entry(delta),
+            WorkspaceTab::IClass => {
+
+                let len = self.visible_courses_len();
+
+                self.selected = clamp_step(self.selected, len, delta);
+            }
+            WorkspaceTab::Bykc => self.bykc.move_selection(delta),
+        }
+    }
+
+    fn scroll_event_log(&mut self, delta: isize) {
+
+        self.event_log_offset = clamp_step(self.event_log_offset, self.event_log.len(), delta);
     }
 
     pub fn handle_tick(&mut self) {
@@ -1771,7 +2032,18 @@ impl App {
         let next_index =
             ((current_index as isize + delta).rem_euclid(tabs.len() as isize)) as usize;
 
-        self.active_tab = tabs[next_index];
+        self.set_workspace_tab(tabs[next_index], tx);
+    }
+
+    /// Switches to a specific tab and runs the side effects that switch implies.
+    ///
+    /// Why:
+    /// The tab keys and a mouse click on a tab must leave the app in exactly the
+    /// same state; keeping the effects here means neither path can drift.
+
+    fn set_workspace_tab(&mut self, tab: WorkspaceTab, tx: &UnboundedSender<AsyncEvent>) {
+
+        self.active_tab = tab;
 
         if self.active_tab != WorkspaceTab::IClass {
 

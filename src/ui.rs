@@ -11,7 +11,9 @@ use ratatui::{
 };
 use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
-use crate::app::{App, BykcView, CourseView, EventLevel, LoginFocus, QrMode, Screen, WorkspaceTab};
+use crate::app::{
+    App, BykcView, CourseView, EventLevel, HotAction, LoginFocus, QrMode, Screen, WorkspaceTab,
+};
 use crate::bykc::can_deselect_bykc_course;
 use crate::theme;
 
@@ -25,6 +27,10 @@ const QR_MAX_MODULE_SCALE: u16 = 1;
 /// across the screen-specific renderers.
 
 pub fn render(frame: &mut Frame, app: &App) {
+
+    // Regions are recomputed from scratch each frame; a stale one would route a
+    // click to whatever used to be there.
+    app.clear_hotspots();
 
     match app.screen {
         Screen::Login => render_login(frame, app),
@@ -328,7 +334,9 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
     let [tabs_area, identity_area] =
         Layout::horizontal([Constraint::Min(30), Constraint::Length(48)]).areas(area);
 
-    let mut spans = vec![Span::styled(" iClass BUAA  ", theme::title_style())];
+    let brand = " iClass BUAA  ";
+
+    let mut spans = vec![Span::styled(brand, theme::title_style())];
 
     let tabs = [
         (WorkspaceTab::Schedule, app.schedule.portal_label()),
@@ -336,17 +344,38 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
         (WorkspaceTab::Bykc, "BYKC"),
     ];
 
+    // Track each label's columns so the same text the user sees is what they
+    // can click. Widths are measured in display cells, which is what the
+    // terminal counts.
+    let mut column = tabs_area.x + display_width(brand) as u16;
+
     for (tab, label) in tabs {
+
+        let text = format!(" {label} ");
+
+        let width = display_width(&text) as u16;
 
         if tab == app.active_tab {
 
-            spans.push(Span::styled(format!(" {label} "), theme::selection_style()));
+            spans.push(Span::styled(text, theme::selection_style()));
         } else {
 
-            spans.push(Span::styled(format!(" {label} "), theme::muted_style()));
+            spans.push(Span::styled(text, theme::muted_style()));
         }
 
         spans.push(Span::raw(" "));
+
+        app.record_hotspot(
+            Rect {
+                x: column,
+                y: tabs_area.y,
+                width,
+                height: 1,
+            },
+            HotAction::WorkspaceTab(tab),
+        );
+
+        column += width + 1;
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
@@ -642,9 +671,18 @@ fn render_course_nav(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = Vec::new();
 
+    // Track each item's columns so the label the user sees is what they click.
+    let mut column = area.x;
+
     for (view, key, label) in views {
 
-        if view == app.schedule.view {
+        let selected = view == app.schedule.view;
+
+        // Both branches draw " {key} {label} " worth of cells; only the styling
+        // differs. The hotspot therefore always covers the whole item.
+        let item_width = display_width(&format!(" {key} {label} ")) as u16;
+
+        if selected {
 
             spans.push(Span::styled(
                 format!(" {key} {label} "),
@@ -658,6 +696,18 @@ fn render_course_nav(frame: &mut Frame, area: Rect, app: &App) {
         }
 
         spans.push(Span::raw(" "));
+
+        app.record_hotspot(
+            Rect {
+                x:      column,
+                y:      area.y,
+                width:  item_width,
+                height: 1,
+            },
+            HotAction::CourseView(view),
+        );
+
+        column += item_width + 1;
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -705,6 +755,40 @@ fn course_layout(area: Rect, footer_rows: u16) -> [Rect; 3] {
     .areas(area)
 }
 
+/// Display width of a string in terminal cells.
+///
+/// Why:
+/// Clickable regions are measured in cells, and a CJK glyph occupies two. Using
+/// byte length or character count would put every hotspot after a Chinese label
+/// in the wrong place.
+
+fn display_width(text: &str) -> usize {
+
+    text.chars()
+        .map(|character| {
+
+            let code = character as u32;
+
+            // CJK, fullwidth forms, and the common wide ranges.
+            if (0x1100..=0x115F).contains(&code)
+                || (0x2E80..=0xA4CF).contains(&code)
+                || (0xAC00..=0xD7A3).contains(&code)
+                || (0xF900..=0xFAFF).contains(&code)
+                || (0xFE30..=0xFE6F).contains(&code)
+                || (0xFF00..=0xFF60).contains(&code)
+                || (0xFFE0..=0xFFE6).contains(&code)
+                || (0x20000..=0x3FFFD).contains(&code)
+            {
+
+                2
+            } else {
+
+                1
+            }
+        })
+        .sum()
+}
+
 /// One summary row above a list view, replacing the old header box.
 
 fn render_view_summary(frame: &mut Frame, area: Rect, spans: Vec<Span<'static>>) {
@@ -737,6 +821,43 @@ fn empty_row(
             format!(" {empty_label}"),
             theme::muted_style(),
         )))
+    }
+}
+
+/// Records one clickable region per visible list row.
+///
+/// Why:
+/// Mapping a click to a list index needs the row height and the scroll offset,
+/// both of which live here. Recording per-row lets the click handler stay a
+/// lookup instead of re-deriving list geometry.
+///
+/// How:
+/// `body` is the list's drawable area, `offset` the index of its first visible
+/// row, and `count` how many rows exist. Rows past the area are not recorded,
+/// since they cannot be clicked.
+
+fn record_list_rows(app: &App, body: Rect, offset: usize, count: usize) {
+
+    if body.height == 0 || count == 0 {
+
+        return;
+    }
+
+    let visible = (body.height as usize).min(count.saturating_sub(offset));
+
+    for row in 0..visible {
+
+        app.record_hotspot(
+            Rect {
+                x:      body.x,
+                y:      body.y + row as u16,
+                width:  body.width,
+                height: 1,
+            },
+            HotAction::ListRow {
+                index: offset + row,
+            },
+        );
     }
 }
 
@@ -1069,6 +1190,8 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
+    record_list_rows(app, list_area, 0, entries.len());
+
     frame.render_widget(List::new(items), list_area);
 
     render_key_hint(
@@ -1139,6 +1262,8 @@ fn render_exams(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect()
     };
+
+    record_list_rows(app, list_area, 0, app.schedule.exams.len());
 
     frame.render_widget(List::new(items), list_area);
 
@@ -1221,6 +1346,8 @@ fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
+    record_list_rows(app, list_area, 0, app.schedule.grades.len());
+
     frame.render_widget(List::new(items), list_area);
 
     render_key_hint(frame, footer, "r 刷新");
@@ -1285,6 +1412,8 @@ fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect()
     };
+
+    record_list_rows(app, list_area, 0, app.schedule.classrooms.len());
 
     frame.render_widget(List::new(items), list_area);
 
@@ -1377,6 +1506,8 @@ fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect()
     };
+
+    record_list_rows(app, list_area, 0, app.schedule.tasks.len());
 
     frame.render_widget(List::new(items), list_area);
 
@@ -1566,6 +1697,31 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
         let mut list_state = ListState::default().with_selected(selected_in_day);
 
         frame.render_stateful_widget(day_list, *column, &mut list_state);
+
+        // This grid is seven independent lists, so a flat row index would be
+        // meaningless. Record each visible row as the absolute index of the
+        // course it shows, offset by however far ListState scrolled.
+        let body = Block::default().borders(Borders::ALL).inner(*column);
+
+        let offset = list_state.offset();
+
+        let visible = (body.height as usize).min(courses_in_day.len().saturating_sub(offset));
+
+        for row in 0..visible {
+
+            if let Some(absolute) = courses_in_day.get(offset + row) {
+
+                app.record_hotspot(
+                    Rect {
+                        x:      body.x,
+                        y:      body.y + row as u16,
+                        width:  body.width,
+                        height: 1,
+                    },
+                    HotAction::ListRow { index: *absolute },
+                );
+            }
+        }
     }
 
     let detail_lines = if let Some(course) = app.selected_course() {
@@ -1661,7 +1817,11 @@ fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = Vec::new();
 
+    let mut column = nav.x;
+
     for (view, key, label) in views {
+
+        let item_width = display_width(&format!(" {key} {label} ")) as u16;
 
         if view == app.bykc.view {
 
@@ -1677,6 +1837,18 @@ fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
         }
 
         spans.push(Span::raw(" "));
+
+        app.record_hotspot(
+            Rect {
+                x:      column,
+                y:      nav.y,
+                width:  item_width,
+                height: 1,
+            },
+            HotAction::BykcView(view),
+        );
+
+        column += item_width + 1;
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), nav);
@@ -1770,6 +1942,13 @@ fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
         .with_selected((!app.bykc.courses.is_empty()).then_some(app.bykc.selected_course));
 
     frame.render_stateful_widget(list, area, &mut state);
+
+    // ListState scrolls to keep the selection visible, so the first row on
+    // screen is whatever offset it settled on, not zero. Read it back after
+    // rendering so click targets line up with what was actually drawn.
+    let body = Block::default().borders(Borders::ALL).inner(area);
+
+    record_list_rows(app, body, state.offset(), app.bykc.courses.len());
 }
 
 fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
@@ -1830,6 +2009,10 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
         .with_selected((!app.bykc.chosen_courses.is_empty()).then_some(app.bykc.selected_chosen));
 
     frame.render_stateful_widget(list, area, &mut state);
+
+    let body = Block::default().borders(Borders::ALL).inner(area);
+
+    record_list_rows(app, body, state.offset(), app.bykc.chosen_courses.len());
 }
 
 /// Renders the inline BYKC summary under the course list.
@@ -2638,8 +2821,15 @@ fn render_event_log_popup(frame: &mut Frame, app: &App) {
     lines.push(Line::from("按 e / q / esc 关闭 | y 复制最近错误 | C 清空"));
 
     let popup = Paragraph::new(lines)
-        .block(Block::default().title("事件日志").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
+        .block(
+            Block::default()
+                .title("事件日志")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER_FOCUS))
+                .title_style(theme::title_style()),
+        )
+        .wrap(Wrap { trim: true })
+        .scroll((app.event_log_offset as u16, 0));
 
     frame.render_widget(popup, area);
 }
@@ -2967,6 +3157,191 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Renders into `app` so hotspots land on it, then returns the text.
+
+    fn render_into(app: &App, width: u16, height: u16) -> String {
+
+        render_text(width, height, |frame| render_workspace(frame, app))
+    }
+
+    #[test]
+
+    fn tab_hotspots_cover_the_labels_that_are_drawn() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        let width = 100;
+
+        let output = render_into(&app, width, 30);
+
+        let hotspots = app.hotspots.borrow().clone();
+
+        let tab_hotspots: Vec<_> = hotspots
+            .iter()
+            .filter(|hotspot| matches!(hotspot.action, HotAction::WorkspaceTab(_)))
+            .collect();
+
+        assert_eq!(tab_hotspots.len(), 3, "应有三个页签热区：\n{output}");
+
+        for hotspot in &tab_hotspots {
+
+            assert_eq!(hotspot.area.y, 0, "页签应在第一行");
+
+            assert_eq!(hotspot.area.height, 1);
+
+            // Every hotspot must sit inside the drawn row.
+            assert!(
+                hotspot.area.x + hotspot.area.width <= width,
+                "热区超出屏幕：{:?}",
+                hotspot.area
+            );
+        }
+
+        // Hotspots must not overlap each other.
+        for pair in tab_hotspots.windows(2) {
+
+            let (left, right) = (pair[0], pair[1]);
+
+            assert!(
+                left.area.x + left.area.width <= right.area.x,
+                "页签热区重叠：{:?} 与 {:?}",
+                left.area,
+                right.area
+            );
+        }
+    }
+
+    #[test]
+
+    fn tab_hotspot_starts_after_the_brand_text() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        render_into(&app, 100, 30);
+
+        let hotspots = app.hotspots.borrow().clone();
+
+        let first = hotspots
+            .iter()
+            .find(|hotspot| matches!(hotspot.action, HotAction::WorkspaceTab(_)))
+            .expect("应有页签热区");
+
+        // " iClass BUAA  " is 14 cells, so the first tab label starts there.
+        assert_eq!(
+            first.area.x, 14,
+            "首个页签热区应紧接应用名之后：{:?}",
+            first.area
+        );
+    }
+
+    #[test]
+
+    fn course_nav_hotspots_cover_all_six_views() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        render_into(&app, 100, 30);
+
+        let hotspots = app.hotspots.borrow().clone();
+
+        let nav: Vec<_> = hotspots
+            .iter()
+            .filter(|hotspot| matches!(hotspot.action, HotAction::CourseView(_)))
+            .collect();
+
+        assert_eq!(nav.len(), 6, "六个课程视图都应有热区");
+
+        for pair in nav.windows(2) {
+
+            assert!(
+                pair[0].area.x + pair[0].area.width <= pair[1].area.x,
+                "导航热区重叠：{:?} 与 {:?}",
+                pair[0].area,
+                pair[1].area
+            );
+        }
+    }
+
+    #[test]
+
+    fn clicking_a_tab_hotspot_switches_the_tab() {
+
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::IClass;
+
+        render_into(&app, 100, 30);
+
+        // Find the BYKC tab's recorded region and click its first cell.
+        let target = app
+            .hotspots
+            .borrow()
+            .iter()
+            .find(|hotspot| hotspot.action == HotAction::WorkspaceTab(WorkspaceTab::Bykc))
+            .map(|hotspot| hotspot.area)
+            .expect("应有 BYKC 页签热区");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.handle_mouse(
+            MouseEvent {
+                kind:      MouseEventKind::Down(MouseButton::Left),
+                column:    target.x,
+                row:       target.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &tx,
+        );
+
+        assert_eq!(app.active_tab, WorkspaceTab::Bykc, "点击页签应切换到 BYKC");
+    }
+
+    #[test]
+
+    fn clicking_outside_any_hotspot_does_nothing() {
+
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::IClass;
+
+        render_into(&app, 100, 30);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Bottom-right corner of the content frame: border, no widget.
+        app.handle_mouse(
+            MouseEvent {
+                kind:      MouseEventKind::Down(MouseButton::Left),
+                column:    99,
+                row:       28,
+                modifiers: KeyModifiers::NONE,
+            },
+            &tx,
+        );
+
+        assert_eq!(
+            app.active_tab,
+            WorkspaceTab::IClass,
+            "空白处点击不应改变状态"
+        );
     }
 
     #[test]
