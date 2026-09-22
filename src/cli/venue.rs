@@ -202,6 +202,28 @@ pub(crate) async fn venue_reserve_command(args: VenueReserveArgs) -> Result<()> 
         joiners:       args.joiner_names.clone(),
     };
 
+    if args.json && !args.yes {
+
+        // A dry run still reports what would happen, so an agent can plan
+        // without claiming a room.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": "venue-reserve",
+                "submitted": false,
+                "would_reserve": {
+                    "venue_site_id": request.venue_site_id,
+                    "space_id": request.space_id,
+                    "date": request.date,
+                    "slots": request.time_ids,
+                },
+                "hint": "加上 --yes 才会真正提交预约",
+            }))?
+        );
+
+        return Ok(());
+    }
+
     describe_reservation(&day, &request);
 
     if !args.yes {
@@ -218,6 +240,24 @@ pub(crate) async fn venue_reserve_command(args: VenueReserveArgs) -> Result<()> 
         .await
         .map_err(venue_error)
         .context("研讨室预约失败")?;
+
+    if args.json {
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": "venue-reserve",
+                "submitted": true,
+                "order_id": order.id,
+                "room": order.space_name,
+                "date": order.reservation_date.clone().unwrap_or_else(|| args.date.clone()),
+                "slots": args.slots,
+                "confirmed": args.yes,
+            }))?
+        );
+
+        return Ok(());
+    }
 
     println!();
 

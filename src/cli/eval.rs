@@ -197,6 +197,33 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
 
     if !args.yes {
 
+        if args.json {
+
+            let preview: Vec<serde_json::Value> = prepared
+                .iter()
+                .map(|(task, questionnaire)| {
+
+                    serde_json::json!({
+                        "rwid": task.rwid,
+                        "course": task.course,
+                        "answers": questionnaire.default_answers(),
+                    })
+                })
+                .collect();
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "eval-submit",
+                    "submitted": false,
+                    "would_submit": preview,
+                    "hint": "加上 --yes 才会真正提交；提交会以你的名义作答",
+                }))?
+            );
+
+            return Ok(());
+        }
+
         println!();
 
         println!("这是预览。确认无误后加上 --yes 才会真正提交。");
@@ -232,6 +259,26 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
                 failures.push(format!("{}: {error}", task.course));
             }
         }
+    }
+
+    if args.json {
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": "eval-submit",
+                "submitted": true,
+                "succeeded": succeeded,
+                "failures": failures,
+            }))?
+        );
+
+        if !failures.is_empty() {
+
+            bail!("部分课程评教失败",);
+        }
+
+        return Ok(());
     }
 
     println!();

@@ -370,7 +370,24 @@ pub(crate) async fn sign_command(args: SignArgs) -> Result<()> {
         result
     };
 
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    // JSON by request; a one-line summary otherwise, since this is usually run
+    // by hand or by a scheduler that reads the exit status.
+    if args.json {
+
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+
+        println!(
+            "{}\t{}\t{}\t{}",
+            source.label(),
+            action.label(),
+            result
+                .get("course_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-"),
+            outcome.message,
+        );
+    }
 
     if outcome.success_like {
 

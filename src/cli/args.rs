@@ -128,6 +128,9 @@ pub(crate) struct SignArgs {
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login:            bool,
+    /// Print a JSON result instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:                   bool,
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +148,9 @@ pub(crate) struct PlanArgs {
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,
+    /// Print a JSON result instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:        bool,
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +190,9 @@ pub(crate) struct EvalSubmitArgs {
     /// it can never happen by accident.
     #[arg(long)]
     pub(crate) yes:         bool,
+    /// Print a JSON result instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:        bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,
@@ -240,6 +249,9 @@ pub(crate) struct ClockinSubmitArgs {
     /// explicit flag means a mistyped command cannot create one.
     #[arg(long)]
     pub(crate) yes:         bool,
+    /// Print a JSON result instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:        bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,
@@ -290,6 +302,9 @@ pub(crate) struct SeatBookArgs {
     /// mistyped command cannot take one.
     #[arg(long)]
     pub(crate) yes:         bool,
+    /// Print a JSON result instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:        bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,
@@ -392,6 +407,9 @@ pub(crate) struct VenueReserveArgs {
     /// Requiring an explicit flag means a mistyped command cannot take one.
     #[arg(long)]
     pub(crate) yes:          bool,
+    /// Print a JSON result instead of human-readable text.
+    #[arg(long)]
+    pub(crate) json:         bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login:  bool,

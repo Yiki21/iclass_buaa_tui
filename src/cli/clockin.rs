@@ -245,6 +245,29 @@ pub(crate) async fn clockin_submit_command(args: ClockinSubmitArgs) -> Result<()
 
     if !args.yes {
 
+        if args.json {
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "clockin-submit",
+                    "submitted": false,
+                    "would_submit": {
+                        "classify_id": args.classify,
+                        "item_id": item.id,
+                        "item_name": item.name,
+                        "place": args.place,
+                        "start": start.to_rfc3339(),
+                        "end": end.to_rfc3339(),
+                        "photo": args.photo.display().to_string(),
+                    },
+                    "hint": "加上 --yes 才会真正提交打卡",
+                }))?
+            );
+
+            return Ok(());
+        }
+
         println!();
 
         println!("这是预览。确认无误后加上 --yes 才会真正提交打卡。");
@@ -265,6 +288,22 @@ pub(crate) async fn clockin_submit_command(args: ClockinSubmitArgs) -> Result<()
         .await
         .map_err(clockin_error)
         .context("提交打卡失败")?;
+
+    if args.json {
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": "clockin-submit",
+                "submitted": true,
+                "record_id": result.record_id,
+                "term_count": result.term_count,
+                "message": result.message,
+            }))?
+        );
+
+        return Ok(());
+    }
 
     println!();
 

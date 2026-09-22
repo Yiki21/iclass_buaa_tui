@@ -167,6 +167,27 @@ pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
 
     if !args.yes {
 
+        if args.json {
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "seat-book",
+                    "submitted": false,
+                    "would_reserve": {
+                        "area_id": args.area,
+                        "seat_id": seat.id,
+                        "seat_no": seat.no,
+                        "date": args.date,
+                        "segment": segment.id,
+                    },
+                    "hint": "加上 --yes 才会真正提交预约",
+                }))?
+            );
+
+            return Ok(());
+        }
+
         println!();
 
         println!("这是预览。确认无误后加上 --yes 才会真正提交预约。");
@@ -179,6 +200,25 @@ pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
         .await
         .map_err(seat_error)
         .context("预约座位失败")?;
+
+    if args.json {
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": "seat-book",
+                "submitted": true,
+                "booking_id": booking.id,
+                "seat_no": booking.seat_no,
+                "area": booking.area_name,
+                "date": if booking.day.is_empty() { args.date.clone() } else { booking.day.clone() },
+                "begin": booking.begin_time,
+                "end": booking.end_time,
+            }))?
+        );
+
+        return Ok(());
+    }
 
     println!();
 
