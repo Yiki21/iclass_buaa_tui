@@ -28,6 +28,7 @@
 ### 修复
 
 - 修复课表门户判断错误：此前把“BYXT 会话未激活”当成“研究生账号”，导致本科生按 `u` 导入课表时被送到 GSMIS 并报 `研究生课表导入失败: HTTP 401`。现在先探测门户，探测不出时不会冒充研究生课表。
+- 修复本科课表导入 `本科课表学期列表失败：HTTP 401`：SSO 登录后 BYXT 并不会自动持有会话，浏览器是靠访问 `https://byxt.buaa.edu.cn/` 触发 SSO 跳转才拿到 BYXT 自己的 cookie。现在探测门户前先走这一步。此前代码用作激活入口的 `/jwapp/sys/homeapp/index.html` 直接请求会返回 404，只能作 Referer。
 - 修复主页事件日志区提示 `C 清空` 与 `y 复制最近错误` 无法使用的问题：这两个快捷键此前只在日志弹窗打开后生效。现在任何界面都可使用，输入账号密码或课程搜索时不会误触发。
 - 修复 WebVPN 模式下 iClass 登录失败并返回 `ERRCODE=106 / 用户不存在` 的问题。
 - 原因：旧流程在 SSO 登录后直接把学号作为 `app/user/login.action` 的 `phone` 参数传给 iClass；真实网页会先进入 WebVPN CAS service，再访问 iClass `jumpMyCenter`，从 302 `Location` 中获取临时 `loginName`，最后用 `loginName` 调 iClass app 登录接口。

@@ -16,8 +16,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::constants::{
-    BYXT_CURRENT_USER_URL, BYXT_HOME_URL, BYXT_TERMS_URL, BYXT_WEEK_URL, BYXT_WEEKS_URL,
-    GSMIS_HOME_URL, GSMIS_SCHEDULE_URL, GSMIS_TERMS_URL, to_webvpn_url,
+    BYXT_CURRENT_USER_URL, BYXT_HOME_URL, BYXT_ROOT_URL, BYXT_TERMS_URL, BYXT_WEEK_URL,
+    BYXT_WEEKS_URL, GSMIS_HOME_URL, GSMIS_SCHEDULE_URL, GSMIS_TERMS_URL, to_webvpn_url,
 };
 use crate::iclass::IClassApi;
 use crate::model::Session;
@@ -160,6 +160,12 @@ impl IClassApi {
 
     pub async fn detect_portal(&self) -> PortalKind {
 
+        // Visit the portal before asking its API anything. The portal only issues
+        // its own session cookie after being handed an SSO ticket, so probing the
+        // API first gets a bare 401 that looks like "no access" rather than
+        // "never activated".
+        self.activate_portal(BYXT_ROOT_URL).await;
+
         match self
             .schedule_get(&schedule_url(self.use_vpn, BYXT_CURRENT_USER_URL))
             .await
@@ -167,6 +173,37 @@ impl IClassApi {
             Ok(response) => classify_portal_probe(&response),
             Err(_) => PortalKind::Unknown,
         }
+    }
+
+    /// Walks the SSO chain for a portal entry point to establish its session.
+    ///
+    /// Why:
+    /// Logging into SSO alone does not grant a portal session. The portal accepts
+    /// a ticket and sets its own cookie only when its entry URL is visited, which
+    /// is what a browser does on the way in. Without this the API returns 401.
+    ///
+    /// How:
+    /// Send the entry URL and follow redirects so the SSO round trip can complete
+    /// and drop the portal cookie into the shared jar. Failures are ignored: this
+    /// runs before a probe that reports the real problem, and a portal that is
+    /// genuinely unavailable should not turn into an activation error.
+
+    async fn activate_portal(&self, entry: &str) {
+
+        let url = schedule_url(self.use_vpn, entry);
+
+        // The result is ignored on purpose. This runs before a probe that reports
+        // the real problem, and a portal that is genuinely unreachable should
+        // surface as an import error rather than an activation error.
+        let _ = self
+            .client
+            .get(&url)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .send()
+            .await;
     }
 
     /// Imports every week of one academic term from the account's own portal.
@@ -1466,8 +1503,8 @@ fn ics_escape(value: &str) -> String {
 mod tests {
 
     use super::{
-        PortalKind, ScheduleHttpResponse, classify_portal_probe, parse_graduate_schedule,
-        parse_graduate_terms, parse_weekly_schedule,
+        BYXT_HOME_URL, BYXT_ROOT_URL, PortalKind, ScheduleHttpResponse, classify_portal_probe,
+        parse_graduate_schedule, parse_graduate_terms, parse_weekly_schedule,
     };
 
     fn probe(status: u16, final_url: &str, body: &str) -> ScheduleHttpResponse {
@@ -1509,6 +1546,18 @@ mod tests {
         let plain_401 = probe(401, "https://byxt.buaa.edu.cn/x", "");
 
         assert_eq!(classify_portal_probe(&plain_401), PortalKind::Unknown);
+    }
+
+    #[test]
+
+    fn byxt_root_is_the_portal_entry_that_starts_sso() {
+
+        // Visiting the portal root is what makes BYXT issue its own session
+        // cookie through SSO. The /jwapp/sys/homeapp/index.html page 404s when
+        // requested directly, so it must not be used as the activation entry.
+        assert_eq!(BYXT_ROOT_URL, "https://byxt.buaa.edu.cn/");
+
+        assert_ne!(BYXT_ROOT_URL, BYXT_HOME_URL);
     }
 
     #[test]

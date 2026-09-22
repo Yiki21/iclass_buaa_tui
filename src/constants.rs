@@ -20,6 +20,11 @@ pub const ICLASS_MY_CENTER_URL: &str = "https://iclass.buaa.edu.cn:8346/?type=ju
 
 /// Undergraduate academic portal entry points used by the schedule module.
 
+/// Portal root. Visiting it starts the SSO round trip that issues the BYXT
+/// session cookie; `index.html` below is only usable as a Referer afterwards.
+
+pub const BYXT_ROOT_URL: &str = "https://byxt.buaa.edu.cn/";
+
 pub const BYXT_HOME_URL: &str = "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/index.html";
 
 pub const BYXT_CURRENT_USER_URL: &str =
