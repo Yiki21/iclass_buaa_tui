@@ -3894,7 +3894,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Venues(result),
+            AsyncEvent::Venues,
         ) {
 
             self.venue.loading = false;
@@ -3951,7 +3951,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::VenueDay(result),
+            AsyncEvent::VenueDay,
         );
     }
 
@@ -3980,7 +3980,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::VenueOrders(result),
+            AsyncEvent::VenueOrders,
         );
     }
 
@@ -4042,7 +4042,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Write(result),
+            AsyncEvent::Write,
         );
     }
 
@@ -4070,7 +4070,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Write(result),
+            AsyncEvent::Write,
         );
     }
 
@@ -4113,7 +4113,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::SeatLibraries(result),
+            AsyncEvent::SeatLibraries,
         );
     }
 
@@ -4153,7 +4153,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::SeatAreas(result),
+            AsyncEvent::SeatAreas,
         );
     }
 
@@ -4180,7 +4180,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::SeatDetail(result),
+            AsyncEvent::SeatDetail,
         );
     }
 
@@ -4227,7 +4227,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::SeatSeats(result),
+            AsyncEvent::SeatSeats,
         );
     }
 
@@ -4254,7 +4254,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::SeatBookings(result),
+            AsyncEvent::SeatBookings,
         );
     }
 
@@ -4309,7 +4309,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Write(result),
+            AsyncEvent::Write,
         );
     }
 
@@ -4337,7 +4337,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Write(result),
+            AsyncEvent::Write,
         );
     }
 
@@ -4399,7 +4399,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::ClockinOverview(result),
+            AsyncEvent::ClockinOverview,
         );
     }
 
@@ -4455,7 +4455,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::ClockinOverview(result),
+            AsyncEvent::ClockinOverview,
         );
     }
 
@@ -4494,7 +4494,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::ClockinRecords(result),
+            AsyncEvent::ClockinRecords,
         );
     }
 
@@ -4542,7 +4542,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::EvalTasks(result),
+            AsyncEvent::EvalTasks,
         );
     }
 
@@ -4572,7 +4572,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::EvalQuestionnaire(result),
+            AsyncEvent::EvalQuestionnaire,
         );
     }
 
@@ -4623,7 +4623,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Write(result),
+            AsyncEvent::Write,
         );
 
         // The submitted course is no longer pending.
@@ -4704,7 +4704,7 @@ impl App {
                 }
             },
             tx,
-            |result| AsyncEvent::Write(result),
+            AsyncEvent::Write,
         );
 
         for task in self.eval.tasks.iter_mut() {

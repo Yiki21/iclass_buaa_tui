@@ -263,8 +263,23 @@ iclass_buaa_tui uninstall-autologin
 **注意**
 CLI 参数对于登录只支持配置文件写入!
 
+> 从 0.7.0 起 `plan` 和 `sign` 需要 `--yes`。`install-autologin` 生成的任务已带该参数，但**旧版本装的任务要重装**，否则会变成只预览、不签到。
+
+在 TUI 里按 `tab` 切换七个工作区：课表、签到、博雅、研讨室、图书馆、打卡、评教。所有写操作（预约、打卡、评教、签到）都会先弹确认框，说明将要做什么和后果。
+
+## 给自动化 / AI 调用
+
+CLI 可以直接被脚本或 LLM 工具循环调用。三条要点：
+
+1. **先读接口，不要猜**：`iclass_buaa_tui schema` 输出全部命令的 JSON 描述（参数、是否写操作、确认标志、是否支持 `--json`）。参数由 clap 反射得到，不会与真实解析器脱节。
+2. **写操作没有 `--yes` 就不会执行**，而且**退出码仍是 0**。判断是否真的写入要看 `--json` 里的 `submitted` 字段，不能只看退出码。
+3. **失败有稳定错误码**：带 `--json` 时失败会往 stderr 输出 `{ error, command, retryable, code }`。按 `retryable` 决定是否退避重试；`not_authenticated` 要重新登录，`resource_unavailable` 要换一个，都不是重试能解决的。
+
+完整的调用约定见 [AGENTS.md](AGENTS.md)。
+
 ## Todo
-- 更多其他功能?
-- 代码库似乎有些膨胀了, a little bit sucks
+- 四个新模块（研讨室 / 图书馆 / 打卡 / 评教）尚未在真实账号上验证过，第一次使用请留意。
+- TUI 里提交打卡需要照片，终端无法选文件，所以该操作仍走 CLI（`clockin-submit --photo`）。
+- 代码库确实有些膨胀了, a little bit sucks
 
 Inspired By [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa) && [UBAA](https://github.com/BUAASubnet/UBAA)

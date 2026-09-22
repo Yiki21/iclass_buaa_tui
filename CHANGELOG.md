@@ -1,15 +1,14 @@
 # ChangeLog
 
-## 0.6.0
+## 0.7.0
+
+本版新增研讨室、图书馆座位、阳光打卡、评教四个模块（CLI + TUI），并把 CLI 改造成适合自动化调用的形态。
 
 ### 破坏性变更
 
 - **`plan` 与 `sign` 现在需要 `--yes`**。两者会写入真实签到状态，此前无需确认即可执行。不加 `--yes` 时只打印预览（`--json` 输出 `submitted: false`），不会签任何东西。
 - **已有定时任务需要重装**：`install-autologin` 生成的 systemd / launchd / 计划任务命令现在带 `--yes`。旧任务会变成「只预览」，签到不会发生。请重新运行 `iclass_buaa_tui install-autologin --yes`（先 `uninstall-autologin --yes` 可选）。
 - **`install-autologin` / `uninstall-autologin` 也需要 `--yes`**。
-
-### 破坏性变更
-
 - 直连模式配置里带有统一认证密码时，配置文件权限现在也必须是 `600`。此前该校验只在 `use_vpn = true` 时生效，而直连模式同样使用统一认证密码。
 
 ### 新增
