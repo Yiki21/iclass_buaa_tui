@@ -2,6 +2,7 @@
 
 mod args;
 mod autologin;
+mod clockin;
 mod config;
 mod core;
 mod planner;
@@ -52,6 +53,8 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::Seats(args) => seat::seats_command(args).await,
         CommandKind::SeatBook(args) => seat::seat_book_command(args).await,
         CommandKind::SeatOrders(args) => seat::seat_orders_command(args).await,
+        CommandKind::Clockin(args) => clockin::clockin_command(args).await,
+        CommandKind::ClockinSubmit(args) => clockin::clockin_submit_command(args).await,
         CommandKind::Today(args) => planner::today_command(args).await,
         CommandKind::Exams(args) => planner::exams_command(args).await,
         CommandKind::Grades(args) => planner::grades_command(args).await,

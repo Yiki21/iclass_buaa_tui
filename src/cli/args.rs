@@ -48,6 +48,10 @@ pub(crate) enum CommandKind {
     SeatBook(SeatBookArgs),
     /// List and optionally cancel your library seat reservations.
     SeatOrders(SeatOrdersArgs),
+    /// Show sunshine-clockin (阳光打卡) progress and history.
+    Clockin(ClockinArgs),
+    /// Submit a sunshine clock-in. Requires --yes and a photo.
+    ClockinSubmit(ClockinSubmitArgs),
     /// Show today's cached academic courses and next class.
     Today(TodayArgs),
     /// Show exam arrangements for one academic term.
@@ -134,6 +138,62 @@ pub(crate) struct PlanArgs {
     /// Only print today's evaluation without attempting sign.
     #[arg(long)]
     pub(crate) dry_run:     bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct ClockinArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Category id. Defaults to the first the service returns.
+    #[arg(long)]
+    pub(crate) classify:    Option<i64>,
+    /// Also list the most recent clock-in records.
+    #[arg(long)]
+    pub(crate) records:     bool,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct ClockinSubmitArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Category id from `clockin`.
+    #[arg(long)]
+    pub(crate) classify:    i64,
+    /// Item id from `clockin`.
+    #[arg(long)]
+    pub(crate) item:        i64,
+    /// Photo to attach. The service requires one.
+    #[arg(long)]
+    pub(crate) photo:       PathBuf,
+    /// Location text recorded with the entry.
+    #[arg(long, default_value = "操场")]
+    pub(crate) place:       String,
+    /// Start time as `YYYY-MM-DD HH:MM` in Beijing time. Defaults to 40 minutes ago.
+    #[arg(long)]
+    pub(crate) start:       Option<String>,
+    /// End time as `YYYY-MM-DD HH:MM` in Beijing time. Defaults to now.
+    #[arg(long)]
+    pub(crate) end:         Option<String>,
+    /// Confirm submission. Without this the command only previews.
+    ///
+    /// Why:
+    /// A clock-in is a real sports record under the user's name. Requiring an
+    /// explicit flag means a mistyped command cannot create one.
+    #[arg(long)]
+    pub(crate) yes:         bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,

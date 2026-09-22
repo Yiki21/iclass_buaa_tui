@@ -15,6 +15,7 @@ mod schedule;
 mod tasks;
 mod theme;
 mod ui;
+mod ygdk;
 
 use std::{env, io, time::Duration};
 

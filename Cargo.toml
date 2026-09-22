@@ -104,6 +104,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "form",
   "hickory-dns",
   "json",
+  "multipart",
   "query",
   "rustls"
 ] }
