@@ -5,12 +5,14 @@ mod autologin;
 mod clockin;
 mod config;
 mod core;
+mod error;
 mod eval;
 mod planner;
 mod schema;
 mod seat;
 mod venue;
 
+use std::env;
 use std::ffi::OsString;
 
 use anyhow::Result;
@@ -42,7 +44,11 @@ pub async fn run_cli() -> Result<()> {
         serde_json::json!({ "log_file": log_path }),
     );
 
-    match cli.command {
+    let json_requested = env::args().any(|argument| argument == "--json");
+
+    let command = Some(command_name(&cli.command));
+
+    let result = match cli.command {
         CommandKind::ListToday(args) => planner::list_today(args).await,
         CommandKind::Sign(args) => planner::sign_command(args).await,
         CommandKind::Plan(args) => planner::plan_command(args).await,
@@ -70,5 +76,57 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::InstallAutologin(args) => autologin::install_autologin(args),
         CommandKind::AutologinStatus(args) => autologin::autologin_status(args),
         CommandKind::UninstallAutologin(args) => autologin::uninstall_autologin(args),
+    };
+
+    // A caller that asked for JSON should not have to parse prose just because
+    // the call failed, so the error is reported in the same shape.
+    if let Err(error) = &result
+        && json_requested
+    {
+
+        let report = error::ErrorReport::from_error(error, command);
+
+        if let Ok(json) = serde_json::to_string_pretty(&report) {
+
+            eprintln!("{json}");
+        }
     }
+
+    result
+}
+
+/// Name of a subcommand, for error reporting.
+
+fn command_name(command: &CommandKind) -> String {
+
+    match command {
+        CommandKind::ListToday(_) => "list-today",
+        CommandKind::Sign(_) => "sign",
+        CommandKind::Plan(_) => "plan",
+        CommandKind::Doctor(_) => "doctor",
+        CommandKind::Notify(_) => "notify",
+        CommandKind::Venues(_) => "venues",
+        CommandKind::VenueSlots(_) => "venue-slots",
+        CommandKind::VenueReserve(_) => "venue-reserve",
+        CommandKind::VenueOrders(_) => "venue-orders",
+        CommandKind::Seats(_) => "seats",
+        CommandKind::SeatBook(_) => "seat-book",
+        CommandKind::SeatOrders(_) => "seat-orders",
+        CommandKind::Clockin(_) => "clockin",
+        CommandKind::ClockinSubmit(_) => "clockin-submit",
+        CommandKind::Eval(_) => "eval",
+        CommandKind::EvalSubmit(_) => "eval-submit",
+        CommandKind::Schema => "schema",
+        CommandKind::Today(_) => "today",
+        CommandKind::Exams(_) => "exams",
+        CommandKind::Grades(_) => "grades",
+        CommandKind::Classrooms(_) => "classrooms",
+        CommandKind::Tasks(_) => "tasks",
+        CommandKind::ScheduleExport(_) => "schedule-export",
+        CommandKind::ScheduleDiff(_) => "schedule-diff",
+        CommandKind::InstallAutologin(_) => "install-autologin",
+        CommandKind::AutologinStatus(_) => "autologin-status",
+        CommandKind::UninstallAutologin(_) => "uninstall-autologin",
+    }
+    .to_string()
 }

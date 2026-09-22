@@ -14,6 +14,9 @@
 
 ### 新增
 
+- 失败时输出稳定错误码：带 `--json` 调用失败会在 stderr 输出 `{ error, command, retryable, code }`，`code` 取值如 `not_authenticated` / `invalid_argument` / `rate_limited` / `upstream_timeout` / `account_locked` / `resource_unavailable` / `network_error` / `config_invalid` / `unknown`，并给出 `retryable`。调用方不必解析人类可读的错误文本就能决定重试还是重新登录。
+- 无法识别的失败如实报 `unknown` 且 `retryable: false`，不猜测——猜错会让重试循环浪费额度。
+
 - 新增 `schema` 命令：输出机器可读的全部命令清单（参数、是否写操作、确认标志、是否支持 `--json`）。AI 或脚本不必再解析 `--help` 文本。参数直接从 clap 反射得到，因此不会与真实解析器不一致。
 - `schema` 把命令分为 `read` / `write` / `write_irreversible` 三类：打卡与评教无法在本工具内撤销，明确标出；预约类可撤销。确认标志也是从解析器里读出来的，没有确认标志的命令不会谎报有。
 - 修复 `| head` 导致的 panic：Rust 默认忽略 SIGPIPE，管道读端关闭后下一次写会 panic 并打印 `Broken pipe`。现在恢复 SIGPIPE 默认行为，进程安静退出，退出码正常。这个问题影响所有命令。
