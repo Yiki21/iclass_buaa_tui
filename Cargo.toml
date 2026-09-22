@@ -123,6 +123,7 @@ toml = "1.1"
 tui-qrcode = "0.2.4"
 md-5 = { version = "0.11.0", features = ["alloc"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+libc = "0.2.189"
 
 [profile.dev]
 incremental = true

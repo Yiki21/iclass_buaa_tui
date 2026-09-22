@@ -52,6 +52,8 @@ pub(crate) enum CommandKind {
     Clockin(ClockinArgs),
     /// Submit a sunshine clock-in. Requires --yes and a photo.
     ClockinSubmit(ClockinSubmitArgs),
+    /// Print a machine-readable description of every command, for automated callers.
+    Schema,
     /// List courses awaiting evaluation (评教).
     Eval(EvalArgs),
     /// Submit course evaluations. Requires --yes; answers are recorded as yours.

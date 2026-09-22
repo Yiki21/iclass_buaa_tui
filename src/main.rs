@@ -38,9 +38,40 @@ use crossterm::{
 use ratatui::{Terminal, prelude::CrosstermBackend};
 use tokio::sync::mpsc;
 
+/// Restores the default SIGPIPE behaviour on Unix.
+///
+/// Why:
+/// Rust ignores SIGPIPE at startup, so a closed reader — `iclass_buaa_tui schema
+/// | head` being the obvious case — turns the next write into a `Broken pipe`
+/// error that panics the process. That is wrong twice over: the exit status is
+/// a panic rather than a clean stop, and the message is noise for what is
+/// ordinary shell usage.
+///
+/// How:
+/// Setting the handler back to the OS default makes the process die silently on
+/// SIGPIPE, which is what every other command-line tool does.
+
+#[cfg(unix)]
+
+fn restore_sigpipe() {
+
+    // SAFETY: `signal` with SIG_DFL only installs the default disposition for
+    // SIGPIPE; it touches no Rust state and cannot fail in a way that matters.
+    unsafe {
+
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+
+fn restore_sigpipe() {}
+
 #[tokio::main]
 
 async fn main() -> Result<()> {
+
+    restore_sigpipe();
 
     let args = env::args_os().collect::<Vec<_>>();
 
