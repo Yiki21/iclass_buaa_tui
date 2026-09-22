@@ -223,14 +223,6 @@ impl ScheduleState {
             .unwrap_or("课表")
     }
 
-    pub fn portal(&self) -> crate::schedule::PortalKind {
-
-        self.semesters
-            .first()
-            .map(|semester| semester.portal)
-            .unwrap_or_default()
-    }
-
     pub fn visible_entries(&self) -> Vec<(usize, &ScheduleEntry)> {
 
         let query = self.query.trim();
@@ -917,6 +909,29 @@ impl App {
         let index = *self.visible_course_indices().get(self.selected)?;
 
         self.courses.get(index)
+    }
+
+    /// Compact version label for the one-row top bar.
+    ///
+    /// Why:
+    /// The full string ("版本: v0.6.0 | 已是最新") was written for a dedicated
+    /// hint box. On a shared top bar only the number and fault state matter;
+    /// the rest lives in the version check's own output.
+
+    pub fn version_short(&self) -> String {
+
+        let current = env!("CARGO_PKG_VERSION");
+
+        if self.version_error.is_some() {
+
+            return format!("v{current} 检查失败");
+        }
+
+        match &self.version_info {
+            Some(info) if info.is_latest => format!("v{current}"),
+            Some(info) => format!("v{current} → v{}", info.latest),
+            None => format!("v{current}"),
+        }
     }
 
     pub fn version_text(&self) -> String {

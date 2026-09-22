@@ -1,13 +1,13 @@
 //! Pure rendering code for the login screen, iClass workspace, and BYKC views.
 
-use chrono::{Duration, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
 use qrcode::{EcLevel, QrCode};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tui_qrcode::{QrCodeWidget, QuietZone, Scaling};
 
@@ -60,155 +60,135 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// Renders the login screen as a centered card.
+///
+/// Why:
+/// The old layout stretched six bordered fields across the whole terminal
+/// inside another full-screen frame, so on a wide window each field was a
+/// hundred columns of border around four characters and the eye had to travel
+/// the full width to read a two-word value.
+///
+/// How:
+/// A fixed-width card, centered, with the version and the latest event beneath
+/// it as quiet context. The card is sized to its content rather than to the
+/// window, and the outer frame is dropped since the card is the only subject.
+
 fn render_login(frame: &mut Frame, app: &App) {
+
+    frame.render_widget(Clear, frame.area());
 
     let area = frame.area();
 
-    frame.render_widget(Clear, area);
+    let card_width = 66.min(area.width);
 
-    let outer = Block::default()
-        .title("BUAA Rust TUI")
+    // Inner rows: title 1 + mode 1 + fields (3 each) + tail 2, plus 2 border rows.
+    let field_count: u16 = if app.login.captcha_required { 4 } else { 3 };
+
+    let card_height = (1 + 1 + field_count * 3 + 2 + 2).min(area.height.saturating_sub(1));
+
+    let card = Rect {
+        x:      area.x + (area.width.saturating_sub(card_width)) / 2,
+        y:      area.y + (area.height.saturating_sub(card_height)) / 2,
+        width:  card_width,
+        height: card_height,
+    };
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" iClass BUAA ", theme::title_style()),
+            Span::styled("统一认证登录 ", theme::subtitle_style()),
+        ]))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::BORDER_FOCUS));
 
-    let inner = outer.inner(area);
+    let inner = block.inner(card);
 
-    frame.render_widget(outer, area);
+    frame.render_widget(block, card);
 
-    let mut constraints = vec![Constraint::Length(5), Constraint::Length(3)];
+    let [title, mode, fields, tail] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .areas(inner);
 
-    constraints.push(Constraint::Length(3));
-
-    constraints.push(Constraint::Length(3));
-
-    if app.login.captcha_required {
-
-        constraints.push(Constraint::Length(3));
-
-        constraints.push(Constraint::Length(4));
-    }
-
-    constraints.push(Constraint::Length(3));
-
-    constraints.push(Constraint::Length(6));
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(1)
-        .constraints(constraints)
-        .split(inner);
-
-    let title = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "Controll Your Campus Life In Terminal",
-            theme::title_style(),
-        )),
-        Line::from(Span::styled(app.version_text(), app.version_style())),
-        Line::from(Span::styled(
-            "登录后可在课表、iClass 与 BYKC 间切换",
-            theme::text_style(),
-        )),
-        Line::from(Span::styled(
-            "直连与 VPN 模式均使用统一认证；VPN 仅改变访问路径",
-            theme::muted_style(),
-        )),
-        Line::from(Span::styled(
-            "tab 切换字段，space 切换选项，enter 登录，D 自检，v 失败详情，? 帮助，q 退出",
-            theme::label_style(),
-        )),
-    ]);
-
-    frame.render_widget(title, chunks[0]);
-
-    render_input(
-        frame,
-        chunks[1],
-        "VPN 模式",
-        if app.login.use_vpn {
-
-            "开启"
-        } else {
-
-            "关闭"
-        },
-        app.login.current_focus() == LoginFocus::UseVpn,
-        false,
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " Controll Your Campus Life In Terminal",
+            theme::subtitle_style(),
+        ))),
+        title,
     );
 
-    let mut next_index = if app.login.use_vpn {
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" 访问模式 ", theme::muted_style()),
+            Span::styled(
+                if app.login.use_vpn { "VPN" } else { "直连" },
+                Style::default().fg(theme::INFO),
+            ),
+            Span::styled("   space 切换", theme::muted_style()),
+        ])),
+        mode,
+    );
+
+    let rows = Layout::vertical(vec![Constraint::Length(3); field_count as usize]).split(fields);
+
+    let mut next_row = 0;
+
+    if app.login.use_vpn {
 
         render_input(
             frame,
-            chunks[2],
+            rows[next_row],
             "统一认证账号",
             &app.login.vpn_username,
             app.login.current_focus() == LoginFocus::VpnUsername,
             false,
         );
-
-        3
     } else {
 
         render_input(
             frame,
-            chunks[2],
+            rows[next_row],
             "学号",
             &app.login.student_id,
             app.login.current_focus() == LoginFocus::StudentId,
             false,
         );
+    }
 
-        3
-    };
+    next_row += 1;
 
     render_input(
         frame,
-        chunks[next_index],
+        rows[next_row],
         "统一认证密码",
         &mask_password(&app.login.vpn_password),
         app.login.current_focus() == LoginFocus::VpnPassword,
         true,
     );
 
-    next_index += 1;
+    next_row += 1;
 
     if app.login.captcha_required {
 
         render_input(
             frame,
-            chunks[next_index],
+            rows[next_row],
             "验证码",
             &app.login.captcha,
             app.login.current_focus() == LoginFocus::Captcha,
             false,
         );
 
-        next_index += 1;
-
-        let captcha_hint = app
-            .pending_captcha_login
-            .as_ref()
-            .map(|pending| {
-
-                format!(
-                    "验证码图片: {} | 输入后按 enter 继续同一登录会话",
-                    pending.challenge.captcha_path
-                )
-            })
-            .unwrap_or_else(|| "验证码状态已失效，请重新登录".to_string());
-
-        let hint = Paragraph::new(captcha_hint)
-            .block(Block::default().title("验证码").borders(Borders::ALL))
-            .wrap(Wrap { trim: true });
-
-        frame.render_widget(hint, chunks[next_index]);
-
-        next_index += 1;
+        next_row += 1;
     }
 
     render_input(
         frame,
-        chunks[next_index],
+        rows[next_row],
         "记住我",
         if app.login.remember_me {
 
@@ -221,86 +201,571 @@ fn render_login(frame: &mut Frame, app: &App) {
         false,
     );
 
-    let status_index = next_index + 1;
+    let status = app
+        .latest_events()
+        .last()
+        .map(|entry| {
 
-    render_event_log_block(frame, chunks[status_index], app);
+            let (tag, style) = event_tag(entry.level);
+
+            Line::from(vec![
+                Span::styled(tag, style),
+                Span::raw(" "),
+                Span::styled(entry.message.clone(), theme::text_style()),
+            ])
+        })
+        .unwrap_or_else(|| {
+
+            Line::from(Span::styled(
+                "tab 切换字段 · space 切换选项 · enter 登录",
+                theme::muted_style(),
+            ))
+        });
+
+    let hint = app
+        .pending_captcha_login
+        .as_ref()
+        .map(|pending| {
+
+            format!(
+                "验证码图片: {} | enter 继续同一登录会话",
+                pending.challenge.captcha_path
+            )
+        })
+        .unwrap_or_else(|| "D 自检 · v 失败详情 · ? 帮助 · q 退出".to_string());
+
+    let tail_rows = Layout::vertical([Constraint::Length(1); 2]).split(tail);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(app.version_text(), theme::muted_style()),
+        ])),
+        tail_rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(
+            std::iter::once(Span::raw(" "))
+                .chain(status.spans)
+                .collect::<Vec<_>>(),
+        )),
+        tail_rows[1],
+    );
+
+    // The key hint sits below the card, aligned to it.
+    let below = Rect {
+        x:      card.x,
+        y:      card.y + card.height,
+        width:  card.width,
+        height: 1.min(area.height.saturating_sub(card.y + card.height - area.y)),
+    };
+
+    if below.height > 0 {
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {hint}"),
+                theme::muted_style(),
+            )))
+            .wrap(Wrap { trim: true }),
+            below,
+        );
+    }
 }
 
 /// Renders the shared workspace shell before delegating to the active tab body.
 
+/// Lays out the workspace as one chrome around one framed content zone.
+///
+/// Why:
+/// Each tab used to stack its own bordered boxes: tabs, a hint box repeating
+/// the tab bar, a session box, a week box, the content, a detail box, and a
+/// six-row event box. Four of those held a single line but cost three rows
+/// each. On a 40-row terminal that was twelve rows of frame around four rows
+/// of text, and the content -- the reason to be on the screen -- got the rest.
+///
+/// How:
+/// Three borderless rows carry identity, status, and the latest event. Only
+/// the content zone is framed, and it receives every remaining row. Each tab
+/// contributes its status line and its content; the chrome is shared.
+
 fn render_workspace(frame: &mut Frame, app: &App) {
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(10),
-        ])
-        .split(frame.area());
+    let [top_bar, status_strip, content, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
 
-    render_workspace_tabs(frame, chunks[0], app);
+    render_top_bar(frame, top_bar, app);
 
-    render_workspace_hint(frame, chunks[1], app);
+    render_status_strip(frame, status_strip, app);
+
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_IDLE));
+
+    let content_inner = content_block.inner(content);
+
+    frame.render_widget(content_block, content);
 
     match app.active_tab {
-        WorkspaceTab::Schedule => render_schedule(frame, chunks[2], app),
-        WorkspaceTab::IClass => render_iclass(frame, chunks[2], app),
-        WorkspaceTab::Bykc => render_bykc(frame, chunks[2], app),
+        WorkspaceTab::Schedule => render_schedule(frame, content_inner, app),
+        WorkspaceTab::IClass => render_iclass(frame, content_inner, app),
+        WorkspaceTab::Bykc => render_bykc(frame, content_inner, app),
+    }
+
+    render_footer(frame, footer, app);
+}
+
+/// Top bar: app name, tabs, and identity, on one borderless row.
+
+fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [tabs_area, identity_area] =
+        Layout::horizontal([Constraint::Min(30), Constraint::Length(48)]).areas(area);
+
+    let mut spans = vec![Span::styled(" iClass BUAA  ", theme::title_style())];
+
+    let tabs = [
+        (WorkspaceTab::Schedule, app.schedule.portal_label()),
+        (WorkspaceTab::IClass, "iClass"),
+        (WorkspaceTab::Bykc, "BYKC"),
+    ];
+
+    for (tab, label) in tabs {
+
+        if tab == app.active_tab {
+
+            spans.push(Span::styled(format!(" {label} "), theme::selection_style()));
+        } else {
+
+            spans.push(Span::styled(format!(" {label} "), theme::muted_style()));
+        }
+
+        spans.push(Span::raw(" "));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
+
+    let identity = if let Some(session) = &app.session {
+
+        Line::from(vec![
+            Span::styled(session.user_name.clone(), theme::text_style()),
+            Span::styled(format!(" ({})", session.user_id), theme::muted_style()),
+            Span::styled(" · ", theme::muted_style()),
+            Span::styled(
+                if session.use_vpn { "VPN" } else { "直连" },
+                Style::default().fg(theme::INFO),
+            ),
+            Span::styled(" · ", theme::muted_style()),
+            Span::styled(app.version_short(), app.version_style()),
+            Span::raw(" "),
+        ])
+    } else {
+
+        Line::from(Span::styled("未登录 ", theme::muted_style()))
+    };
+
+    frame.render_widget(
+        Paragraph::new(identity).alignment(Alignment::Right),
+        identity_area,
+    );
+}
+
+/// Status strip: one row of the active tab's live context.
+///
+/// Why:
+/// Session, week, and loading state used to sit in three separate boxes. On
+/// one row they read as a single sentence about where the user is.
+
+fn render_status_strip(frame: &mut Frame, area: Rect, app: &App) {
+
+    let line = match app.active_tab {
+        WorkspaceTab::Schedule => schedule_status_line(app),
+        WorkspaceTab::IClass => iclass_status_line(app),
+        WorkspaceTab::Bykc => bykc_status_line(app),
+    };
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Footer: the latest event on the left, global keys on the right.
+///
+/// Why:
+/// A six-row event box on every screen spent a sixth of a small terminal on
+/// history the user rarely reads. One row shows the most recent message; `e`
+/// opens the full log when it matters.
+
+fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [event_area, keys_area] =
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(44)]).areas(area);
+
+    let event_line = app
+        .latest_events()
+        .last()
+        .map(|entry| {
+
+            let (tag, style) = event_tag(entry.level);
+
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(tag, style),
+                Span::raw(" "),
+                Span::styled(entry.message.clone(), theme::text_style()),
+            ])
+        })
+        .unwrap_or_else(|| Line::from(Span::styled(" 就绪", theme::muted_style())));
+
+    frame.render_widget(Paragraph::new(event_line), event_area);
+
+    let keys = Line::from(vec![
+        Span::styled("tab", theme::label_style()),
+        Span::styled(" 切换  ", theme::muted_style()),
+        Span::styled("e", theme::label_style()),
+        Span::styled(" 日志  ", theme::muted_style()),
+        Span::styled("?", theme::label_style()),
+        Span::styled(" 帮助  ", theme::muted_style()),
+        Span::styled("q", theme::label_style()),
+        Span::styled(" 退出 ", theme::muted_style()),
+    ]);
+
+    frame.render_widget(Paragraph::new(keys).alignment(Alignment::Right), keys_area);
+}
+
+/// Level tag and color for an event entry.
+
+fn event_tag(level: EventLevel) -> (&'static str, Style) {
+
+    match level {
+        EventLevel::Info => ("INFO", Style::default().fg(theme::ACCENT)),
+        EventLevel::Success => (" OK ", Style::default().fg(theme::OK)),
+        EventLevel::Warn => ("WARN", Style::default().fg(theme::ACCENT_WARM)),
+        EventLevel::Error => {
+            (
+                "ERR ",
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
     }
 }
 
-fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
+/// A separator between segments in a status line.
 
-    let schedule_title = app.schedule.portal_label();
+fn sep() -> Span<'static> {
 
-    let titles = [schedule_title, " iClass ", " BYKC "]
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-
-    let selected = match app.active_tab {
-        WorkspaceTab::Schedule => 0,
-        WorkspaceTab::IClass => 1,
-        WorkspaceTab::Bykc => 2,
-    };
-
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .title(Span::styled(" iClass BUAA ", theme::subtitle_style()))
-                .title_bottom(Line::from(Span::styled(
-                    " tab / shift+tab 切换 ",
-                    theme::muted_style(),
-                )))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER_FOCUS)),
-        )
-        .select(selected)
-        .style(theme::muted_style())
-        .highlight_style(theme::selection_style());
-
-    frame.render_widget(tabs, area);
+    Span::styled("  ·  ", theme::muted_style())
 }
 
-fn render_workspace_hint(frame: &mut Frame, area: Rect, app: &App) {
+/// Status line for the schedule tab: term, week, and import state.
 
-    let current = match app.active_tab {
-        WorkspaceTab::Schedule => app.schedule.portal_label(),
-        WorkspaceTab::IClass => "iClass",
-        WorkspaceTab::Bykc => "BYKC",
+fn schedule_status_line(app: &App) -> Line<'static> {
+
+    let semester = app.schedule.current_semester();
+
+    let week = app.schedule.current_week();
+
+    let (state_text, state_style) = if app.schedule.updating {
+
+        ("正在更新", Style::default().fg(theme::WARN))
+    } else if semester.is_some() {
+
+        ("离线可读", Style::default().fg(theme::OK))
+    } else {
+
+        ("尚未导入", theme::muted_style())
     };
 
-    let hint = Paragraph::new(vec![
-        Line::from(format!(
-            "当前页: {current} | tab: 下一个标签 | shift+tab: 上一个标签 | e: 事件日志 | ?: 帮助"
-        )),
-        Line::from(Span::styled(app.version_text(), app.version_style())),
-    ])
-    .block(Block::default().title("切换提示").borders(Borders::ALL))
-    .wrap(Wrap { trim: true });
+    let mut spans = vec![Span::raw(" ")];
 
-    frame.render_widget(hint, area);
+    spans.push(Span::styled(
+        app.schedule
+            .current_schedule()
+            .map(|item| item.term_name.clone())
+            .or_else(|| semester.map(|item| item.term_code.clone()))
+            .unwrap_or_else(|| "无缓存学期".to_string()),
+        Style::default().fg(theme::INFO),
+    ));
+
+    if let Some(week) = week {
+
+        spans.push(sep());
+
+        spans.push(Span::styled(week.name.clone(), theme::text_style()));
+
+        spans.push(Span::styled(
+            format!("  {} ~ {}", week.start_date, week.end_date),
+            theme::muted_style(),
+        ));
+    }
+
+    spans.push(sep());
+
+    spans.push(theme::activity_badge_styled(
+        app.tick,
+        app.schedule.updating,
+        state_text,
+        state_style,
+    ));
+
+    Line::from(spans)
+}
+
+/// Status line for the iClass tab: week, date range, and course count.
+
+fn iclass_status_line(app: &App) -> Line<'static> {
+
+    let mut spans = vec![Span::raw(" ")];
+
+    if let Some(week) = app.selected_week_group() {
+
+        spans.push(Span::styled(
+            week.label.clone(),
+            Style::default().fg(theme::INFO),
+        ));
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("{} ~ {}", week.start_date, week.end_date),
+            theme::muted_style(),
+        ));
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("{} 条课程", app.visible_courses_len()),
+            theme::text_style(),
+        ));
+    } else {
+
+        spans.push(Span::styled("当前没有可显示的周数据", theme::muted_style()));
+    }
+
+    spans.push(sep());
+
+    spans.push(theme::activity_badge(
+        app.tick,
+        app.iclass_loading,
+        if app.iclass_loading {
+
+            "正在加载课程"
+        } else {
+
+            "就绪"
+        },
+    ));
+
+    Line::from(spans)
+}
+
+/// Status line for the BYKC tab: counts, include_all, and category progress.
+
+fn bykc_status_line(app: &App) -> Line<'static> {
+
+    let mut spans = vec![Span::raw(" ")];
+
+    spans.push(Span::styled(
+        format!("可选 {}", app.bykc.courses.len()),
+        theme::text_style(),
+    ));
+
+    spans.push(sep());
+
+    spans.push(Span::styled(
+        format!("已选 {}", app.bykc.chosen_courses.len()),
+        theme::text_style(),
+    ));
+
+    spans.push(sep());
+
+    spans.push(Span::styled(
+        if app.bykc.include_all {
+
+            "含已过期"
+        } else {
+
+            "仅可报名"
+        },
+        theme::muted_style(),
+    ));
+
+    let statistics = bykc_statistics_summary(app);
+
+    if !statistics.is_empty() && statistics != "-" {
+
+        spans.push(sep());
+
+        spans.push(Span::styled(statistics, theme::muted_style()));
+    }
+
+    spans.push(sep());
+
+    spans.push(theme::activity_badge(
+        app.tick,
+        app.bykc.loading,
+        if app.bykc.loading {
+
+            "正在加载"
+        } else {
+
+            "就绪"
+        },
+    ));
+
+    Line::from(spans)
+}
+
+/// Sub-navigation for the six course views, drawn as one borderless row.
+///
+/// Why:
+/// The six views used to announce themselves inside each view's own header
+/// box, so switching views changed a title but never showed the alternatives.
+/// One persistent row makes the number keys discoverable.
+
+fn render_course_nav(frame: &mut Frame, area: Rect, app: &App) {
+
+    let views = [
+        (CourseView::Today, "1", "今日"),
+        (CourseView::Schedule, "2", "课表"),
+        (CourseView::Exams, "3", "考试"),
+        (CourseView::Grades, "4", "成绩"),
+        (CourseView::Classrooms, "5", "空教室"),
+        (CourseView::Tasks, "6", "作业"),
+    ];
+
+    let mut spans = Vec::new();
+
+    for (view, key, label) in views {
+
+        if view == app.schedule.view {
+
+            spans.push(Span::styled(
+                format!(" {key} {label} "),
+                theme::selection_style(),
+            ));
+        } else {
+
+            spans.push(Span::styled(format!(" {key} "), theme::label_style()));
+
+            spans.push(Span::styled(format!("{label} "), theme::muted_style()));
+        }
+
+        spans.push(Span::raw(" "));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    if let Some(indicator) = search_indicator(app) {
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![indicator, Span::raw(" ")])).alignment(Alignment::Right),
+            area,
+        );
+    }
+}
+
+/// The search box state, shown at the nav row's right edge when active.
+
+fn search_indicator(app: &App) -> Option<Span<'static>> {
+
+    if app.schedule.filtering {
+
+        Some(Span::styled(
+            format!("/ {}_", app.schedule.query),
+            Style::default().fg(theme::ACCENT),
+        ))
+    } else if !app.schedule.query.is_empty() {
+
+        Some(Span::styled(
+            format!("/ {}", app.schedule.query),
+            theme::muted_style(),
+        ))
+    } else {
+
+        None
+    }
+}
+
+/// Splits the content zone into course nav, body, and a footer of `footer_rows`.
+
+fn course_layout(area: Rect, footer_rows: u16) -> [Rect; 3] {
+
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(footer_rows),
+    ])
+    .areas(area)
+}
+
+/// One summary row above a list view, replacing the old header box.
+
+fn render_view_summary(frame: &mut Frame, area: Rect, spans: Vec<Span<'static>>) {
+
+    let mut line = vec![Span::raw(" ")];
+
+    line.extend(spans);
+
+    frame.render_widget(Paragraph::new(Line::from(line)), area);
+}
+
+/// Placeholder row for an empty list, phrased by loading state.
+
+fn empty_row(
+    loading: bool,
+    tick: u64,
+    loading_label: &str,
+    empty_label: &str,
+) -> ListItem<'static> {
+
+    if loading {
+
+        ListItem::new(Line::from(vec![
+            Span::raw(" "),
+            theme::activity_badge(tick, true, loading_label),
+        ]))
+    } else {
+
+        ListItem::new(Line::from(Span::styled(
+            format!(" {empty_label}"),
+            theme::muted_style(),
+        )))
+    }
+}
+
+/// Key hint row at the bottom of a content view.
+
+fn render_key_hint(frame: &mut Frame, area: Rect, hint: &str) {
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {hint}"),
+            theme::muted_style(),
+        ))),
+        area,
+    );
+}
+
+/// Names the campus code used by the empty-classroom query.
+///
+/// Why:
+/// The code is a bare integer upstream. Showing "1 校区" tells the reader
+/// nothing about which campus they are looking at.
+
+fn campus_label(code: i64) -> &'static str {
+
+    match code {
+        1 => "学院路",
+        2 => "沙河",
+        _ => "未知",
+    }
 }
 
 fn render_schedule(frame: &mut Frame, area: Rect, app: &App) {
@@ -314,96 +779,17 @@ fn render_schedule(frame: &mut Frame, area: Rect, app: &App) {
         CourseView::Schedule => {}
     }
 
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(12),
-            Constraint::Length(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
+    let [nav, body, detail_area] = course_layout(area, 3);
 
-    let account = app.schedule.account.as_deref().unwrap_or("未登录");
-
-    let semester = app.schedule.current_semester();
-
-    let (state_text, state_style) = if app.schedule.updating {
-
-        ("正在更新", Style::default().fg(theme::WARN))
-    } else if semester.is_some() {
-
-        ("离线可读", Style::default().fg(theme::OK))
-    } else {
-
-        ("尚未导入", theme::muted_style())
-    };
-
-    let portal_style = match app.schedule.portal() {
-        crate::schedule::PortalKind::Graduate => Style::default().fg(theme::INFO),
-        crate::schedule::PortalKind::Undergraduate => Style::default().fg(theme::OK),
-        crate::schedule::PortalKind::Unknown => theme::muted_style(),
-    };
-
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled("\u{8d26}\u{53f7}: ", theme::label_style()),
-        Span::styled(account.to_string(), theme::text_style()),
-        Span::styled("  |  \u{5b66}\u{671f}: ", theme::label_style()),
-        Span::styled(
-            semester
-                .map(|item| item.term_code.clone())
-                .unwrap_or_else(|| "\u{672a}\u{5bfc}\u{5165}".to_string()),
-            Style::default().fg(theme::INFO),
-        ),
-        Span::styled("  |  \u{95e8}\u{6237}: ", theme::label_style()),
-        Span::styled(app.schedule.portal_label(), portal_style),
-        Span::raw("  |  "),
-        // Spinner appears only while an import is actually in flight.
-        theme::activity_badge_styled(app.tick, app.schedule.updating, state_text, state_style),
-    ]))
-    .block(
-        Block::default()
-            .title(app.schedule.portal_label())
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    );
-
-    frame.render_widget(header, vertical[0]);
-
-    let week = app.schedule.current_week();
-
-    let controls = Paragraph::new(format!(
-        "学期: {} | 周次: {} | {} | ,/. 切学期 | [ ] 或 h/l 切周 | u 更新整学期",
-        app.schedule
-            .current_schedule()
-            .map(|item| item.term_name.as_str())
-            .or_else(|| semester.map(|item| item.term_code.as_str()))
-            .unwrap_or("无缓存"),
-        week.map(|item| item.name.as_str()).unwrap_or("无周次"),
-        week.map(|item| format!("{} ~ {}", item.start_date, item.end_date))
-            .unwrap_or_else(|| "无日期".to_string()),
-    ))
-    .block(
-        Block::default()
-            .title("课表操作")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_IDLE))
-            .title_style(theme::title_style()),
-    )
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(controls, vertical[1]);
+    render_course_nav(frame, nav, app);
 
     let schedule = app.schedule.current_schedule();
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 7); 7])
-        .split(vertical[2]);
+    let columns = Layout::horizontal([Constraint::Ratio(1, 7); 7]).split(body);
 
     let labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+    let today_index = Local::now().weekday().num_days_from_monday() as usize;
 
     for (day, column) in columns.iter().enumerate() {
 
@@ -420,119 +806,159 @@ fn render_schedule(frame: &mut Frame, area: Rect, app: &App) {
 
         let items = if entries.is_empty() {
 
-            vec![ListItem::new("-")]
+            vec![ListItem::new(Span::styled("—", theme::muted_style()))]
         } else {
 
             entries
                 .iter()
                 .map(|(index, entry)| {
 
-                    let label = format!(
-                        "{}-{}\n{}\n{}",
-                        entry.begin_time.as_deref().unwrap_or("--:--"),
-                        entry.end_time.as_deref().unwrap_or("--:--"),
-                        entry.course_name,
-                        entry.place.as_deref().unwrap_or("未填写地点"),
-                    );
+                    let selected = *index == app.schedule.selected_entry;
 
-                    let style = if Some(*index) == Some(app.schedule.selected_entry) {
+                    let plain = |style: Style| if selected { Style::default() } else { style };
 
-                        theme::selection_style()
+                    let lines = vec![
+                        Line::from(Span::styled(
+                            format!(
+                                "{}-{}",
+                                entry.begin_time.as_deref().unwrap_or("--:--"),
+                                entry.end_time.as_deref().unwrap_or("--:--"),
+                            ),
+                            plain(theme::muted_style()),
+                        )),
+                        Line::from(Span::styled(
+                            entry.course_name.clone(),
+                            plain(theme::text_style()),
+                        )),
+                        Line::from(Span::styled(
+                            entry
+                                .place
+                                .clone()
+                                .unwrap_or_else(|| "未填写地点".to_string()),
+                            plain(Style::default().fg(theme::INFO)),
+                        )),
+                    ];
+
+                    let item = ListItem::new(lines);
+
+                    if selected {
+
+                        item.style(theme::selection_style())
                     } else {
 
-                        Style::default()
-                    };
-
-                    ListItem::new(label).style(style)
+                        item
+                    }
                 })
                 .collect()
         };
 
-        let list = List::new(items)
-            .block(Block::default().title(labels[day]).borders(Borders::ALL))
-            .highlight_symbol("");
+        // Today's column gets the accent border so the eye lands on it first.
+        let is_today = day == today_index;
+
+        let list = List::new(items).block(
+            Block::default()
+                .title(labels[day])
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if is_today {
+
+                    theme::BORDER_FOCUS
+                } else {
+
+                    theme::BORDER_IDLE
+                }))
+                .title_style(if is_today {
+
+                    theme::title_style()
+                } else {
+
+                    theme::subtitle_style()
+                }),
+        );
 
         frame.render_widget(list, *column);
     }
 
-    let detail = if let Some(entry) = app.schedule.selected_entry() {
+    let detail_lines = if let Some(entry) = app.schedule.selected_entry() {
 
-        Paragraph::new(vec![
-            Line::from(format!(
-                "课程: {} ({})",
-                entry.course_name, entry.course_code
+        vec![
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(entry.course_name.clone(), theme::text_style()),
+                Span::styled(format!("  {}", entry.course_code), theme::muted_style()),
+            ]),
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!(
+                        "{} - {}",
+                        entry.begin_time.as_deref().unwrap_or("--:--"),
+                        entry.end_time.as_deref().unwrap_or("--:--")
+                    ),
+                    theme::muted_style(),
+                ),
+                sep(),
+                Span::styled(
+                    format!(
+                        "第 {}-{} 节",
+                        entry
+                            .begin_section
+                            .map_or("-".to_string(), |value| value.to_string()),
+                        entry
+                            .end_section
+                            .map_or("-".to_string(), |value| value.to_string())
+                    ),
+                    theme::muted_style(),
+                ),
+                sep(),
+                Span::styled(
+                    entry
+                        .place
+                        .clone()
+                        .unwrap_or_else(|| "未填写地点".to_string()),
+                    Style::default().fg(theme::INFO),
+                ),
+                sep(),
+                Span::styled(
+                    entry
+                        .weeks_and_teachers
+                        .clone()
+                        .unwrap_or_else(|| "未填写教师".to_string()),
+                    theme::muted_style(),
+                ),
+            ]),
+            Line::from(Span::styled(
+                " ,/. 切学期  [ ] 或 h/l 切周  j/k 选课程  u 更新整学期",
+                theme::muted_style(),
             )),
-            Line::from(format!(
-                "时间: {} - {} | 节次: {}-{}",
-                entry.begin_time.as_deref().unwrap_or("--:--"),
-                entry.end_time.as_deref().unwrap_or("--:--"),
-                entry
-                    .begin_section
-                    .map(|value| value.to_string())
-                    .as_deref()
-                    .unwrap_or("-"),
-                entry
-                    .end_section
-                    .map(|value| value.to_string())
-                    .as_deref()
-                    .unwrap_or("-")
-            )),
-            Line::from(format!(
-                "地点: {} | 教师: {}",
-                entry.place.as_deref().unwrap_or("未填写"),
-                entry.weeks_and_teachers.as_deref().unwrap_or("未填写")
-            )),
-            Line::from("课表只读；按 u 手动导入整学期，更新失败不会覆盖旧缓存"),
-        ])
+        ]
     } else {
 
-        Paragraph::new("没有当前周课程。首次使用请按 u 更新整学期课表")
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                " 当前周没有课程。首次使用请按 u 导入整学期课表",
+                theme::muted_style(),
+            )),
+            Line::from(Span::styled(
+                " ,/. 切学期  [ ] 或 h/l 切周  u 更新整学期",
+                theme::muted_style(),
+            )),
+        ]
     };
 
-    frame.render_widget(
-        detail
-            .block(
-                Block::default()
-                    .title("课程详情")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::BORDER_IDLE))
-                    .title_style(theme::title_style()),
-            )
-            .wrap(Wrap { trim: true }),
-        vertical[3],
-    );
-
-    render_event_log_block(frame, vertical[4], app);
+    frame.render_widget(Paragraph::new(detail_lines), detail_area);
 }
 
 fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(8),
-            Constraint::Length(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
+    let [nav, body, footer] = course_layout(area, 1);
+
+    render_course_nav(frame, nav, app);
 
     let today = Local::now().date_naive();
 
     let entries = app.schedule.today_entries();
 
-    let title = if app.schedule.filtering {
-
-        format!("今日课程 | 搜索: {}_", app.schedule.query)
-    } else if app.schedule.query.is_empty() {
-
-        "今日课程 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | / 搜索".to_string()
-    } else {
-
-        format!("今日课程 | 搜索: {} | / 修改", app.schedule.query)
-    };
-
-    // Sign-in progress across today's courses, drawn as a gradient bar.
     let signed = entries
         .iter()
         .filter(|(_, entry)| {
@@ -544,16 +970,23 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
         })
         .count();
 
-    let mut summary_line = vec![
-        Span::styled("日期: ", theme::label_style()),
-        Span::styled(today.to_string(), Style::default().fg(theme::INFO)),
-        Span::styled(format!("  |  共 {} 门", entries.len()), theme::text_style()),
-        Span::styled("  |  签到 ", theme::label_style()),
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+    let mut summary = vec![
+        Span::styled(
+            today.format("%m-%d %a").to_string(),
+            Style::default().fg(theme::INFO),
+        ),
+        sep(),
+        Span::styled(format!("{} 门", entries.len()), theme::text_style()),
+        sep(),
+        Span::styled("签到 ", theme::muted_style()),
     ];
 
-    summary_line.extend(theme::progress_bar(signed, entries.len(), 12));
+    summary.extend(theme::progress_bar(signed, entries.len(), 10));
 
-    summary_line.push(Span::styled(
+    summary.push(Span::styled(
         format!(" {signed}/{}", entries.len()),
         Style::default().fg(if signed == entries.len() && !entries.is_empty() {
 
@@ -564,40 +997,20 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
         }),
     ));
 
-    if app.schedule.updating {
-
-        summary_line.push(Span::raw("  "));
-
-        summary_line.push(theme::activity_badge(app.tick, true, "更新中"));
-    }
-
-    let header = Paragraph::new(vec![
-        Line::from(summary_line),
-        Line::from(Span::styled(
-            "j/k 选择课程 | r 刷新当前数据 | u 更新整学期课表 | tab 切换签到工作区",
-            theme::muted_style(),
-        )),
-    ])
-    .block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    )
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(header, chunks[0]);
+    render_view_summary(frame, summary_area, summary);
 
     let items = if entries.is_empty() {
 
-        vec![ListItem::new(if app.schedule.semesters.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            if app.schedule.semesters.is_empty() {
 
-            "暂无本地课表，请按 u 导入整学期课表"
-        } else {
+                " 暂无本地课表，按 u 导入整学期课表"
+            } else {
 
-            "今天没有匹配课程"
-        })]
+                " 今天没有匹配课程"
+            },
+            theme::muted_style(),
+        )))]
     } else {
 
         entries
@@ -613,101 +1026,361 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
                     .map(today_sign_state)
                     .unwrap_or(("未同步", theme::muted_style()));
 
-                // Color the sign state separately from the row so the state stays
-                // readable even when the row itself is selected.
-                let row_style = if *index == app.schedule.selected_entry {
+                let selected = *index == app.schedule.selected_entry;
 
-                    theme::selection_style()
-                } else {
-
-                    Style::default()
-                };
+                let plain = |style: Style| if selected { Style::default() } else { style };
 
                 let line = Line::from(vec![
+                    Span::raw(" "),
                     Span::styled(
                         format!(
                             "{}-{}  ",
                             entry.begin_time.as_deref().unwrap_or("--:--"),
                             entry.end_time.as_deref().unwrap_or("--:--"),
                         ),
-                        theme::muted_style(),
-                    ),
-                    Span::styled(entry.course_name.clone(), theme::text_style()),
-                    Span::styled(
-                        format!("  [{}]", entry.place.as_deref().unwrap_or("未填写地点")),
-                        Style::default().fg(theme::INFO),
+                        plain(theme::muted_style()),
                     ),
                     Span::styled(
-                        format!(
-                            "  {}",
-                            entry.weeks_and_teachers.as_deref().unwrap_or("未填写教师")
-                        ),
-                        theme::muted_style(),
+                        format!("{:<16}", entry.course_name),
+                        plain(theme::text_style()),
+                    ),
+                    Span::styled(
+                        format!("  {}", entry.place.as_deref().unwrap_or("未填写地点")),
+                        plain(Style::default().fg(theme::INFO)),
+                    ),
+                    Span::styled(
+                        format!("  {}", entry.weeks_and_teachers.as_deref().unwrap_or("")),
+                        plain(theme::muted_style()),
                     ),
                     Span::raw("  "),
                     Span::styled(status_text, status_style),
                 ]);
 
-                ListItem::new(line).style(row_style)
+                let item = ListItem::new(line);
+
+                if selected {
+
+                    item.style(theme::selection_style())
+                } else {
+
+                    item
+                }
             })
             .collect()
     };
 
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title("课程列表")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER_FOCUS))
-                .title_style(theme::title_style()),
-        ),
-        chunks[1],
+    frame.render_widget(List::new(items), list_area);
+
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选课程  / 搜索  r 刷新  u 更新整学期课表",
+    );
+}
+
+fn render_exams(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [nav, body, footer] = course_layout(area, 1);
+
+    render_course_nav(frame, nav, app);
+
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+    render_view_summary(
+        frame,
+        summary_area,
+        vec![Span::styled(
+            format!("{} 场考试", app.schedule.exams.len()),
+            theme::text_style(),
+        )],
     );
 
-    let detail = app
+    let items = if app.schedule.exams.is_empty() {
+
+        vec![empty_row(
+            app.schedule.academic_loading,
+            app.tick,
+            "正在拉取考试安排",
+            "暂无考试数据，按 r 加载",
+        )]
+    } else {
+
+        app.schedule
+            .exams
+            .iter()
+            .map(|exam| {
+
+                ListItem::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        exam.exam_date.as_deref().unwrap_or("未定日期").to_string(),
+                        Style::default().fg(theme::INFO),
+                    ),
+                    Span::styled(
+                        format!(
+                            " {}-{}",
+                            exam.start_time.as_deref().unwrap_or("--:--"),
+                            exam.end_time.as_deref().unwrap_or("--:--"),
+                        ),
+                        theme::muted_style(),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(exam.course_name.clone(), theme::text_style()),
+                    Span::styled(
+                        format!("  {}", exam.place.as_deref().unwrap_or("未定地点")),
+                        theme::label_style(),
+                    ),
+                    Span::styled(
+                        format!("  座位 {}", exam.seat.as_deref().unwrap_or("-")),
+                        Style::default().fg(theme::OK),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    frame.render_widget(List::new(items), list_area);
+
+    render_key_hint(frame, footer, "r 刷新");
+}
+
+fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [nav, body, footer] = course_layout(area, 1);
+
+    render_course_nav(frame, nav, app);
+
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+    render_view_summary(
+        frame,
+        summary_area,
+        vec![Span::styled(
+            format!("{} 门成绩", app.schedule.grades.len()),
+            theme::text_style(),
+        )],
+    );
+
+    let items = if app.schedule.grades.is_empty() {
+
+        vec![empty_row(
+            app.schedule.academic_loading,
+            app.tick,
+            "正在拉取成绩",
+            "暂无成绩数据，按 r 加载",
+        )]
+    } else {
+
+        app.schedule
+            .grades
+            .iter()
+            .map(|grade| {
+
+                let score = grade.score.as_deref().unwrap_or("-").trim();
+
+                let score_style = match score.parse::<f64>() {
+                    Ok(value) if value < 60.0 => {
+                        Style::default()
+                            .fg(theme::ERROR)
+                            .add_modifier(Modifier::BOLD)
+                    }
+                    Ok(value) if value >= 85.0 => {
+                        Style::default().fg(theme::OK).add_modifier(Modifier::BOLD)
+                    }
+                    Ok(_) => Style::default().fg(theme::WARN),
+                    Err(_) => theme::muted_style(),
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(format!("{score:>5}"), score_style),
+                    Span::raw("  "),
+                    Span::styled(grade.course_name.clone(), theme::text_style()),
+                    Span::styled(
+                        format!(
+                            "  {} 学分",
+                            grade
+                                .credit
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        theme::muted_style(),
+                    ),
+                    Span::styled(
+                        format!("  绩点 {}", grade.grade_point.as_deref().unwrap_or("-")),
+                        Style::default().fg(theme::INFO),
+                    ),
+                    Span::styled(
+                        format!("  {}", grade.passed.as_deref().unwrap_or("")),
+                        theme::muted_style(),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    frame.render_widget(List::new(items), list_area);
+
+    render_key_hint(frame, footer, "r 刷新");
+}
+
+fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [nav, body, footer] = course_layout(area, 1);
+
+    render_course_nav(frame, nav, app);
+
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+    render_view_summary(
+        frame,
+        summary_area,
+        vec![
+            Span::styled(
+                format!("{} 校区", campus_label(app.schedule.classroom_campus)),
+                Style::default().fg(theme::INFO),
+            ),
+            sep(),
+            Span::styled(app.schedule.classroom_date.clone(), theme::text_style()),
+            sep(),
+            Span::styled(
+                format!("{} 间空闲", app.schedule.classrooms.len()),
+                theme::muted_style(),
+            ),
+        ],
+    );
+
+    let items = if app.schedule.classrooms.is_empty() {
+
+        vec![empty_row(
+            app.schedule.academic_loading,
+            app.tick,
+            "正在查询空教室",
+            "暂无空教室数据，按 r 加载",
+        )]
+    } else {
+
+        app.schedule
+            .classrooms
+            .iter()
+            .map(|room| {
+
+                ListItem::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(format!("{:<8}", room.building), theme::label_style()),
+                    Span::styled(format!("{:<10}", room.name), theme::text_style()),
+                    Span::styled("空闲节次 ", theme::muted_style()),
+                    Span::styled(
+                        room.free_sections
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        Style::default().fg(theme::OK),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    frame.render_widget(List::new(items), list_area);
+
+    render_key_hint(frame, footer, "r 刷新");
+}
+
+fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [nav, body, footer] = course_layout(area, 1);
+
+    render_course_nav(frame, nav, app);
+
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+    let pending = app
         .schedule
-        .selected_entry()
-        .map(|entry| {
+        .tasks
+        .iter()
+        .filter(|task| task.status.contains("未提交") || task.status.contains("未作答"))
+        .count();
 
-            Paragraph::new(vec![
-                Line::from(format!(
-                    "课程: {} ({})",
-                    entry.course_name, entry.course_code
-                )),
-                Line::from(format!(
-                    "地点: {}",
-                    entry.place.as_deref().unwrap_or("未填写")
-                )),
-                Line::from(format!(
-                    "教师: {}",
-                    entry.weeks_and_teachers.as_deref().unwrap_or("未填写")
-                )),
-                Line::from(format!(
-                    "签到状态: {}",
-                    app.courses
-                        .iter()
-                        .find(|course| course.name == entry.course_name)
-                        .map(today_sign_status)
-                        .unwrap_or("未同步")
-                )),
-            ])
-        })
-        .unwrap_or_else(|| Paragraph::new("未选择课程"));
+    render_view_summary(
+        frame,
+        summary_area,
+        vec![
+            Span::styled(
+                format!("{} 项作业", app.schedule.tasks.len()),
+                theme::text_style(),
+            ),
+            sep(),
+            Span::styled(
+                format!("{pending} 项待提交"),
+                if pending > 0 {
 
-    frame.render_widget(
-        detail
-            .block(
-                Block::default()
-                    .title("下一步")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::BORDER_IDLE))
-                    .title_style(theme::title_style()),
-            )
-            .wrap(Wrap { trim: true }),
-        chunks[2],
+                    Style::default().fg(theme::WARN)
+                } else {
+
+                    theme::muted_style()
+                },
+            ),
+        ],
     );
 
-    render_event_log_block(frame, chunks[3], app);
+    let items = if app.schedule.tasks.is_empty() {
+
+        vec![empty_row(
+            app.schedule.academic_loading,
+            app.tick,
+            "正在拉取作业",
+            "暂无作业数据，按 r 加载",
+        )]
+    } else {
+
+        app.schedule
+            .tasks
+            .iter()
+            .map(|task| {
+
+                let status_style =
+                    if task.status.contains("未提交") || task.status.contains("未作答") {
+
+                        Style::default()
+                            .fg(theme::ERROR)
+                            .add_modifier(Modifier::BOLD)
+                    } else if task.status.contains("已提交") {
+
+                        Style::default().fg(theme::OK)
+                    } else {
+
+                        theme::muted_style()
+                    };
+
+                ListItem::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(format!("{:<6}", task.status), status_style),
+                    Span::raw(" "),
+                    Span::styled(task.course_name.clone(), theme::label_style()),
+                    Span::raw("  "),
+                    Span::styled(task.title.clone(), theme::text_style()),
+                    Span::styled(
+                        format!("  截止 {}", task.due_time.as_deref().unwrap_or("未定")),
+                        Style::default().fg(theme::INFO),
+                    ),
+                    Span::styled(
+                        format!("  得分 {}", task.score.as_deref().unwrap_or("-")),
+                        theme::muted_style(),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    frame.render_widget(List::new(items), list_area);
+
+    render_key_hint(frame, footer, "r 刷新");
 }
 
 /// Sign status text plus the color that carries its meaning.
@@ -715,11 +1388,6 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
 /// Why:
 /// This is the value a user scans for on the today list. Coloring it by state
 /// lets them spot "can sign now" and "already ended" without reading each row.
-
-fn today_sign_status(course: &crate::model::CourseDetailItem) -> &'static str {
-
-    today_sign_state(course).0
-}
 
 fn today_sign_state(course: &crate::model::CourseDetailItem) -> (&'static str, Style) {
 
@@ -752,361 +1420,6 @@ fn today_sign_state(course: &crate::model::CourseDetailItem) -> (&'static str, S
     }
 }
 
-fn render_exams(frame: &mut Frame, area: Rect, app: &App) {
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
-
-    let header = Paragraph::new(format!(
-        "考试安排 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 当前记录 {} 条",
-        app.schedule.exams.len()
-    ))
-    .block(
-        Block::default()
-            .title("考试")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    )
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(header, chunks[0]);
-
-    let items = if app.schedule.exams.is_empty() {
-
-        vec![ListItem::new(if app.schedule.academic_loading {
-
-            Line::from(vec![theme::activity_badge(
-                app.tick,
-                true,
-                "正在拉取考试安排",
-            )])
-        } else {
-
-            Line::from(Span::styled(
-                "暂无考试数据，按 r 加载",
-                theme::muted_style(),
-            ))
-        })]
-    } else {
-
-        app.schedule
-            .exams
-            .iter()
-            .map(|exam| {
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        exam.exam_date.as_deref().unwrap_or("未定日期").to_string(),
-                        Style::default().fg(theme::INFO),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(exam.course_name.clone(), theme::text_style()),
-                    Span::styled(
-                        format!(
-                            " {}-{}",
-                            exam.start_time.as_deref().unwrap_or("--:--"),
-                            exam.end_time.as_deref().unwrap_or("--:--"),
-                        ),
-                        theme::muted_style(),
-                    ),
-                    Span::styled(
-                        format!("  {}", exam.place.as_deref().unwrap_or("未定地点")),
-                        theme::label_style(),
-                    ),
-                    Span::styled(
-                        format!("  座位 {}", exam.seat.as_deref().unwrap_or("-")),
-                        Style::default().fg(theme::OK),
-                    ),
-                ]))
-            })
-            .collect()
-    };
-
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title("考试列表")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER_IDLE)),
-        ),
-        chunks[1],
-    );
-
-    render_event_log_block(frame, chunks[2], app);
-}
-
-fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
-
-    let header = Paragraph::new(format!(
-        "成绩查询 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 当前记录 {} 条",
-        app.schedule.grades.len()
-    ))
-    .block(
-        Block::default()
-            .title("成绩")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    )
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(header, chunks[0]);
-
-    let items = if app.schedule.grades.is_empty() {
-
-        vec![ListItem::new(if app.schedule.academic_loading {
-
-            Line::from(vec![theme::activity_badge(app.tick, true, "正在拉取成绩")])
-        } else {
-
-            Line::from(Span::styled(
-                "暂无成绩数据，按 r 加载",
-                theme::muted_style(),
-            ))
-        })]
-    } else {
-
-        app.schedule
-            .grades
-            .iter()
-            .map(|grade| {
-
-                let score = grade.score.as_deref().unwrap_or("-").trim();
-
-                // Emphasize the score by band so a failing grade is visible at a glance.
-                let score_style = match score.parse::<f64>() {
-                    Ok(value) if value < 60.0 => {
-                        Style::default()
-                            .fg(theme::ERROR)
-                            .add_modifier(Modifier::BOLD)
-                    }
-                    Ok(value) if value >= 85.0 => {
-                        Style::default().fg(theme::OK).add_modifier(Modifier::BOLD)
-                    }
-                    Ok(_) => Style::default().fg(theme::WARN),
-                    Err(_) => theme::muted_style(),
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(grade.course_name.clone(), theme::text_style()),
-                    Span::styled("  成绩: ", theme::label_style()),
-                    Span::styled(score.to_string(), score_style),
-                    Span::styled(
-                        format!(
-                            "  学分: {}",
-                            grade
-                                .credit
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "-".to_string()),
-                        ),
-                        theme::muted_style(),
-                    ),
-                    Span::styled(
-                        format!("  绩点: {}", grade.grade_point.as_deref().unwrap_or("-")),
-                        Style::default().fg(theme::INFO),
-                    ),
-                    Span::styled(
-                        format!("  {}", grade.passed.as_deref().unwrap_or("-")),
-                        theme::muted_style(),
-                    ),
-                ]))
-            })
-            .collect()
-    };
-
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title("成绩列表")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER_IDLE)),
-        ),
-        chunks[1],
-    );
-
-    render_event_log_block(frame, chunks[2], app);
-}
-
-fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
-
-    let header = Paragraph::new(format!(
-        "空教室 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 校区 {} | 日期 {}",
-        app.schedule.classroom_campus, app.schedule.classroom_date
-    ))
-    .block(
-        Block::default()
-            .title("空教室")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    )
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(header, chunks[0]);
-
-    let items = if app.schedule.classrooms.is_empty() {
-
-        vec![ListItem::new(if app.schedule.academic_loading {
-
-            "加载空教室中..."
-        } else {
-
-            "暂无空教室数据，按 r 加载"
-        })]
-    } else {
-
-        app.schedule
-            .classrooms
-            .iter()
-            .map(|room| {
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(room.building.clone(), theme::label_style()),
-                    Span::raw(" "),
-                    Span::styled(room.name.clone(), theme::text_style()),
-                    Span::styled("  空闲节次: ", theme::muted_style()),
-                    Span::styled(
-                        room.free_sections
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(","),
-                        Style::default().fg(theme::OK),
-                    ),
-                ]))
-            })
-            .collect()
-    };
-
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title("教室列表")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER_IDLE)),
-        ),
-        chunks[1],
-    );
-
-    render_event_log_block(frame, chunks[2], app);
-}
-
-fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
-
-    let header = Paragraph::new(format!(
-        "作业 | 1 今日 2 课表 3 考试 4 成绩 5 空教室 6 作业 | r 刷新 | 当前 {} 条",
-        app.schedule.tasks.len()
-    ))
-    .block(
-        Block::default()
-            .title("作业")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    )
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(header, chunks[0]);
-
-    let items = if app.schedule.tasks.is_empty() {
-
-        vec![ListItem::new(if app.schedule.academic_loading {
-
-            Line::from(vec![theme::activity_badge(app.tick, true, "正在拉取作业")])
-        } else {
-
-            Line::from(Span::styled(
-                "暂无作业数据，按 r 加载",
-                theme::muted_style(),
-            ))
-        })]
-    } else {
-
-        app.schedule
-            .tasks
-            .iter()
-            .map(|task| {
-
-                let status_style =
-                    if task.status.contains("未提交") || task.status.contains("未作答") {
-
-                        Style::default()
-                            .fg(theme::ERROR)
-                            .add_modifier(Modifier::BOLD)
-                    } else if task.status.contains("已提交") {
-
-                        Style::default().fg(theme::OK)
-                    } else {
-
-                        theme::muted_style()
-                    };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(task.course_name.clone(), theme::label_style()),
-                    Span::raw("  "),
-                    Span::styled(task.title.clone(), theme::text_style()),
-                    Span::styled(
-                        format!("  截止 {}", task.due_time.as_deref().unwrap_or("未定")),
-                        Style::default().fg(theme::INFO),
-                    ),
-                    Span::styled(
-                        format!("  得分 {}", task.score.as_deref().unwrap_or("-")),
-                        theme::muted_style(),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(task.status.clone(), status_style),
-                ]))
-            })
-            .collect()
-    };
-
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title("作业列表")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER_IDLE)),
-        ),
-        chunks[1],
-    );
-
-    render_event_log_block(frame, chunks[2], app);
-}
-
 /// Renders the iClass weekly grid plus the selected-course detail panel.
 ///
 /// How:
@@ -1117,105 +1430,65 @@ fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
 
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(12),
-            Constraint::Length(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
+    let [day_header, grid, detail_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(4),
+    ])
+    .areas(area);
 
-    let header_line = if let Some(session) = &app.session {
-
-        Line::from(vec![
-            Span::styled("用户: ", theme::label_style()),
-            Span::styled(session.user_name.clone(), theme::text_style()),
-            Span::styled(format!(" ({})", session.user_id), theme::muted_style()),
-            Span::styled("  |  模式: ", theme::label_style()),
-            Span::styled(
-                if session.use_vpn { "VPN" } else { "直连" },
-                Style::default().fg(theme::INFO),
-            ),
-            Span::styled("  |  ", theme::muted_style()),
-            theme::activity_badge(
-                app.tick,
-                app.iclass_loading,
-                if app.iclass_loading {
-
-                    "正在加载课程"
-                } else {
-
-                    "iClass 就绪"
-                },
-            ),
-            Span::styled(
-                format!("  |  共 {} 条课程", app.courses.len()),
-                theme::muted_style(),
-            ),
-        ])
-    } else {
-
-        Line::from(Span::styled("未登录", theme::muted_style()))
-    };
-
-    let header = Paragraph::new(header_line).block(
-        Block::default()
-            .title("会话")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_IDLE))
-            .title_style(theme::title_style()),
-    );
-
-    frame.render_widget(header, vertical[0]);
-
-    let week_text = if let Some(week) = app.selected_week_group() {
-
-        format!(
-            "当前周: {} | {} ~ {} | {} 条课程 | H/L 或 [ ] 切周",
-            week.label,
-            week.start_date,
-            week.end_date,
-            app.visible_courses_len()
-        )
-    } else {
-
-        "当前没有可显示的周数据".to_string()
-    };
-
-    let week_bar =
-        Paragraph::new(week_text).block(Block::default().title("周视图").borders(Borders::ALL));
-
-    frame.render_widget(week_bar, vertical[1]);
-
-    let day_columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 7); 7])
-        .split(vertical[2]);
+    let columns = Layout::horizontal([Constraint::Ratio(1, 7); 7]).split(grid);
 
     let week_start = app
         .selected_week_group()
         .and_then(|group| NaiveDate::parse_from_str(&group.start_date, "%Y-%m-%d").ok());
 
+    let labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+    let today = Local::now().date_naive();
+
+    // Day labels ride above each column so the grid keeps one frame per day
+    // and the labels stay next to what they label.
+    let header_columns = Layout::horizontal([Constraint::Ratio(1, 7); 7]).split(day_header);
+
+    for (offset, column) in header_columns.iter().enumerate() {
+
+        let label = match week_start {
+            Some(start) => {
+
+                let date = start + Duration::days(offset as i64);
+
+                let is_today = date == today;
+
+                Span::styled(
+                    format!(" {} {}", labels[offset], date.format("%m/%d")),
+                    if is_today {
+
+                        theme::title_style()
+                    } else {
+
+                        theme::subtitle_style()
+                    },
+                )
+            }
+            None => Span::styled(format!(" {}", labels[offset]), theme::subtitle_style()),
+        };
+
+        frame.render_widget(Paragraph::new(Line::from(label)), *column);
+    }
+
     let selected_absolute_index = app.selected_course_absolute_index();
 
-    let weekday_labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-
-    for (offset, area) in day_columns.iter().enumerate() {
+    for (offset, column) in columns.iter().enumerate() {
 
         let Some(week_start) = week_start else {
 
-            let empty = Paragraph::new("无周数据")
-                .block(
-                    Block::default()
-                        .title(weekday_labels[offset])
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: true });
-
-            frame.render_widget(empty, *area);
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER_IDLE)),
+                *column,
+            );
 
             continue;
         };
@@ -1223,8 +1496,6 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
         let date = week_start + Duration::days(offset as i64);
 
         let date_key = date.format("%Y-%m-%d").to_string();
-
-        let title = format!("{} {}", weekday_labels[offset], date.format("%m/%d"));
 
         let courses_in_day: Vec<usize> = app
             .visible_course_indices()
@@ -1235,7 +1506,7 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
 
         let items = if courses_in_day.is_empty() {
 
-            vec![ListItem::new("  -")]
+            vec![ListItem::new(Span::styled("—", theme::muted_style()))]
         } else {
 
             courses_in_day
@@ -1244,30 +1515,49 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
 
                     let course = &app.courses[*index];
 
-                    let mut style = if course.signed() {
+                    let selected = Some(*index) == selected_absolute_index;
 
-                        Style::default().fg(theme::OK)
+                    let plain = |style: Style| if selected { Style::default() } else { style };
+
+                    let lines = vec![
+                        Line::from(Span::styled(
+                            format!("{}-{}", course.start_time, course.end_time),
+                            plain(theme::muted_style()),
+                        )),
+                        Line::from(Span::styled(
+                            course.name.clone(),
+                            plain(theme::text_style()),
+                        )),
+                        Line::from(Span::styled(
+                            if course.signed() { "已签到" } else { "" },
+                            plain(Style::default().fg(theme::OK)),
+                        )),
+                    ];
+
+                    let item = ListItem::new(lines);
+
+                    if selected {
+
+                        item.style(theme::selection_style())
                     } else {
 
-                        Style::default()
-                    };
-
-                    if Some(*index) == selected_absolute_index {
-
-                        style = theme::selection_style();
+                        item
                     }
-
-                    let label =
-                        format!("{}-{}\n{}", course.start_time, course.end_time, course.name);
-
-                    ListItem::new(label).style(style)
                 })
                 .collect()
         };
 
-        let day_list = List::new(items)
-            .block(Block::default().title(title).borders(Borders::ALL))
-            .highlight_symbol("");
+        let is_today = date == today;
+
+        let day_list = List::new(items).block(Block::default().borders(Borders::ALL).border_style(
+            Style::default().fg(if is_today {
+
+                theme::BORDER_FOCUS
+            } else {
+
+                theme::BORDER_IDLE
+            }),
+        ));
 
         let selected_in_day = courses_in_day
             .iter()
@@ -1275,165 +1565,128 @@ fn render_iclass(frame: &mut Frame, area: Rect, app: &App) {
 
         let mut list_state = ListState::default().with_selected(selected_in_day);
 
-        frame.render_stateful_widget(day_list, *area, &mut list_state);
+        frame.render_stateful_widget(day_list, *column, &mut list_state);
     }
 
     let detail_lines = if let Some(course) = app.selected_course() {
 
         vec![
             Line::from(vec![
-                Span::styled("课程: ", theme::label_style()),
-                Span::raw(course.name.as_str()),
-            ]),
-            Line::from(vec![
-                Span::styled("日期: ", theme::label_style()),
-                Span::raw(course.date.as_str()),
-            ]),
-            Line::from(vec![
-                Span::styled("时间: ", theme::label_style()),
-                Span::raw(format!("{} - {}", course.start_time, course.end_time)),
-            ]),
-            Line::from(vec![
-                Span::styled("签到: ", theme::label_style()),
-                Span::raw(if course.signed() {
+                Span::raw(" "),
+                Span::styled(course.name.clone(), theme::text_style()),
+                Span::styled(
+                    if course.signed() {
 
-                    "已签到"
-                } else {
+                        "  已签到"
+                    } else {
 
-                    "未签到"
-                }),
+                        "  未签到"
+                    },
+                    if course.signed() {
+
+                        Style::default().fg(theme::OK)
+                    } else {
+
+                        Style::default().fg(theme::WARN)
+                    },
+                ),
             ]),
             Line::from(vec![
-                Span::styled("courseSchedId: ", theme::label_style()),
-                Span::raw(course.course_sched_id.as_str()),
+                Span::raw(" "),
+                Span::styled(course.date.clone(), theme::muted_style()),
+                sep(),
+                Span::styled(
+                    format!("{} - {}", course.start_time, course.end_time),
+                    theme::muted_style(),
+                ),
+                sep(),
+                Span::styled(course.course_sched_id.clone(), theme::muted_style()),
             ]),
-            Line::from(""),
-            Line::from(
-                "操作: r 刷新 | s 直接签到 | g 终端二维码 | G 外部二维码 | Shift+X 退出登录",
-            ),
-            Line::from(format!(
-                "外部二维码: {} | {}",
-                app.external_qr_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                app.external_qr_status.as_deref().unwrap_or("未启动")
+            Line::from(Span::styled(
+                " r 刷新  s 签到  g 终端二维码  G 外部二维码  H/L 切周  Shift+X 退出登录",
+                theme::muted_style(),
             )),
+            Line::from(vec![
+                Span::styled(" 二维码输出: ", theme::muted_style()),
+                Span::styled(
+                    app.external_qr_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    theme::text_style(),
+                ),
+                Span::styled(
+                    format!(
+                        "  {}",
+                        app.external_qr_status.as_deref().unwrap_or("未启动")
+                    ),
+                    theme::muted_style(),
+                ),
+            ]),
         ]
     } else {
 
-        vec![Line::from("当前没有课程")]
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                " 当前没有课程。r 刷新  H/L 切周",
+                theme::muted_style(),
+            )),
+            Line::from(""),
+            Line::from(""),
+        ]
     };
 
-    let detail = Paragraph::new(detail_lines)
-        .block(Block::default().title("详情").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(detail, vertical[3]);
-
-    render_event_log_block(frame, vertical[4], app);
+    frame.render_widget(Paragraph::new(detail_lines), detail_area);
 }
 
 /// Renders the BYKC workspace with view tabs, list content, detail, and status.
 
+/// Renders the BYKC workspace: a view switch row, the list, and a summary.
+
 fn render_bykc(frame: &mut Frame, area: Rect, app: &App) {
 
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(12),
-            Constraint::Length(6),
-        ])
-        .split(area);
+    let [nav, list_area, summary_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(6),
+        Constraint::Length(9),
+    ])
+    .areas(area);
 
-    let header_text = if let Some(session) = &app.session {
+    // View switch as one row, matching the course nav on the schedule tab.
+    let views = [
+        (BykcView::Courses, "1", "可选课程"),
+        (BykcView::Chosen, "2", "已选课程"),
+    ];
 
-        let statistics = bykc_statistics_summary(app);
+    let mut spans = Vec::new();
 
-        Line::from(vec![
-            Span::styled("用户: ", theme::label_style()),
-            Span::styled(session.user_name.clone(), theme::text_style()),
-            Span::styled(format!(" ({})", session.user_id), theme::muted_style()),
-            Span::styled("  |  VPN: ", theme::label_style()),
-            Span::styled(
-                if session.use_vpn { "开启" } else { "关闭" },
-                Style::default().fg(theme::INFO),
-            ),
-            Span::styled("  |  ", theme::muted_style()),
-            theme::activity_badge(
-                app.tick,
-                app.bykc.loading,
-                if app.bykc.loading {
+    for (view, key, label) in views {
 
-                    "正在加载 BYKC"
-                } else {
+        if view == app.bykc.view {
 
-                    "BYKC 就绪"
-                },
-            ),
-            Span::styled(
-                format!(
-                    "  |  可选 {} 门 | 已选 {} 门 | {statistics}",
-                    app.bykc.courses.len(),
-                    app.bykc.chosen_courses.len()
-                ),
-                theme::muted_style(),
-            ),
-        ])
-    } else {
+            spans.push(Span::styled(
+                format!(" {key} {label} "),
+                theme::selection_style(),
+            ));
+        } else {
 
-        Line::from(Span::styled("未登录", theme::muted_style()))
-    };
+            spans.push(Span::styled(format!(" {key} "), theme::label_style()));
 
-    let header = Paragraph::new(header_text).block(
-        Block::default()
-            .title("BYKC 会话")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER_FOCUS))
-            .title_style(theme::title_style()),
-    );
+            spans.push(Span::styled(format!("{label} "), theme::muted_style()));
+        }
 
-    frame.render_widget(header, vertical[0]);
-
-    let view_titles = [" 可选课程 ", " 已选课程 "]
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-
-    let selected_view = match app.bykc.view {
-        BykcView::Courses => 0,
-        BykcView::Chosen => 1,
-    };
-
-    let subtitle = format!(
-        " include_all={} | 1/2 或 h/l 切换视图 | o 查看详情 ",
-        if app.bykc.include_all { "on" } else { "off" }
-    );
-
-    let tabs = Tabs::new(view_titles)
-        .block(Block::default().title(subtitle).borders(Borders::ALL))
-        .select(selected_view)
-        .style(theme::muted_style())
-        .highlight_style(
-            Style::default()
-                .fg(theme::SELECTION_FG)
-                .bg(theme::OK)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    frame.render_widget(tabs, vertical[1]);
-
-    match app.bykc.view {
-        BykcView::Courses => render_bykc_courses_list(frame, vertical[2], app),
-        BykcView::Chosen => render_bykc_chosen_list(frame, vertical[2], app),
+        spans.push(Span::raw(" "));
     }
 
-    render_bykc_detail(frame, vertical[3], app);
+    frame.render_widget(Paragraph::new(Line::from(spans)), nav);
 
-    render_event_log_block(frame, vertical[4], app);
+    match app.bykc.view {
+        BykcView::Courses => render_bykc_courses_list(frame, list_area, app),
+        BykcView::Chosen => render_bykc_chosen_list(frame, list_area, app),
+    }
+
+    render_bykc_detail(frame, summary_area, app);
 }
 
 fn render_bykc_courses_list(frame: &mut Frame, area: Rect, app: &App) {
@@ -2333,51 +2586,6 @@ fn render_doctor_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(popup, area);
 }
 
-fn render_event_log_block(frame: &mut Frame, area: Rect, app: &App) {
-
-    let rows = app
-        .latest_events()
-        .iter()
-        .rev()
-        .take(4)
-        .map(|entry| {
-
-            let level = match entry.level {
-                EventLevel::Info => "INFO",
-                EventLevel::Success => "OK",
-                EventLevel::Warn => "WARN",
-                EventLevel::Error => "ERR",
-            };
-
-            let style = match entry.level {
-                EventLevel::Info => Style::default().fg(theme::ACCENT),
-                EventLevel::Success => Style::default().fg(theme::OK),
-                EventLevel::Warn => Style::default().fg(theme::ACCENT_WARM),
-                EventLevel::Error => {
-                    Style::default()
-                        .fg(theme::ERROR)
-                        .add_modifier(Modifier::BOLD)
-                }
-            };
-
-            Line::from(vec![
-                Span::styled(format!("[{level}] "), style),
-                Span::raw(entry.message.as_str()),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let events = Paragraph::new(rows)
-        .block(
-            Block::default()
-                .title("事件 | e 日志弹窗 | y 复制最近错误 | C 清空")
-                .borders(Borders::ALL),
-        )
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(events, area);
-}
-
 fn render_event_log_popup(frame: &mut Frame, app: &App) {
 
     let area = centered_rect(78, 65, frame.area());
@@ -2730,22 +2938,25 @@ mod tests {
         }
     }
 
-    fn render_popup(app: &App, width: u16, height: u16) -> String {
+    /// Renders one frame and returns the visible text, rows joined by newlines,
+    /// with all spaces removed.
+    ///
+    /// Why:
+    /// A wide glyph occupies two cells and the second holds a filler space, and
+    /// alignment padding surrounds every label. Dropping spaces leaves exactly
+    /// the visible content, which is what these tests assert on rather than
+    /// the exact column layout.
+
+    fn render_text(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> String {
 
         let backend = TestBackend::new(width, height);
 
         let mut terminal = Terminal::new(backend).expect("终端应可创建");
 
-        terminal
-            .draw(|frame| render_bykc_detail_popup(frame, app))
-            .expect("应可渲染详情浮窗");
+        terminal.draw(draw).expect("应可渲染");
 
         let buffer = terminal.backend().buffer().clone();
 
-        // A wide glyph occupies two cells and the second holds a filler space,
-        // and alignment padding surrounds every label. Dropping spaces leaves
-        // exactly the visible content, which is what these tests assert on
-        // rather than the exact column layout.
         (0..buffer.area.height)
             .map(|y| {
 
@@ -2756,6 +2967,82 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+
+    fn workspace_chrome_is_borderless_rows_around_one_frame() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        let output = render_text(110, 30, |frame| render_workspace(frame, &app));
+
+        let rows: Vec<&str> = output.lines().collect();
+
+        assert!(
+            rows[0].contains("iClassBUAA"),
+            "顶栏应显示应用名：\n{output}"
+        );
+
+        assert!(!rows[0].contains('┌'), "顶栏不应有边框：\n{output}");
+
+        assert!(!rows[1].contains('┌'), "状态行不应有边框：\n{output}");
+
+        assert!(
+            rows[2].starts_with('┌'),
+            "内容区应从第三行开始加框：\n{output}"
+        );
+
+        let last = rows.last().expect("应有页脚");
+
+        assert!(last.contains("切换"), "页脚应给出快捷键：\n{output}");
+
+        assert!(!last.contains('└'), "页脚不应是边框：\n{output}");
+
+        for gone in ["工作区", "切换提示", "会话", "周视图", "事件"] {
+
+            assert!(!output.contains(gone), "旧框标题 {gone} 仍在：\n{output}");
+        }
+    }
+
+    #[test]
+
+    fn workspace_frame_count_is_bounded_per_tab() {
+
+        // Count top-left corners as a proxy for bordered boxes. The iClass grid
+        // legitimately frames seven day columns; nothing else should add any.
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Bykc;
+
+        let bykc = render_text(110, 30, |frame| render_workspace(frame, &app));
+
+        let bykc_boxes = bykc.matches('┌').count();
+
+        assert!(
+            bykc_boxes <= 3,
+            "BYKC 页边框数应为内容框加课程/详情框，实际 {bykc_boxes}：\n{bykc}"
+        );
+
+        app.active_tab = WorkspaceTab::IClass;
+
+        let iclass = render_text(110, 30, |frame| render_workspace(frame, &app));
+
+        let iclass_boxes = iclass.matches('┌').count();
+
+        assert!(
+            iclass_boxes <= 8,
+            "iClass 页最多内容框加七个日列，实际 {iclass_boxes}：\n{iclass}"
+        );
+    }
+
+    fn render_popup(app: &App, width: u16, height: u16) -> String {
+
+        render_text(width, height, |frame| render_bykc_detail_popup(frame, app))
     }
 
     fn app_with_detail(detail: BykcCourseDetail) -> App {
