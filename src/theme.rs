@@ -3,15 +3,15 @@
 //! Why:
 //! Colors used to be picked inline at each call site, which produced one flat
 //! color everywhere and no way to tell a heading from a hint. Routing color
-//! through named roles keeps meaning stable as screens are added, and a shared
-//! ramp gives the UI the vivid, themed look of tools like btop.
+//! through named roles keeps meaning stable as screens are added.
 //!
 //! How:
-//! Truecolor (24-bit) values, chosen to stay legible on both dark and light
-//! terminals. Every animated helper derives from the frame counter so nothing
-//! keeps its own timer, and animation only appears where work is happening.
+//! Truecolor (24-bit) values, deliberately desaturated. btop stays readable
+//! because its greys and blues are quiet and only the data carries saturation.
+//! Every animated helper derives from the frame counter, so nothing keeps its
+//! own timer and motion only appears where work is actually happening.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 
 /// Builds a 24-bit color from its components.
 
@@ -20,45 +20,45 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// Primary accent: the signature cyan used for focused frames and titles.
+/// Primary accent: a soft cyan for focused frames and titles.
 
-pub const ACCENT: Color = rgb(0, 215, 215);
+pub const ACCENT: Color = rgb(96, 180, 188);
 
-/// Tertiary accent: warm amber for calls to action.
+/// Secondary accent: muted amber for field labels.
 
-pub const ACCENT_WARM: Color = rgb(245, 175, 65);
+pub const ACCENT_WARM: Color = rgb(196, 168, 116);
 
 /// Bright body text.
 
-pub const TEXT: Color = rgb(226, 232, 240);
+pub const TEXT: Color = rgb(205, 212, 222);
 
 /// Muted text for hints and placeholders.
 
-pub const MUTED: Color = rgb(110, 122, 143);
+pub const MUTED: Color = rgb(122, 132, 148);
 
 /// Positive outcome.
 
-pub const OK: Color = rgb(105, 240, 140);
+pub const OK: Color = rgb(132, 190, 148);
 
 /// Caution.
 
-pub const WARN: Color = rgb(255, 200, 75);
+pub const WARN: Color = rgb(214, 183, 118);
 
 /// Failure.
 
-pub const ERROR: Color = rgb(255, 95, 115);
+pub const ERROR: Color = rgb(214, 124, 134);
 
 /// Informational values.
 
-pub const INFO: Color = rgb(120, 175, 255);
+pub const INFO: Color = rgb(132, 166, 208);
 
 /// Selection background.
 
-pub const SELECTION_BG: Color = rgb(0, 145, 165);
+pub const SELECTION_BG: Color = rgb(58, 96, 110);
 
 /// Foreground drawn on top of [`SELECTION_BG`].
 
-pub const SELECTION_FG: Color = rgb(6, 12, 20);
+pub const SELECTION_FG: Color = rgb(232, 238, 245);
 
 /// Border of the panel that currently holds focus.
 
@@ -66,17 +66,16 @@ pub const BORDER_FOCUS: Color = ACCENT;
 
 /// Border of unfocused panels.
 
-pub const BORDER_IDLE: Color = rgb(58, 68, 88);
+pub const BORDER_IDLE: Color = rgb(72, 82, 98);
 
-/// Ordered ramp used for gradients across titles and bars.
+/// Ordered ramp used for the progress bar gradient.
 
-pub const RAMP: [Color; 6] = [
-    rgb(0, 200, 255),
-    rgb(0, 215, 215),
-    rgb(110, 235, 165),
-    rgb(255, 220, 110),
-    rgb(255, 140, 120),
-    rgb(205, 95, 245),
+pub const RAMP: [Color; 5] = [
+    rgb(96, 150, 188),
+    rgb(96, 180, 188),
+    rgb(132, 190, 148),
+    rgb(196, 180, 116),
+    rgb(190, 138, 148),
 ];
 
 /// Animation spinner shown while a background job runs.
@@ -86,7 +85,7 @@ pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 /// Blends two colors, `t` running from 0.0 (start) to 1.0 (end).
 ///
 /// Why:
-/// Gradients need interpolation. Terminals do not blend for us, so a smooth
+/// Gradients need interpolation, and terminals do not blend for us, so the
 /// ramp has to be computed here from the same 24-bit values the palette uses.
 
 pub fn mix(start: Color, end: Color, t: f32) -> Color {
@@ -122,51 +121,17 @@ pub fn ramp(t: f32) -> Color {
 /// A spinner frame for the given tick, plus its color.
 ///
 /// Why:
-/// Motion should mark real activity. Pairing the glyph with the accent color
-/// makes an in-flight request obvious in a screen full of static text.
+/// Motion should mark real activity. This is the only animation in the UI, so
+/// it stays a small, steady glyph rather than a moving banner.
 
 pub fn spinner(tick: u64) -> (&'static str, Style) {
 
     let frame = SPINNER[(tick as usize / 2) % SPINNER.len()];
 
-    (frame, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+    (frame, Style::new().fg(ACCENT))
 }
 
-/// Splits `text` into per-character spans colored along the shared ramp.
-///
-/// Why:
-/// This is the btop-style gradient used for headings. Coloring per character
-/// keeps the effect smooth at any width without measuring beforehand.
-
-pub fn gradient_text(text: &str, offset: f32) -> Vec<ratatui::text::Span<'static>> {
-
-    use ratatui::text::Span;
-
-    let characters = text.chars().count();
-
-    text.chars()
-        .enumerate()
-        .map(|(index, character)| {
-
-            let position = if characters <= 1 {
-
-                0.0
-            } else {
-
-                index as f32 / (characters - 1) as f32
-            };
-
-            let color = ramp((position + offset).rem_euclid(1.0));
-
-            Span::styled(
-                character.to_string(),
-                Style::new().fg(color).add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect()
-}
-
-/// A live activity badge: spinner plus label, or a quiet dot when idle.
+/// A live activity badge: a spinner plus label while busy, a quiet dot when idle.
 ///
 /// How:
 /// Only callers that know a job is running pass `true`, so an idle screen stays
@@ -203,7 +168,11 @@ pub fn activity_badge_styled(
     }
 }
 
-/// Progress glyph pair for a `done / total` ratio, colored along the ramp.
+/// Progress glyph span set for a `done / total` ratio, shaded along the ramp.
+///
+/// Why:
+/// A single glance at a partly filled bar conveys more than the numbers beside
+/// it, and the gradient keeps a saturated fill from looking like a solid block.
 
 pub fn progress_bar(done: usize, total: usize, width: usize) -> Vec<ratatui::text::Span<'static>> {
 
@@ -250,7 +219,7 @@ pub fn progress_bar(done: usize, total: usize, width: usize) -> Vec<ratatui::tex
 
 pub const fn title_style() -> Style {
 
-    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+    Style::new().fg(ACCENT)
 }
 
 /// Style for an unfocused panel title.
@@ -264,10 +233,7 @@ pub const fn subtitle_style() -> Style {
 
 pub const fn selection_style() -> Style {
 
-    Style::new()
-        .fg(SELECTION_FG)
-        .bg(SELECTION_BG)
-        .add_modifier(Modifier::BOLD)
+    Style::new().fg(SELECTION_FG).bg(SELECTION_BG)
 }
 
 /// Style for a field label.

@@ -99,9 +99,9 @@ fn render_login(frame: &mut Frame, app: &App) {
         .split(inner);
 
     let title = Paragraph::new(vec![
-        Line::from(theme::gradient_text(
+        Line::from(Span::styled(
             "Controll Your Campus Life In Terminal",
-            0.0,
+            theme::title_style(),
         )),
         Line::from(Span::styled(app.version_text(), app.version_style())),
         Line::from(Span::styled(
@@ -265,16 +265,10 @@ fn render_workspace_tabs(frame: &mut Frame, area: Rect, app: &App) {
         WorkspaceTab::Bykc => 2,
     };
 
-    // A slow-scrolling gradient title is the app's signature strip. It moves
-    // gently at all times so the terminal never reads as frozen, while all
-    // other motion is reserved for real activity.
     let tabs = Tabs::new(titles)
         .block(
             Block::default()
-                .title(Line::from(theme::gradient_text(
-                    " iClass BUAA ",
-                    (app.tick as f32 / 120.0).rem_euclid(1.0),
-                )))
+                .title(Span::styled(" iClass BUAA ", theme::subtitle_style()))
                 .title_bottom(Line::from(Span::styled(
                     " tab / shift+tab 切换 ",
                     theme::muted_style(),
@@ -372,13 +366,7 @@ fn render_schedule(frame: &mut Frame, area: Rect, app: &App) {
         Block::default()
             .title(app.schedule.portal_label())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(if app.schedule.updating {
-
-                theme::ramp((app.tick as f32 / 24.0).rem_euclid(1.0))
-            } else {
-
-                theme::BORDER_FOCUS
-            }))
+            .border_style(Style::default().fg(theme::BORDER_FOCUS))
             .title_style(theme::title_style()),
     );
 
@@ -2062,24 +2050,18 @@ fn render_busy_popup(frame: &mut Frame, app: &App) {
 
     frame.render_widget(Clear, area);
 
-    // The single most useful place for motion: a blocking wait that otherwise
-    // looks identical to a hung process.
-    let popup = Paragraph::new(vec![
-        Line::from(vec![theme::activity_badge(
-            app.tick,
-            true,
-            "处理中，请稍候",
-        )]),
-        Line::from(""),
-        Line::from(theme::gradient_text("▁▂▃▄▅▆▇█▇▆▅▄▃▂▁", 0.0)),
-    ])
+    // The one place a spinner earns its keep: a blocking wait that would
+    // otherwise be indistinguishable from a hung process.
+    let popup = Paragraph::new(Line::from(vec![theme::activity_badge(
+        app.tick,
+        true,
+        "处理中，请稍候",
+    )]))
     .block(
         Block::default()
             .title("请稍候")
             .borders(Borders::ALL)
-            .border_style(
-                Style::default().fg(theme::ramp((app.tick as f32 / 30.0).rem_euclid(1.0))),
-            )
+            .border_style(Style::default().fg(theme::BORDER_FOCUS))
             .title_style(theme::title_style()),
     )
     .wrap(Wrap { trim: true });
