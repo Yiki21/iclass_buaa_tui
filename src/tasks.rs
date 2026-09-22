@@ -17,12 +17,41 @@ use crate::iclass::IClassApi;
 
 pub struct AssignmentItem {
     pub source:      String,
+    /// Upstream identifier, needed to fetch the detail page on demand.
+    ///
+    /// Why:
+    /// SPOC's list endpoint carries no problem breakdown; only its detail
+    /// endpoint does. Keeping the id lets the UI fetch that lazily for the one
+    /// assignment the user opened instead of for every row.
+    pub id:          String,
     pub course_name: String,
     pub title:       String,
     pub start_time:  Option<String>,
     pub due_time:    Option<String>,
     pub score:       Option<String>,
     pub status:      String,
+    /// Full mark for the assignment, when the page states one.
+    pub max_score:   Option<String>,
+    /// How many problems have been submitted, and how many exist.
+    ///
+    /// Why:
+    /// "Submitted" hides whether one problem out of six is still open, which
+    /// is exactly the thing a student needs to see.
+    pub submitted:   usize,
+    pub total:       usize,
+    /// Per-problem breakdown, empty when the page has no problem table.
+    pub problems:    Vec<AssignmentProblem>,
+}
+
+/// One row of a Judge assignment's problem table.
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+
+pub struct AssignmentProblem {
+    pub name:      String,
+    pub score:     Option<String>,
+    pub max_score: Option<String>,
+    pub status:    String,
 }
 
 impl IClassApi {
@@ -150,7 +179,11 @@ impl IClassApi {
                     .await
                     .context("读取希冀作业详情失败")?;
 
-                assignments.push(parse_assignment_detail(&detail, &course_name));
+                let mut item = parse_assignment_detail(&detail, &course_name);
+
+                item.id = assignment_id.clone();
+
+                assignments.push(item);
             }
         }
 
@@ -167,7 +200,13 @@ impl IClassApi {
         Ok(assignments)
     }
 
-    pub async fn get_spoc_assignments(&self) -> Result<Vec<AssignmentItem>> {
+    /// Performs the SPOC CAS handshake and returns `(token, role)`.
+    ///
+    /// Why:
+    /// Every SPOC request needs both headers, and the list and detail fetches
+    /// used to inline the same handshake. One place means one bug fix.
+
+    async fn spoc_login(&self) -> Result<(String, String)> {
 
         let mut current_url =
             academic_judge_url(self.use_vpn, "https://spoc.buaa.edu.cn/spocnewht/cas");
@@ -232,6 +271,13 @@ impl IClassApi {
             })
             .ok_or_else(|| anyhow::anyhow!("SPOC 登录响应缺少角色信息"))?
             .to_string();
+
+        Ok((token, role))
+    }
+
+    pub async fn get_spoc_assignments(&self) -> Result<Vec<AssignmentItem>> {
+
+        let (token, role) = self.spoc_login().await?;
 
         let current_term = self
             .client
@@ -298,15 +344,16 @@ impl IClassApi {
             for row in &list {
 
                 assignments.push(AssignmentItem {
-                    source:      "spoc".to_string(),
+                    source: "spoc".to_string(),
                     course_name: text_at(&row, &["kcmc", "courseName"]).unwrap_or_default(),
-                    title:       text_at(&row, &["zymc", "title"])
+                    title: text_at(&row, &["zymc", "title"])
                         .unwrap_or_else(|| "SPOC 作业".to_string()),
-                    start_time:  text_at(&row, &["zykssj", "startTime"]),
-                    due_time:    text_at(&row, &["zyjzsj", "dueTime"]),
-                    score:       text_at(&row, &["mf", "score"]),
-                    status:      text_at(&row, &["tjzt", "submissionStatus"])
+                    start_time: text_at(&row, &["zykssj", "startTime"]),
+                    due_time: text_at(&row, &["zyjzsj", "dueTime"]),
+                    score: text_at(&row, &["df", "score", "mf"]),
+                    status: text_at(&row, &["tjzt", "submissionStatus"])
                         .unwrap_or_else(|| "未知".to_string()),
+                    ..AssignmentItem::default()
                 });
             }
 
@@ -332,12 +379,134 @@ impl IClassApi {
 
         Ok(assignments)
     }
+
+    /// Fetches one SPOC assignment's detail, including its description.
+    ///
+    /// Why:
+    /// The list endpoint returns no body text; only the detail endpoint does.
+    /// Calling it lazily for the assignment the user opened keeps the list load
+    /// to one page request instead of one per row.
+
+    pub async fn get_spoc_assignment_detail(
+        &self,
+        assignment_id: &str,
+    ) -> Result<SpocAssignmentDetail> {
+
+        if assignment_id.trim().is_empty() {
+
+            bail!("缺少 SPOC 作业 id，无法获取详情");
+        }
+
+        let (token, role) = self.spoc_login().await?;
+
+        let response = self
+            .client
+            .get(academic_judge_url(
+                self.use_vpn,
+                "https://spoc.buaa.edu.cn/spocnewht/kczy/queryKczyInfoByid",
+            ))
+            .query(&[("id", assignment_id)])
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Token", format!("Inco-{token}"))
+            .header("RoleCode", &role)
+            .send()
+            .await
+            .context("获取 SPOC 作业详情失败")?;
+
+        let body: Value = response.json().await.context("SPOC 作业详情响应格式异常")?;
+
+        let content = body.get("content").cloned().unwrap_or_default();
+
+        let html = text_at(&content, &["zynr"]).unwrap_or_default();
+
+        Ok(SpocAssignmentDetail {
+            title:       text_at(&content, &["zymc"]).unwrap_or_default(),
+            start_time:  text_at(&content, &["zykssj"]),
+            due_time:    text_at(&content, &["zyjzsj"]),
+            score:       text_at(&content, &["zyfs"]),
+            description: html_to_text(&html),
+        })
+    }
 }
 
 const SPOC_CURRENT_TERM_PARAM: &str =
     "YHrxtTavu6raCwC0/qdgYffB9evWHBkTng/XS4W6j3f/TPo02iEPSoegscDTRNzIPRG49o3RHl4JiFCXAiBkkA==";
 
 const SPOC_ASSIGNMENTS_SQL_ID: &str = "1713252980496efac7d5d9985e81693116d3e8a52ebf2b";
+
+/// One SPOC assignment's detail, with the description reduced to plain text.
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+
+pub struct SpocAssignmentDetail {
+    pub title:       String,
+    pub start_time:  Option<String>,
+    pub due_time:    Option<String>,
+    pub score:       Option<String>,
+    /// Assignment body, HTML stripped. Empty when the assignment has none.
+    pub description: String,
+}
+
+/// Parses a deadline string into a local timestamp.
+///
+/// Why:
+/// The UIs color a due time by whether it has passed, which needs a real value
+/// rather than a string comparison.
+
+pub fn parse_deadline(value: &str) -> Option<chrono::NaiveDateTime> {
+
+    let value = value.trim();
+
+    for format in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+    ] {
+
+        if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(value, format) {
+
+            return Some(parsed);
+        }
+    }
+
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(23, 59, 59))
+}
+
+/// Strips tags from an HTML fragment and collapses its whitespace.
+///
+/// Why:
+/// The description arrives as HTML markup. Rendering it raw would pour tag
+/// soup into the terminal, so it is reduced to readable text.
+
+fn html_to_text(html: &str) -> String {
+
+    if html.trim().is_empty() {
+
+        return String::new();
+    }
+
+    // Block-level tags become line breaks so paragraphs do not run together.
+    let spaced = html
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</p>", "\n")
+        .replace("</div>", "\n")
+        .replace("</li>", "\n");
+
+    let document = Html::parse_fragment(&spaced);
+
+    let text = document.root_element().text().collect::<Vec<_>>().join("");
+
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 fn spoc_encrypt_param(value: &str) -> String {
 
@@ -477,9 +646,11 @@ fn parse_assignment_detail(body: &str, course_name: &str) -> AssignmentItem {
 
     let document = Html::parse_document(body);
 
-    let text = document.root_element().text().collect::<Vec<_>>().join(" ");
-
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Join the page's text with single spaces everywhere, not just at ASCII
+    // whitespace. Judge writes "作业满分：100" with no space, so splitting on
+    // whitespace alone leaves the label glued to its value and every
+    // `split("作业满分")` lookup fails.
+    let text = normalize_page_text(&document.root_element().text().collect::<Vec<_>>().join(" "));
 
     let title = text
         .split("作业时间")
@@ -497,13 +668,35 @@ fn parse_assignment_detail(body: &str, course_name: &str) -> AssignmentItem {
         .map(|(start, end)| (extract_datetime(start), extract_datetime(end)))
         .unwrap_or((None, None));
 
-    let score = text
-        .split("总分")
-        .nth(1)
-        .and_then(|value| value.split_whitespace().next())
-        .map(|value| value.trim_matches([':', '：']).to_string());
+    // The value follows the label as ": 58", so the colon must go before the
+    // first whitespace-delimited token is taken.
+    let score = labeled_value(&text, "总分");
 
-    let status = if text.contains("未提交") || text.contains("未作答") {
+    // "作业满分: 100" is stated on the page; keeping it lets the UI show
+    // 85 / 100 instead of a bare 85.
+    let max_score = labeled_value(&text, "作业满分");
+
+    let problems = parse_problem_rows(&document);
+
+    let submitted = problems
+        .iter()
+        .filter(|problem| problem.status != "未提交")
+        .count();
+
+    // The page states the problem count; fall back to the parsed rows when it
+    // does not, so the ratio is still meaningful.
+    let total = text
+        .split('共')
+        .nth(1)
+        .and_then(|value| value.split('道').next())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(problems.len());
+
+    let status = if total > 0 && submitted < total {
+
+        "未提交"
+    } else if text.contains("未提交") || text.contains("未作答") {
 
         "未提交"
     } else if text.contains("已提交") || text.contains("Accepted") || text.contains("得分") {
@@ -516,12 +709,238 @@ fn parse_assignment_detail(body: &str, course_name: &str) -> AssignmentItem {
 
     AssignmentItem {
         source: "judge".to_string(),
+        // Filled by the caller, which is where the id is known.
+        id: String::new(),
         course_name: course_name.to_string(),
         title,
         start_time,
         due_time,
         score,
         status: status.to_string(),
+        max_score,
+        submitted,
+        total,
+        problems,
+    }
+}
+
+/// Reads the first token following a Chinese label.
+///
+/// Why:
+/// The pages write values as "总分: 58" or "作业满分：100". The separator, its
+/// spacing, and the indent all vary, so the colon is stripped and the remainder
+/// trimmed before the value is taken.
+
+fn labeled_value(text: &str, label: &str) -> Option<String> {
+
+    let rest = text.split(label).nth(1)?;
+
+    let rest = rest.trim_start_matches([':', '：']);
+
+    let value = rest.split_whitespace().next()?;
+
+    let value = value.trim_end_matches(['分', '.']);
+
+    if value.is_empty() {
+
+        return None;
+    }
+
+    Some(value.to_string())
+}
+
+/// Collapses a page's text into space-separated words.
+///
+/// Why:
+/// The parsers locate values by splitting on Chinese labels ("作业满分", "总分").
+/// Those labels are not ASCII whitespace, so the raw text keeps them attached
+/// to the following number and the split never lands where it should. Spacing
+/// every run of whitespace, including full-width spaces, makes the labels
+/// standalone tokens.
+
+fn normalize_page_text(text: &str) -> String {
+
+    text.split(|character: char| character.is_whitespace() || character == '\u{3000}')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extracts the per-problem table from a Judge assignment page.
+///
+/// Why:
+/// The page lists each problem with its own score and status, which is the only
+/// way to tell "one of six still open" from "all done". This is parsed from the
+/// page we already download for the list, so it costs no extra request.
+///
+/// How:
+/// Judge nests tables inside tables. Rows are read from the top-level tables
+/// only, after nested tables are stripped, so inner layout tables do not
+/// contribute spurious rows.
+
+fn parse_problem_rows(document: &Html) -> Vec<AssignmentProblem> {
+
+    let row_selector = Selector::parse("tr").expect("valid row selector");
+
+    let cell_selector = Selector::parse("th, td").expect("valid cell selector");
+
+    // Only the outermost table(s) describe problems.
+    let table_selector = Selector::parse("table").expect("valid table selector");
+
+    let mut problems = Vec::new();
+
+    for table in document.select(&table_selector) {
+
+        // A table containing another table is a container, not the problem list.
+        if table.select(&table_selector).next().is_some() {
+
+            continue;
+        }
+
+        for row in table.select(&row_selector) {
+
+            let cells = row
+                .select(&cell_selector)
+                .map(|cell| {
+
+                    cell.text()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>();
+
+            if cells.len() < 2 {
+
+                continue;
+            }
+
+            let joined = cells.join(" ");
+
+            let Some(status) = detect_problem_status(&joined) else {
+
+                continue;
+            };
+
+            // The conventional shape is 序号 | 题目 | 满分 | 状态..., but two
+            // column layouts also appear, where the cell already reads
+            // "第1题 ... 状态".
+            let (name, max_score) = if cells.len() >= 3 {
+
+                let name = cells[1].trim().to_string();
+
+                let max = cells[2]
+                    .trim()
+                    .trim_end_matches('分')
+                    .parse::<f64>()
+                    .ok()
+                    .map(|value| trim_number(value));
+
+                (name, max)
+            } else {
+
+                (cells[0].trim().to_string(), None)
+            };
+
+            if name.is_empty() {
+
+                continue;
+            }
+
+            problems.push(AssignmentProblem {
+                name,
+                score: parse_earned_score(&joined).map(trim_number),
+                max_score,
+                status,
+            });
+        }
+    }
+
+    problems
+}
+
+/// Classifies a problem row's status text.
+///
+/// Why:
+/// Judge words the same state several ways ("未提交答案", "还未提交代码"); a
+/// single canonical value keeps the rest of the code from string-matching.
+
+fn detect_problem_status(text: &str) -> Option<String> {
+
+    const UNSUBMITTED: [&str; 5] = [
+        "还未提交代码",
+        "未提交文件",
+        "未提交答案",
+        "未作答",
+        "未提交",
+    ];
+
+    const SUBMITTED: [&str; 6] = ["已提交", "得分", "Accepted", "解答正确", "通过", "编译错误"];
+
+    if UNSUBMITTED.iter().any(|marker| text.contains(marker)) {
+
+        return Some("未提交".to_string());
+    }
+
+    if SUBMITTED.iter().any(|marker| text.contains(marker)) {
+
+        return Some("已提交".to_string());
+    }
+
+    if text.contains("初次提交时间")
+        || text.contains("首次提交时间")
+        || text.contains("最近一次提交时间")
+        || text.contains("最后一次提交时间")
+        || text.contains("最后一次修改时间")
+    {
+
+        return Some("已提交".to_string());
+    }
+
+    None
+}
+
+/// Reads an earned score out of a problem row.
+///
+/// Why:
+/// The score appears as "得分: 8" or "8.0/10"; requiring the explicit marker
+/// first avoids mistaking the maximum for the earned value.
+
+fn parse_earned_score(text: &str) -> Option<f64> {
+
+    for marker in ["得分", "分数", "成绩"] {
+
+        if let Some(rest) = text.split(marker).nth(1) {
+
+            let candidate: String = rest
+                .trim_start_matches([':', '：'])
+                .trim_start()
+                .chars()
+                .take_while(|character| character.is_ascii_digit() || *character == '.')
+                .collect();
+
+            if let Ok(value) = candidate.parse::<f64>() {
+
+                return Some(value);
+            }
+        }
+    }
+
+    None
+}
+
+/// Drops a trailing `.0` so 85.0 prints as 85.
+
+fn trim_number(value: f64) -> String {
+
+    if (value.fract()).abs() < f64::EPSILON {
+
+        format!("{}", value as i64)
+    } else {
+
+        format!("{value}")
     }
 }
 
@@ -552,7 +971,7 @@ fn judge_user_agent() -> &'static str {
 
 mod tests {
 
-    use super::{parse_assignment_detail, parse_assignment_ids, parse_course_links};
+    use super::{html_to_text, parse_assignment_detail, parse_assignment_ids, parse_course_links};
 
     #[test]
 
@@ -582,5 +1001,131 @@ mod tests {
         assert_eq!(item.status, "未提交");
 
         assert_eq!(item.due_time.as_deref(), Some("2026-09-10 23:59"));
+    }
+
+    /// A trimmed copy of the real shape: an outer layout table containing the
+    /// problem table, plus the summary line Judge prints above it.
+
+    const JUDGE_PAGE: &str = r#"
+<html><body>
+<table><tr><td>
+  <div>第一次上机作业 作业时间: 2026-09-01 08:00 至 2026-09-10 23:59</div>
+  <div>作业满分: 100 共 3 道</div>
+  <table>
+    <tr><th>序号</th><th>题目</th><th>满分</th><th>状态</th></tr>
+    <tr><td>1</td><td>A+B Problem</td><td>40</td><td>得分: 40</td></tr>
+    <tr><td>2</td><td>链表反转</td><td>30</td><td>得分: 18</td></tr>
+    <tr><td>3</td><td>二叉树遍历</td><td>30</td><td>还未提交答案</td></tr>
+  </table>
+  <div>总分: 58</div>
+</td></tr></table>
+</body></html>
+"#;
+
+    #[test]
+
+    fn extracts_problem_breakdown_from_judge_detail() {
+
+        let item = parse_assignment_detail(JUDGE_PAGE, "数据结构");
+
+        assert_eq!(item.max_score.as_deref(), Some("100"), "应读出作业满分");
+
+        assert_eq!(item.score.as_deref(), Some("58"), "应读出总分");
+
+        assert_eq!(item.total, 3, "应读出题目总数");
+
+        assert_eq!(item.submitted, 2, "两道已提交");
+
+        assert_eq!(item.problems.len(), 3, "三行题目");
+
+        assert_eq!(item.problems[0].name, "A+B Problem");
+
+        assert_eq!(item.problems[0].score.as_deref(), Some("40"));
+
+        assert_eq!(item.problems[0].max_score.as_deref(), Some("40"));
+
+        assert_eq!(item.problems[0].status, "已提交");
+
+        assert_eq!(item.problems[2].status, "未提交");
+
+        assert_eq!(item.problems[2].score, None, "未提交的题不应编造得分");
+    }
+
+    #[test]
+
+    fn in_progress_assignment_is_not_reported_as_submitted() {
+
+        // Two of three problems in: the list view must not call this done,
+        // which is the whole reason the breakdown is parsed.
+        let item = parse_assignment_detail(JUDGE_PAGE, "数据结构");
+
+        assert_eq!(item.status, "未提交");
+    }
+
+    #[test]
+
+    fn judge_detail_without_a_problem_table_still_parses() {
+
+        let page = r#"
+<html><body>
+<div>期中测验 作业时间: 2026-10-01 09:00 至 2026-10-02 18:00</div>
+<div>已提交，得分 88</div>
+</body></html>
+"#;
+
+        let item = parse_assignment_detail(page, "高等数学");
+
+        assert_eq!(item.due_time.as_deref(), Some("2026-10-02 18:00"));
+
+        assert!(item.problems.is_empty(), "没有题目表时不应编造题目");
+
+        assert_eq!(item.total, 0);
+
+        assert_eq!(item.status, "已提交");
+    }
+
+    #[test]
+
+    fn problem_status_markers_are_recognised_in_either_wording() {
+
+        let page = r#"
+<html><body>
+<table>
+  <tr><td>1</td><td>题目一</td><td>10</td><td>还未提交代码</td></tr>
+  <tr><td>2</td><td>题目二</td><td>10</td><td>最后一次修改时间 2026-09-05</td></tr>
+  <tr><td>3</td><td>题目三</td><td>10</td><td>Accepted</td></tr>
+</table>
+</body></html>
+"#;
+
+        let item = parse_assignment_detail(page, "程序设计");
+
+        assert_eq!(item.problems.len(), 3, "三行都应识别为题目");
+
+        assert_eq!(item.problems[0].status, "未提交");
+
+        assert_eq!(item.problems[1].status, "已提交", "按提交时间识别为已提交");
+
+        assert_eq!(item.problems[2].status, "已提交", "Accepted 识别为已提交");
+
+        assert_eq!(item.submitted, 2);
+
+        assert_eq!(item.total, 3, "页面无“共 N 道”时以题目行数为准");
+    }
+
+    #[test]
+
+    fn spoc_description_is_reduced_to_readable_text() {
+
+        let html = r#"<p>请完成<b>第三章</b>习题。</p><div>要求：</div><ul><li>独立完成</li><li>周五前提交</li></ul><br/>附件见课程页。"#;
+
+        let text = html_to_text(html);
+
+        assert_eq!(
+            text, "请完成第三章习题。\n要求：\n独立完成\n周五前提交\n附件见课程页。",
+            "块级标签应变成换行，行内标签直接去掉"
+        );
+
+        assert_eq!(html_to_text("  "), "", "空内容应返回空串而非一堆换行");
     }
 }

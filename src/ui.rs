@@ -58,6 +58,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if app.active_tab == WorkspaceTab::Bykc && app.bykc.show_detail_popup {
 
         render_bykc_detail_popup(frame, app);
+    } else if app.active_tab == WorkspaceTab::Schedule && app.schedule.show_task_detail {
+
+        render_task_detail_popup(frame, app);
     }
 
     if app.show_help {
@@ -1577,6 +1580,24 @@ fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
                         format!("  得分 {}", task.score.as_deref().unwrap_or("-")),
                         theme::muted_style(),
                     ),
+                    Span::styled(
+                        // "5/6 题目" is the difference between done and not
+                        // done, which the status word alone hides.
+                        if task.total > 0 {
+
+                            format!("  题目 {}/{}", task.submitted, task.total)
+                        } else {
+
+                            String::new()
+                        },
+                        if task.total > 0 && task.submitted < task.total {
+
+                            Style::default().fg(theme::WARN)
+                        } else {
+
+                            theme::muted_style()
+                        },
+                    ),
                 ]))
             })
             .collect()
@@ -1586,7 +1607,7 @@ fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(List::new(items), list_area);
 
-    render_key_hint(frame, footer, "r 刷新");
+    render_key_hint(frame, footer, "j/k 选作业  o 查看详情  r 刷新");
 }
 
 /// Sign status text plus the color that carries its meaning.
@@ -2738,6 +2759,271 @@ fn bykc_sign_state(detail: &crate::bykc::BykcCourseDetail) -> (String, Style) {
     }
 }
 
+/// Renders one assignment's detail over the whole screen.
+///
+/// Why:
+/// Same reasoning as the BYKC detail: a smaller floating box left the list
+/// visible around it and the two read as one confused surface. And this panel
+/// carries the per-problem breakdown, which is the only place the difference
+/// between "all submitted" and "five of six" is visible.
+
+fn render_task_detail_popup(frame: &mut Frame, app: &App) {
+
+    let Some(task) = app.schedule.tasks.get(app.schedule.selected_entry) else {
+
+        return;
+    };
+
+    frame.render_widget(Clear, frame.area());
+
+    let area = frame.area();
+
+    let source_label = if task.source == "spoc" {
+
+        "SPOC"
+    } else {
+
+        "希冀"
+    };
+
+    let status_style = if task.status.contains("未提交") || task.status.contains("未作答") {
+
+        Style::default()
+            .fg(theme::ERROR)
+            .add_modifier(Modifier::BOLD)
+    } else if task.status.contains("已提交") {
+
+        Style::default().fg(theme::OK)
+    } else {
+
+        theme::muted_style()
+    };
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(format!(" {source_label} 作业详情 "), theme::title_style()),
+            Span::styled(task.title.clone(), Style::default().fg(theme::TEXT)),
+            Span::styled("  ", theme::muted_style()),
+            Span::styled(task.status.clone(), status_style),
+            Span::raw(" "),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_FOCUS));
+
+    let inner = block.inner(area);
+
+    frame.render_widget(block, area);
+
+    let [body_area, hint_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(section("作业"));
+
+    lines.extend(field("课程", task.course_name.clone()));
+
+    lines.extend(field("开始", task.start_time.clone().unwrap_or_default()));
+
+    lines.extend(field_styled(
+        "截止",
+        task.due_time.clone().unwrap_or_default(),
+        due_style(task.due_time.as_deref()),
+    ));
+
+    // Score reads as "58 / 100" when the page states a full mark.
+    let score_text = match (task.score.as_deref(), task.max_score.as_deref()) {
+        (Some(score), Some(max)) => format!("{score} / {max}"),
+        (Some(score), None) => score.to_string(),
+        (None, Some(max)) => format!("未出分 / {max}"),
+        (None, None) => String::new(),
+    };
+
+    lines.extend(field_styled(
+        "得分",
+        score_text,
+        score_style(task.score.as_deref(), task.max_score.as_deref()),
+    ));
+
+    if task.total > 0 {
+
+        lines.extend(field_styled(
+            "题目",
+            format!("已提交 {} / {}", task.submitted, task.total),
+            if task.submitted == task.total {
+
+                Style::default().fg(theme::OK)
+            } else {
+
+                Style::default().fg(theme::WARN)
+            },
+        ));
+    }
+
+    if !task.problems.is_empty() {
+
+        lines.push(Line::from(""));
+
+        lines.push(section("题目明细"));
+
+        for (index, problem) in task.problems.iter().enumerate() {
+
+            let problem_style = if problem.status == "未提交" {
+
+                Style::default().fg(theme::ERROR)
+            } else {
+
+                Style::default().fg(theme::OK)
+            };
+
+            let score = match (problem.score.as_deref(), problem.max_score.as_deref()) {
+                (Some(score), Some(max)) => format!("{score}/{max}"),
+                (Some(score), None) => score.to_string(),
+                _ => String::new(),
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}. ", index + 1), theme::muted_style()),
+                Span::styled(format!("{:<28}", problem.name), theme::text_style()),
+                Span::styled(format!("{score:>9}"), theme::label_style()),
+                Span::raw("  "),
+                Span::styled(problem.status.clone(), problem_style),
+            ]));
+        }
+    }
+
+    // SPOC's body text lives behind a second request; say so while it is
+    // missing rather than showing an empty section.
+    if task.source == "spoc" {
+
+        lines.push(Line::from(""));
+
+        lines.push(section("说明"));
+
+        match app.schedule.spoc_details.get(&task.id) {
+            Some(detail) if !detail.description.trim().is_empty() => {
+
+                for paragraph in detail.description.lines() {
+
+                    lines.push(Line::from(Span::styled(
+                        paragraph.to_string(),
+                        theme::text_style(),
+                    )));
+                }
+            }
+            Some(_) => {
+
+                lines.push(Line::from(Span::styled(
+                    "  该项作业没有说明内容",
+                    theme::muted_style(),
+                )));
+            }
+            None if app.schedule.task_detail_loading => {
+
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    theme::activity_badge(app.tick, true, "正在加载说明"),
+                ]));
+            }
+            None => {
+
+                lines.push(Line::from(Span::styled(
+                    "  说明加载失败，按 o 重试",
+                    theme::muted_style(),
+                )));
+            }
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.schedule.task_detail_scroll, 0)),
+        body_area,
+    );
+
+    let mut spans = vec![Span::styled(
+        "j/k 或 ↑↓ 滚动   esc/o/enter 关闭",
+        theme::muted_style(),
+    )];
+
+    if app.schedule.task_detail_scroll > 0 {
+
+        spans.push(Span::styled(
+            format!("   已滚动 {} 行", app.schedule.task_detail_scroll),
+            Style::default().fg(theme::INFO),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), hint_area);
+}
+
+/// Style for a due time: overdue is a problem, imminent is a warning.
+///
+/// Why:
+/// The deadline is the field that decides whether the reader must act now.
+
+fn due_style(due: Option<&str>) -> Style {
+
+    let Some(due) = due else {
+
+        return theme::muted_style();
+    };
+
+    let parsed = crate::tasks::parse_deadline(due);
+
+    let Some(deadline) = parsed else {
+
+        return theme::text_style();
+    };
+
+    let now = Local::now().naive_local();
+
+    if now > deadline {
+
+        Style::default().fg(theme::ERROR)
+    } else if (deadline - now).num_hours() <= 24 {
+
+        Style::default()
+            .fg(theme::WARN)
+            .add_modifier(Modifier::BOLD)
+    } else {
+
+        Style::default().fg(theme::INFO)
+    }
+}
+
+/// Style for a score, colored by how much of the full mark was earned.
+
+fn score_style(score: Option<&str>, max: Option<&str>) -> Style {
+
+    let (Some(score), Some(max)) = (
+        score.and_then(|value| value.trim().parse::<f64>().ok()),
+        max.and_then(|value| value.trim().parse::<f64>().ok()),
+    ) else {
+
+        return theme::text_style();
+    };
+
+    if max <= 0.0 {
+
+        return theme::text_style();
+    }
+
+    let ratio = score / max;
+
+    if ratio >= 0.85 {
+
+        Style::default().fg(theme::OK).add_modifier(Modifier::BOLD)
+    } else if ratio >= 0.6 {
+
+        Style::default().fg(theme::WARN)
+    } else {
+
+        Style::default().fg(theme::ERROR)
+    }
+}
+
 /// Draws the scroll affordance on the panel's last inner row.
 ///
 /// Why:
@@ -3800,6 +4086,103 @@ mod tests {
         let place = color_of(100, 40, &signed_up, "沙河").expect("应找到地点");
 
         assert_eq!(place, theme::INFO, "地点应用 INFO 色");
+    }
+
+    fn judge_task_fixture() -> crate::tasks::AssignmentItem {
+
+        use crate::tasks::{AssignmentItem, AssignmentProblem};
+
+        AssignmentItem {
+            source:      "judge".to_string(),
+            id:          "42".to_string(),
+            course_name: "数据结构".to_string(),
+            title:       "第一次上机".to_string(),
+            start_time:  Some("2026-09-01 08:00".to_string()),
+            due_time:    Some("2099-09-10 23:59".to_string()),
+            score:       Some("58".to_string()),
+            status:      "未提交".to_string(),
+            max_score:   Some("100".to_string()),
+            submitted:   2,
+            total:       3,
+            problems:    vec![
+                AssignmentProblem {
+                    name:      "A+B Problem".to_string(),
+                    score:     Some("40".to_string()),
+                    max_score: Some("40".to_string()),
+                    status:    "已提交".to_string(),
+                },
+                AssignmentProblem {
+                    name:      "链表反转".to_string(),
+                    score:     Some("18".to_string()),
+                    max_score: Some("30".to_string()),
+                    status:    "已提交".to_string(),
+                },
+                AssignmentProblem {
+                    name:      "二叉树遍历".to_string(),
+                    score:     None,
+                    max_score: Some("30".to_string()),
+                    status:    "未提交".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+
+    fn task_detail_shows_problem_breakdown_and_progress() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        app.schedule.view = CourseView::Tasks;
+
+        app.schedule.tasks = vec![judge_task_fixture()];
+
+        app.schedule.selected_entry = 0;
+
+        app.schedule.show_task_detail = true;
+
+        let out = render_text(100, 34, |frame| render(frame, &app));
+
+        assert!(out.contains("希冀作业详情"), "应有标题：\n{out}");
+
+        assert!(out.contains("58/100"), "得分应带满分：\n{out}");
+
+        assert!(out.contains("已提交2/3"), "应显示题目进度：\n{out}");
+
+        assert!(out.contains("题目明细"), "应有题目分组：\n{out}");
+
+        for name in ["A+BProblem", "链表反转", "二叉树遍历"] {
+
+            assert!(out.contains(name), "缺少题目 {name}：\n{out}");
+        }
+
+        assert!(out.contains("18/30"), "每题应显示得分/满分：\n{out}");
+
+        // The panel owns the screen: no list chrome may show through.
+        assert!(!out.contains("iClassBUAA"), "详情面板应独占屏幕：\n{out}");
+    }
+
+    #[test]
+
+    fn task_list_row_shows_partial_progress_in_warning_color() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        app.schedule.view = CourseView::Tasks;
+
+        app.schedule.tasks = vec![judge_task_fixture()];
+
+        let out = render_text(120, 30, |frame| render(frame, &app));
+
+        assert!(out.contains("题目2/3"), "列表行应显示进度：\n{out}");
     }
 
     #[test]

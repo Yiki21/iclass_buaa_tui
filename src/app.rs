@@ -45,6 +45,7 @@ pub enum AsyncEvent {
     Exams(Result<Vec<ExamItem>, String>),
     Grades(Result<Vec<GradeItem>, String>),
     AllGrades(Result<crate::academic::GradesForTerms, String>),
+    SpocDetail(String, Result<crate::tasks::SpocAssignmentDetail, String>),
     Classrooms(Result<Vec<ClassroomRoom>, String>),
     Tasks(Result<Vec<AssignmentItem>, String>),
     VersionCheck(Result<VersionInfo, String>),
@@ -161,11 +162,22 @@ pub struct ScheduleState {
     /// a single-term refresh know it would be replacing a wider view.
     pub grades_all_terms:  bool,
 
-    pub classrooms:       Vec<ClassroomRoom>,
-    pub tasks:            Vec<AssignmentItem>,
-    pub academic_loading: bool,
-    pub classroom_campus: i64,
-    pub classroom_date:   String,
+    pub classrooms:          Vec<ClassroomRoom>,
+    pub tasks:               Vec<AssignmentItem>,
+    pub academic_loading:    bool,
+    /// Whether the assignment detail panel is open.
+    pub show_task_detail:    bool,
+    /// SPOC description fetched on demand, keyed by assignment id.
+    ///
+    /// Why:
+    /// SPOC's list has no body text; fetching the detail for every row would
+    /// turn one page load into dozens of requests. Loading the one the user
+    /// opened, and remembering it, keeps the list fast and the panel complete.
+    pub spoc_details:        HashMap<String, crate::tasks::SpocAssignmentDetail>,
+    pub task_detail_loading: bool,
+    pub task_detail_scroll:  u16,
+    pub classroom_campus:    i64,
+    pub classroom_date:      String,
 }
 
 impl ScheduleState {
@@ -1226,6 +1238,56 @@ impl App {
         }
 
         if self.screen == Screen::Workspace
+            && self.active_tab == WorkspaceTab::Schedule
+            && self.schedule.show_task_detail
+        {
+
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('o') | KeyCode::Char('q') => {
+
+                    self.schedule.show_task_detail = false;
+
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+
+                    self.schedule.task_detail_scroll =
+                        self.schedule.task_detail_scroll.saturating_sub(1);
+
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+
+                    self.schedule.task_detail_scroll =
+                        self.schedule.task_detail_scroll.saturating_add(1);
+
+                    return;
+                }
+                KeyCode::PageUp => {
+
+                    self.schedule.task_detail_scroll =
+                        self.schedule.task_detail_scroll.saturating_sub(8);
+
+                    return;
+                }
+                KeyCode::PageDown => {
+
+                    self.schedule.task_detail_scroll =
+                        self.schedule.task_detail_scroll.saturating_add(8);
+
+                    return;
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+
+                    self.schedule.task_detail_scroll = 0;
+
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if self.screen == Screen::Workspace
             && self.active_tab == WorkspaceTab::Bykc
             && self.bykc.show_detail_popup
         {
@@ -1856,6 +1918,18 @@ impl App {
                     Err(error) => self.error(format!("全部学期成绩加载失败: {error}")),
                 }
             }
+            AsyncEvent::SpocDetail(id, result) => {
+
+                self.schedule.task_detail_loading = false;
+
+                match result {
+                    Ok(detail) => {
+
+                        self.schedule.spoc_details.insert(id, detail);
+                    }
+                    Err(error) => self.error(format!("SPOC 作业详情加载失败: {error}")),
+                }
+            }
             AsyncEvent::Classrooms(result) => {
 
                 self.schedule.academic_loading = false;
@@ -2182,6 +2256,10 @@ impl App {
 
                 self.load_all_grades(tx);
             }
+            KeyCode::Char('o') | KeyCode::Enter if self.schedule.view == CourseView::Tasks => {
+
+                self.open_task_detail(tx);
+            }
             KeyCode::Char('X') => self.logout(),
             _ => {}
         }
@@ -2377,6 +2455,64 @@ impl App {
         self.info("正在导入整学期课表...");
 
         spawn_schedule_import(session, requested_term, tx.clone());
+    }
+
+    /// Opens the detail panel for the selected assignment.
+    ///
+    /// How:
+    /// Judge rows already carry their problem breakdown from the list load, so
+    /// they open instantly. SPOC rows fetch their description on first open and
+    /// reuse it afterwards.
+
+    fn open_task_detail(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(task) = self
+            .schedule
+            .tasks
+            .get(self.schedule.selected_entry)
+            .cloned()
+        else {
+
+            self.warn("当前没有选中的作业");
+
+            return;
+        };
+
+        self.schedule.task_detail_scroll = 0;
+
+        self.schedule.show_task_detail = true;
+
+        if task.source != "spoc" || task.id.is_empty() {
+
+            return;
+        }
+
+        if self.schedule.spoc_details.contains_key(&task.id) || self.schedule.task_detail_loading {
+
+            return;
+        }
+
+        let Some(session) = self.session.clone() else {
+
+            return;
+        };
+
+        self.schedule.task_detail_loading = true;
+
+        let id = task.id.clone();
+
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+
+            let result = session
+                .api
+                .get_spoc_assignment_detail(&id)
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::SpocDetail(id, result));
+        });
     }
 
     /// Loads grades for every term the portal lists, concurrently.

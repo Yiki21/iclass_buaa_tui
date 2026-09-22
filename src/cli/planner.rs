@@ -899,18 +899,36 @@ pub(crate) async fn tasks_command(args: TaskArgs) -> Result<()> {
         println!("没有读取到希冀作业");
     } else {
 
-        println!("source\tcourse\ttitle\tstart\tdue\tscore\tstatus");
+        println!("source\tcourse\ttitle\tstart\tdue\tscore\tproblems\tstatus");
 
         for task in tasks {
 
+            // "2/3" is the difference between done and not done; the status
+            // word alone cannot express it.
+            let problems = if task.total > 0 {
+
+                format!("{}/{}", task.submitted, task.total)
+            } else {
+
+                "-".to_string()
+            };
+
+            let score = match (task.score.as_deref(), task.max_score.as_deref()) {
+                (Some(score), Some(max)) => format!("{score}/{max}"),
+                (Some(score), None) => score.to_string(),
+                (None, Some(max)) => format!("-/{max}"),
+                (None, None) => "-".to_string(),
+            };
+
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 task.source,
                 task.course_name,
                 task.title,
                 task.start_time.as_deref().unwrap_or("-"),
                 task.due_time.as_deref().unwrap_or("-"),
-                task.score.as_deref().unwrap_or("-"),
+                score,
+                problems,
                 task.status,
             );
         }
