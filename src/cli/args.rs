@@ -32,6 +32,8 @@ pub(crate) enum CommandKind {
     Plan(PlanArgs),
     /// Check WebVPN, SSO, iClass, and BYKC connectivity before login.
     Doctor(DoctorArgs),
+    /// Send a test desktop notification to verify notifications work here.
+    Notify(NotifyArgs),
     /// Show today's cached academic courses and next class.
     Today(TodayArgs),
     /// Show exam arrangements for one academic term.
@@ -121,6 +123,14 @@ pub(crate) struct PlanArgs {
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct NotifyArgs {
+    /// Message body. Defaults to a fixed sample.
+    #[arg(long)]
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Args)]

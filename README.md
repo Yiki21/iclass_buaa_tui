@@ -151,6 +151,15 @@ planner_interval_minutes = 10
 
 `enable_bykc = true` 时，`plan` 和 `list-today` 会额外纳入博雅已选课程里“今天存在签到窗口或签退窗口”的项目。该能力要求 `use_vpn = true`。
 
+#### 桌面通知
+
+自动化在无人值守时运行，所以失败必须能主动找到你：
+
+- `notify_on_failure`（默认 `true`）：签到失败时发桌面通知。账号被锁、会话过期这类情况下，没有通知就只能靠翻调度器日志。
+- `notify_on_success`（默认 `false`）：签到成功也通知。默认关闭，避免每次都提醒导致真正重要的失败提醒被忽略。
+- 先跑一次 `iclass_buaa_tui notify` 确认这台机器能发出通知；没有 `notify-send`、或没有图形会话（SSH、容器、systemd 服务）时会明确报错并给出原因。
+- 通知是尽力而为：发不出去不会影响签到结果和退出码，只多打一行 stderr。
+
 ### CLI 命令说明
 常用命令：
 

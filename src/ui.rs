@@ -339,7 +339,7 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
     // being silently truncated.
     let [tabs_area, todo_area, identity_area] = Layout::horizontal([
         Constraint::Min(24),
-        Constraint::Length(38),
+        Constraint::Length(50),
         Constraint::Length(34),
     ])
     .areas(area);
@@ -402,66 +402,96 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
         // The leading "⚑ " is two cells wide.
         let mut column = todo_area.x + 2;
 
-        let mut push_item = |count: Option<usize>, label: &str, action: HotAction| {
+        // Items are appended in one scoped pass so the closure's borrow of
+        // todo_spans ends before the countdown is added below.
+        {
 
-            let Some(count) = count else {
+            let mut push_item = |count: Option<usize>, label: &str, action: HotAction| {
 
-                return;
+                let Some(count) = count else {
+
+                    return;
+                };
+
+                if count == 0 {
+
+                    return;
+                };
+
+                if !todo_spans.is_empty() {
+
+                    todo_spans.push(Span::styled("  ", theme::muted_style()));
+
+                    column += 2;
+                }
+
+                // Compact form: the count carries the meaning and the label
+                // names the source; the tab it belongs to sits right beside it.
+                let text = format!("{count} {label}");
+
+                let width = display_width(&text) as u16;
+
+                todo_spans.push(Span::styled(
+                    count.to_string(),
+                    Style::default()
+                        .fg(theme::WARN)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+                todo_spans.push(Span::styled(format!(" {label}"), theme::text_style()));
+
+                app.record_hotspot(
+                    Rect {
+                        x: column,
+                        y: todo_area.y,
+                        width,
+                        height: 1,
+                    },
+                    action,
+                );
+
+                column += width;
             };
 
-            if count == 0 {
-
-                return;
-            }
-
-            if !todo_spans.is_empty() {
-
-                todo_spans.push(Span::styled("  ", theme::muted_style()));
-
-                column += 2;
-            }
-
-            // Compact form: the count carries the meaning and the label names
-            // the source. The tab it belongs to is visible right beside it.
-            let text = format!("{count} {label}");
-
-            let width = display_width(&text) as u16;
-
-            todo_spans.push(Span::styled(
-                count.to_string(),
-                Style::default()
-                    .fg(theme::WARN)
-                    .add_modifier(Modifier::BOLD),
-            ));
-
-            todo_spans.push(Span::styled(format!(" {label}"), theme::text_style()));
-
-            app.record_hotspot(
-                Rect {
-                    x: column,
-                    y: todo_area.y,
-                    width,
-                    height: 1,
-                },
-                action,
+            push_item(
+                todo.unsigned_classes,
+                "未签到",
+                HotAction::WorkspaceTab(WorkspaceTab::IClass),
             );
 
-            column += width;
-        };
+            push_item(todo.pending_tasks, "待交", HotAction::CourseTasks);
 
-        push_item(
-            todo.unsigned_classes,
-            "未签到",
-            HotAction::WorkspaceTab(WorkspaceTab::IClass),
-        );
+            push_item(
+                todo.signable_bykc,
+                "可签",
+                HotAction::WorkspaceTab(WorkspaceTab::Bykc),
+            );
+        }
 
-        push_item(todo.pending_tasks, "待交", HotAction::CourseTasks);
+        // Countdown to the nearest deadline. Only shown when something is
+        // actually pending, so it never dangles next to an empty list.
+        if todo.pending_tasks.is_some_and(|count| count > 0)
+            && let Some(remaining) = todo.nearest_due
+        {
 
-        push_item(
-            todo.signable_bykc,
-            "可签",
-            HotAction::WorkspaceTab(WorkspaceTab::Bykc),
-        );
+            let urgency = if remaining.num_hours() < 24 {
+
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD)
+            } else if remaining.num_hours() < 72 {
+
+                Style::default().fg(theme::WARN)
+            } else {
+
+                theme::muted_style()
+            };
+
+            todo_spans.push(Span::styled(
+                format!(" · 最近 {}", crate::app::format_remaining(remaining)),
+                urgency,
+            ));
+        }
 
         let indicator = if todo_spans.is_empty() {
 
@@ -889,6 +919,103 @@ fn display_width(text: &str) -> usize {
         .sum()
 }
 
+/// One-row banner for the soonest exam.
+///
+/// Why:
+/// An exam in three days matters more than today's second lecture. Putting it
+/// at the top of the today view, colored by how close it is, means the user
+/// sees it every time they open the app rather than only when they think to
+/// check the exam list.
+
+fn render_exam_banner(frame: &mut Frame, area: Rect, exam: &crate::academic::ExamItem) {
+
+    let date = exam.exam_date.as_deref().unwrap_or("");
+
+    let days_left = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+        .ok()
+        .map(|exam_day| (exam_day - Local::now().date_naive()).num_days());
+
+    let (countdown, urgency) = match days_left {
+        Some(0) => {
+            (
+                "今天".to_string(),
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        Some(1) => {
+            (
+                "明天".to_string(),
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        Some(days) if days <= 3 => {
+            (
+                format!("{days} 天后"),
+                Style::default()
+                    .fg(theme::WARN)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        Some(days) => (format!("{days} 天后"), Style::default().fg(theme::WARN)),
+        None => (String::new(), theme::muted_style()),
+    };
+
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("◆ 考试 ", urgency),
+        Span::styled(countdown, urgency),
+        sep(),
+        Span::styled(exam.course_name.clone(), theme::text_style()),
+    ];
+
+    if let Some(time) = exam
+        .start_time
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+
+        spans.push(Span::styled(
+            format!("  {date} {time}"),
+            theme::muted_style(),
+        ));
+    } else {
+
+        spans.push(Span::styled(format!("  {date}"), theme::muted_style()));
+    }
+
+    if let Some(place) = exam
+        .place
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            place.to_string(),
+            Style::default().fg(theme::INFO),
+        ));
+    }
+
+    if let Some(seat) = exam
+        .seat
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+
+        spans.push(Span::styled(
+            format!("  座位 {seat}"),
+            Style::default().fg(theme::OK),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 /// One summary row above a list view, replacing the old header box.
 
 fn render_view_summary(frame: &mut Frame, area: Rect, spans: Vec<Span<'static>>) {
@@ -1192,8 +1319,23 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
         })
         .count();
 
-    let [summary_area, list_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+    // A near exam takes a row above the summary. Only reserved when one
+    // exists, so the list does not lose a row for nothing.
+    let upcoming = app.upcoming_exam(7);
+
+    let exam_rows = u16::from(upcoming.is_some());
+
+    let [exam_area, summary_area, list_area] = Layout::vertical([
+        Constraint::Length(exam_rows),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(body);
+
+    if let Some(exam) = upcoming {
+
+        render_exam_banner(frame, exam_area, exam);
+    }
 
     let mut summary = vec![
         Span::styled(
@@ -3950,6 +4092,189 @@ mod tests {
             !out.contains("0 未签到") && !out.contains("可签"),
             "没有的事项不应出现在指示条里：\n{out}"
         );
+    }
+
+    #[test]
+
+    fn todo_indicator_shows_countdown_to_nearest_deadline() {
+
+        use crate::tasks::AssignmentItem;
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.schedule.tasks_loaded = true;
+
+        // Two pending: one far off, one due in about 18 hours. The strip must
+        // report the nearer one.
+        let soon = (Local::now().naive_local()
+            + chrono::Duration::hours(18)
+            + chrono::Duration::minutes(5))
+        .format("%Y-%m-%d %H:%M")
+        .to_string();
+
+        app.schedule.tasks = vec![
+            AssignmentItem {
+                title: "远期".to_string(),
+                status: "未提交".to_string(),
+                due_time: Some("2099-01-01 23:59".to_string()),
+                ..Default::default()
+            },
+            AssignmentItem {
+                title: "很快".to_string(),
+                status: "未提交".to_string(),
+                due_time: Some(soon),
+                ..Default::default()
+            },
+        ];
+
+        let summary = app.todo_summary();
+
+        let remaining = summary.nearest_due.expect("应有最近截止");
+
+        assert!(
+            (17..=18).contains(&remaining.num_hours()),
+            "最近截止应约 18 小时，得到 {}h",
+            remaining.num_hours()
+        );
+
+        let out = render_text(130, 30, |frame| render_workspace(frame, &app));
+
+        assert!(out.contains("2待交"), "应显示两项待交：\n{out}");
+
+        assert!(
+            out.contains("最近18h") || out.contains("最近17h"),
+            "应显示倒计时：\n{out}"
+        );
+    }
+
+    #[test]
+
+    fn remaining_time_uses_the_coarsest_readable_unit() {
+
+        use chrono::Duration;
+
+        assert_eq!(crate::app::format_remaining(Duration::minutes(45)), "45m");
+
+        assert_eq!(crate::app::format_remaining(Duration::hours(18)), "18h");
+
+        assert_eq!(crate::app::format_remaining(Duration::hours(47)), "47h");
+
+        assert_eq!(crate::app::format_remaining(Duration::hours(48)), "2d");
+
+        assert_eq!(crate::app::format_remaining(Duration::days(9)), "9d");
+
+        assert_eq!(
+            crate::app::format_remaining(Duration::minutes(-1)),
+            "已过期"
+        );
+    }
+
+    fn exam_in(days: i64, name: &str) -> crate::academic::ExamItem {
+
+        crate::academic::ExamItem {
+            course_name: name.to_string(),
+            exam_date: Some(
+                (Local::now().date_naive() + chrono::Duration::days(days))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+            ),
+            start_time: Some("14:00".to_string()),
+            place: Some("主M101".to_string()),
+            seat: Some("17".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+
+    fn today_view_shows_the_nearest_exam_within_a_week() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        app.schedule.view = CourseView::Today;
+
+        // A far exam, a near one, and one already past. Only the near one is
+        // eligible, and it must win over the far one.
+        app.schedule.exams = vec![
+            exam_in(20, "远期考试"),
+            exam_in(3, "线性代数"),
+            exam_in(-2, "已考完"),
+        ];
+
+        let nearest = app.upcoming_exam(7).expect("应找到 7 天内的考试");
+
+        assert_eq!(nearest.course_name, "线性代数");
+
+        let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+        assert!(out.contains("◆考试"), "应有考试横幅：\n{out}");
+
+        assert!(out.contains("3天后"), "应显示倒计时：\n{out}");
+
+        assert!(out.contains("线性代数"), "应显示课程名：\n{out}");
+
+        assert!(out.contains("主M101"), "应显示地点：\n{out}");
+
+        assert!(out.contains("座位17"), "应显示座位：\n{out}");
+
+        assert!(
+            !out.contains("远期考试"),
+            "一周外的考试不应出现在横幅：\n{out}"
+        );
+    }
+
+    #[test]
+
+    fn today_view_has_no_exam_banner_when_nothing_is_near() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        app.schedule.view = CourseView::Today;
+
+        app.schedule.exams = vec![exam_in(30, "很远的考试")];
+
+        assert!(app.upcoming_exam(7).is_none());
+
+        let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+        assert!(
+            !out.contains("◆考试"),
+            "没有近期考试时不应占用一行：\n{out}"
+        );
+    }
+
+    #[test]
+
+    fn exam_countdown_words_today_and_tomorrow() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Schedule;
+
+        app.schedule.view = CourseView::Today;
+
+        // Today at 23:59 so it is still in the future when the test runs.
+        let mut today_exam = exam_in(0, "今天的考试");
+
+        today_exam.start_time = Some("23:59".to_string());
+
+        app.schedule.exams = vec![today_exam];
+
+        let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+        assert!(out.contains("考试今天"), "当天考试应写“今天”：\n{out}");
     }
 
     #[test]

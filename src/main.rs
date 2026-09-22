@@ -8,6 +8,7 @@ mod constants;
 mod iclass;
 mod logging;
 mod model;
+mod notify;
 mod schedule;
 mod tasks;
 mod theme;

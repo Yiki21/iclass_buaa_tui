@@ -42,6 +42,7 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::Sign(args) => planner::sign_command(args).await,
         CommandKind::Plan(args) => planner::plan_command(args).await,
         CommandKind::Doctor(args) => planner::doctor_command(args).await,
+        CommandKind::Notify(args) => planner::notify_command(args),
         CommandKind::Today(args) => planner::today_command(args).await,
         CommandKind::Exams(args) => planner::exams_command(args).await,
         CommandKind::Grades(args) => planner::grades_command(args).await,

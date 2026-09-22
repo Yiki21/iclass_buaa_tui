@@ -52,6 +52,26 @@ pub(crate) struct AutomationConfig {
     pub(crate) planner_time:             String,
     #[serde(default = "default_planner_interval_minutes")]
     pub(crate) planner_interval_minutes: u32,
+    /// Send a desktop notification when a sign attempt fails.
+    ///
+    /// Why:
+    /// Defaults on. The whole point of the automation is that nobody is
+    /// watching, so the one case worth interrupting for is the one where it
+    /// did not work.
+    #[serde(default = "default_true")]
+    pub(crate) notify_on_failure:        bool,
+    /// Send a desktop notification when a sign attempt succeeds.
+    ///
+    /// Why:
+    /// Defaults off: success is the expected outcome and notifying every time
+    /// trains the user to ignore the notifications that matter.
+    #[serde(default)]
+    pub(crate) notify_on_success:        bool,
+}
+
+fn default_true() -> bool {
+
+    true
 }
 
 pub(crate) fn load_config(path: Option<&Path>) -> Result<AutomationConfig> {

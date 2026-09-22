@@ -19,3 +19,11 @@ bykc_exclude_courses = []
 
 planner_time = "07:00:00"
 planner_interval_minutes = 10
+
+# 签到失败时发送桌面通知（默认开启）。无人值守时这是唯一能及时发现问题的方式。
+# 依赖 notify-send（Debian/Ubuntu 属 libnotify-bin）或 zenity；macOS 用 osascript，Windows 用 PowerShell。
+# 可用 `iclass_buaa_tui notify` 先测试这台机器能否发出通知。
+notify_on_failure = true
+
+# 签到成功也发通知（默认关闭）。每次都提醒会让人忽略真正重要的失败提醒。
+notify_on_success = false

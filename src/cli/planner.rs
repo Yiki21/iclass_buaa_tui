@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::args::{
-    AcademicListArgs, ClassroomArgs, DoctorArgs, ListTodayArgs, PlanArgs, ScheduleDiffArgs,
-    ScheduleExportArgs, SignArgs, TaskArgs, TodayArgs,
+    AcademicListArgs, ClassroomArgs, DoctorArgs, ListTodayArgs, NotifyArgs, PlanArgs,
+    ScheduleDiffArgs, ScheduleExportArgs, SignArgs, TaskArgs, TodayArgs,
 };
 use super::config::{AutomationConfig, load_config, parse_planner_time};
 use super::core::{
@@ -503,6 +503,8 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
 
                 if !outcome.success_like {
 
+                    notify_sign_failure(&config, target, &outcome.message);
+
                     failures.push(format!(
                         "[{}:{}] {} ({}) -> {}",
                         target.source.label(),
@@ -513,10 +515,14 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
                     ));
                 } else {
 
+                    notify_sign_success(&config, target, &outcome.message);
+
                     succeeded += 1;
                 }
             }
             Err(error) => {
+
+                notify_sign_failure(&config, target, &error.to_string());
 
                 failures.push(format!(
                     "[{}:{}] {} ({}) -> {}",
@@ -540,6 +546,108 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
     log_planner_completed(&run_id, &evaluated, succeeded, failures.len() as u32);
 
     bail!("部分课程签到失败:\n{}", failures.join("\n"))
+}
+
+/// Notifies the user that one sign attempt failed.
+///
+/// Why:
+/// A locked account or an expired session is exactly the case where the run
+/// continues but nothing gets signed. Without a notification the only signal is
+/// a non-zero exit status in a scheduler the user never reads.
+///
+/// How:
+/// Best effort. Notification tooling is frequently missing, and failing to
+/// notify must not change the outcome of the sign attempt itself.
+
+/// Sends a test notification.
+///
+/// Why:
+/// Notification tooling is platform-specific and frequently absent. A user who
+/// never receives a failure alert needs a way to learn that notifications do
+/// not work on this machine, rather than assuming there were no failures.
+
+pub(crate) fn notify_command(args: NotifyArgs) -> Result<()> {
+
+    let body = args
+        .message
+        .unwrap_or_else(|| "如果你看到这条通知，说明签到失败的桌面提醒可以正常工作。".to_string());
+
+    match crate::notify::notify(
+        "iClass BUAA 通知测试",
+        &body,
+        crate::notify::Urgency::Normal,
+    ) {
+        Ok(()) => {
+
+            println!("测试通知已发送");
+
+            Ok(())
+        }
+        Err(error) => {
+
+            eprintln!("测试通知发送失败: {error}");
+
+            bail!(
+                "无法发送桌面通知: {error}\n常见的可能原因：\n  - 未安装 \
+                 notify-send（Debian/Ubuntu 上属于 libnotify-bin 包）\n  - \
+                 当前没有图形会话（SSH、容器或 systemd \
+                 服务里常见）\n如果这台机器不需要提醒，可在配置里设置 notify_on_failure = false"
+            );
+        }
+    }
+}
+
+fn notify_sign_failure(config: &AutomationConfig, target: &ListedTarget, reason: &str) {
+
+    if !config.notify_on_failure {
+
+        return;
+    }
+
+    let summary = format!("签到失败：{}", target.name.trim());
+
+    let body = format!(
+        "[{}:{}] {}\n{}",
+        target.source.label(),
+        target.action.label(),
+        target.target_id,
+        reason
+    );
+
+    if let Err(error) = crate::notify::notify(&summary, &body, crate::notify::Urgency::Critical) {
+
+        // Reported, not fatal: the run's exit status still reflects the
+        // sign-in outcome, which is what the scheduler acts on.
+        eprintln!("桌面通知发送失败: {error}");
+    }
+}
+
+/// Notifies the user that a run signed something.
+///
+/// Why:
+/// Success is quieter than failure but still worth one line: it is how the
+/// user learns the automation is alive without opening anything.
+
+fn notify_sign_success(config: &AutomationConfig, target: &ListedTarget, message: &str) {
+
+    if !config.notify_on_success {
+
+        return;
+    }
+
+    let summary = format!("已签到：{}", target.name.trim());
+
+    let body = format!(
+        "[{}:{}] {}",
+        target.source.label(),
+        target.action.label(),
+        message.trim()
+    );
+
+    if let Err(error) = crate::notify::notify(&summary, &body, crate::notify::Urgency::Normal) {
+
+        eprintln!("桌面通知发送失败: {error}");
+    }
 }
 
 fn planner_run_id() -> String {
@@ -2344,6 +2452,8 @@ mod tests {
             bykc_exclude_courses:     Vec::new(),
             planner_time:             "07:00:00".to_string(),
             planner_interval_minutes: 10,
+            notify_on_failure:        false,
+            notify_on_success:        false,
         }
     }
 

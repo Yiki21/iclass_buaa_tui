@@ -1,6 +1,6 @@
 //! Application state, async event routing, and keyboard-driven TUI behavior.
 
-use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use qrcode::{EcLevel, QrCode, render::svg};
 use ratatui::layout::Rect;
@@ -784,6 +784,13 @@ pub struct TodoSummary {
     pub unsigned_classes: Option<usize>,
     pub pending_tasks:    Option<usize>,
     pub signable_bykc:    Option<usize>,
+    /// Time until the soonest pending assignment is due.
+    ///
+    /// Why:
+    /// "2 待交" says how many; it does not say whether one of them is due in an
+    /// hour. The nearest deadline is the fact that changes what the user does
+    /// next, so it rides alongside the count.
+    pub nearest_due:      Option<chrono::Duration>,
 }
 
 impl TodoSummary {
@@ -795,6 +802,37 @@ impl TodoSummary {
             || self.pending_tasks.is_some()
             || self.signable_bykc.is_some()
     }
+}
+
+/// Formats a remaining duration compactly: `18h`, `3d`, `45m`, or `已过期`.
+///
+/// Why:
+/// The strip has a few cells per item. A coarse unit that never exceeds two
+/// digits fits and still tells the reader whether this is today's problem or
+/// next week's.
+
+pub fn format_remaining(remaining: chrono::Duration) -> String {
+
+    let minutes = remaining.num_minutes();
+
+    if minutes < 0 {
+
+        return "已过期".to_string();
+    }
+
+    if minutes < 60 {
+
+        return format!("{minutes}m");
+    }
+
+    let hours = remaining.num_hours();
+
+    if hours < 48 {
+
+        return format!("{hours}h");
+    }
+
+    format!("{}d", remaining.num_days())
 }
 
 /// A clickable region reported by the renderer.
@@ -1412,28 +1450,37 @@ impl App {
             )
         };
 
-        // Assignments: unsubmitted and not yet past due.
-        let pending_tasks = if self.schedule.tasks_loaded {
+        // Assignments: unsubmitted and not yet past due, plus how soon the
+        // nearest one is due.
+        let now = Local::now().naive_local();
 
-            let now = Local::now().naive_local();
+        let (pending_tasks, nearest_due) = if self.schedule.tasks_loaded {
 
-            Some(
-                self.schedule
-                    .tasks
-                    .iter()
-                    .filter(|task| task.status.contains("未提交") || task.status.contains("未作答"))
-                    .filter(|task| {
+            let pending: Vec<&AssignmentItem> = self
+                .schedule
+                .tasks
+                .iter()
+                .filter(|task| task.status.contains("未提交") || task.status.contains("未作答"))
+                .filter(|task| {
 
-                        task.due_time
-                            .as_deref()
-                            .and_then(crate::tasks::parse_deadline)
-                            .is_none_or(|deadline| deadline >= now)
-                    })
-                    .count(),
-            )
+                    task.due_time
+                        .as_deref()
+                        .and_then(crate::tasks::parse_deadline)
+                        .is_none_or(|deadline| deadline >= now)
+                })
+                .collect();
+
+            let nearest = pending
+                .iter()
+                .filter_map(|task| task.due_time.as_deref())
+                .filter_map(crate::tasks::parse_deadline)
+                .min()
+                .map(|deadline| deadline - now);
+
+            (Some(pending.len()), nearest)
         } else {
 
-            None
+            (None, None)
         };
 
         // BYKC: chosen courses the portal says can be signed in or out now.
@@ -1455,6 +1502,7 @@ impl App {
             unsigned_classes,
             pending_tasks,
             signable_bykc,
+            nearest_due,
         }
     }
 
@@ -1765,6 +1813,12 @@ impl App {
                         self.clear_qr();
 
                         let remember_status = self.persist_remembered_login_status();
+
+                        // Exams drive the countdown on the today view, so fetch
+                        // them up front rather than waiting for the user to open
+                        // the exam view. Skipped when no cached schedule has
+                        // established a term yet.
+                        self.prefetch_exams(data.session.clone(), tx);
 
                         if should_prewarm_bykc {
 
@@ -2652,6 +2706,73 @@ impl App {
     /// The term list comes from the cached schedule, so this never needs a
     /// separate request to discover terms and works offline for the list even
     /// if the grade fetches themselves must go online.
+
+    /// Fetches exam arrangements in the background after login.
+    ///
+    /// Why:
+    /// A near exam is worth showing above today's classes, but exams were only
+    /// loaded when the user opened the exam view, which is exactly when they no
+    /// longer need reminding.
+    ///
+    /// How:
+    /// Skipped silently when the term is not yet known; the user can still load
+    /// exams on demand with `r` once a schedule is imported.
+
+    fn prefetch_exams(&mut self, session: Session, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.schedule.academic_loading {
+
+            return;
+        }
+
+        let Some(term_code) = self
+            .schedule
+            .current_semester()
+            .map(|semester| semester.term_code.clone())
+        else {
+
+            return;
+        };
+
+        self.schedule.academic_loading = true;
+
+        spawn_exams(session, term_code, tx.clone());
+    }
+
+    /// The soonest exam within `days`, if any.
+    ///
+    /// Why:
+    /// The today view shows today's classes; an exam three days out is the more
+    /// actionable fact and deserves to sit above them.
+
+    pub fn upcoming_exam(&self, days: i64) -> Option<&crate::academic::ExamItem> {
+
+        let now = Local::now();
+
+        let limit = now + ChronoDuration::days(days);
+
+        self.schedule
+            .exams
+            .iter()
+            .filter_map(|exam| {
+
+                let date = exam.exam_date.as_deref()?;
+
+                let parsed = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok()?;
+
+                let start = exam
+                    .start_time
+                    .as_deref()
+                    .and_then(|value| NaiveTime::parse_from_str(value.trim(), "%H:%M").ok());
+
+                let at = parsed.and_time(start.unwrap_or(NaiveTime::MIN));
+
+                Some((exam, at))
+            })
+            .filter(|(_, at)| *at >= now.naive_local() && *at <= limit.naive_local())
+            .min_by_key(|(_, at)| *at)
+            .map(|(exam, _)| exam)
+    }
 
     fn load_all_grades(&mut self, tx: &UnboundedSender<AsyncEvent>) {
 
