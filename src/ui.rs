@@ -885,6 +885,7 @@ fn campus_label(code: i64) -> &'static str {
     match code {
         1 => "学院路",
         2 => "沙河",
+        3 => "杭州",
         _ => "未知",
     }
 }
@@ -1279,14 +1280,60 @@ fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
     let [summary_area, list_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
 
-    render_view_summary(
-        frame,
-        summary_area,
-        vec![Span::styled(
-            format!("{} 门成绩", app.schedule.grades.len()),
+    // When several terms are loaded the per-term figure is no longer what the
+    // list shows, so the summary reports the GPA instead of only the count.
+    let summary = crate::academic::summarize_grades(&app.schedule.grades);
+
+    let mut spans = vec![Span::styled(
+        format!("{} 门成绩", app.schedule.grades.len()),
+        theme::text_style(),
+    )];
+
+    if app.schedule.grades_all_terms {
+
+        spans.push(sep());
+
+        spans.push(Span::styled("全部学期", Style::default().fg(theme::INFO)));
+    }
+
+    if let Some(gpa) = summary.weighted_gpa {
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("GPA {gpa:.2}"),
+            Style::default().fg(theme::OK).add_modifier(Modifier::BOLD),
+        ));
+
+        spans.push(Span::styled(
+            format!("  {:.1} 学分", summary.total_credits),
+            theme::muted_style(),
+        ));
+    }
+
+    if let Some(score) = summary.weighted_score {
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("加权分 {score:.1}"),
             theme::text_style(),
-        )],
-    );
+        ));
+    }
+
+    if summary.failed > 0 {
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("{} 门不及格", summary.failed),
+            Style::default()
+                .fg(theme::ERROR)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    render_view_summary(frame, summary_area, spans);
 
     let items = if app.schedule.grades.is_empty() {
 
@@ -1318,10 +1365,38 @@ fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
                     Err(_) => theme::muted_style(),
                 };
 
+                let mut row = vec![
+                    Span::raw(" "),
+                    Span::styled(format!("{score:>5}"), score_style),
+                    Span::raw("  "),
+                ];
+
+                // With several terms merged, the term is what disambiguates two
+                // courses with the same name.
+                if app.schedule.grades_all_terms {
+
+                    row.push(Span::styled(
+                        format!("{:<12}", grade.term_code),
+                        theme::muted_style(),
+                    ));
+                }
+
+                row.push(Span::styled(grade.course_name.clone(), theme::text_style()));
+
                 ListItem::new(Line::from(vec![
                     Span::raw(" "),
                     Span::styled(format!("{score:>5}"), score_style),
                     Span::raw("  "),
+                    Span::styled(
+                        if app.schedule.grades_all_terms {
+
+                            format!("{:<12}", grade.term_code)
+                        } else {
+
+                            String::new()
+                        },
+                        theme::muted_style(),
+                    ),
                     Span::styled(grade.course_name.clone(), theme::text_style()),
                     Span::styled(
                         format!(
@@ -1350,7 +1425,7 @@ fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(List::new(items), list_area);
 
-    render_key_hint(frame, footer, "r 刷新");
+    render_key_hint(frame, footer, "r 刷新当前学期  A 加载全部学期");
 }
 
 fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {

@@ -39,6 +39,127 @@ pub struct GradeItem {
     pub exam_type:   Option<String>,
 }
 
+/// Result of loading several terms at once.
+
+#[derive(Clone, Debug, Default, PartialEq)]
+
+pub struct GradesForTerms {
+    pub grades: Vec<GradeItem>,
+    /// Terms that could not be loaded, as `(term_code, error)`.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Credit-weighted summary over a set of grades.
+///
+/// Why:
+/// The list of individual scores is what the portal shows, but the number a
+/// student actually wants is the GPA. Computing it here, next to the parser,
+/// keeps one definition of "which rows count" shared by the TUI and the CLI.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+
+pub struct GradeSummary {
+    /// Rows that contributed to the averages: those with a credit and a
+    /// numeric grade point.
+    pub counted:        usize,
+    /// Rows skipped for lacking a credit or a numeric grade point (pass/fail,
+    /// pending, exempt).
+    pub skipped:        usize,
+    pub total_credits:  f64,
+    pub weighted_gpa:   Option<f64>,
+    pub weighted_score: Option<f64>,
+    pub failed:         usize,
+}
+
+/// Computes a credit-weighted GPA and average score.
+///
+/// How:
+/// A row contributes when it has a credit and a numeric grade point. The
+/// weighted score is computed independently and only over rows that also have
+/// a numeric score, so a pass/fail course with a grade point but no percentage
+/// still counts toward GPA. Failed is counted from the score when present,
+/// otherwise from the portal's own pass flag.
+
+pub fn summarize_grades(grades: &[GradeItem]) -> GradeSummary {
+
+    let mut summary = GradeSummary::default();
+
+    let mut gpa_weight = 0.0_f64;
+
+    let mut gpa_sum = 0.0_f64;
+
+    let mut score_weight = 0.0_f64;
+
+    let mut score_sum = 0.0_f64;
+
+    for grade in grades {
+
+        let credit = grade.credit.filter(|value| *value > 0.0);
+
+        let point = grade
+            .grade_point
+            .as_deref()
+            .and_then(|value| value.trim().parse::<f64>().ok());
+
+        let score = grade
+            .score
+            .as_deref()
+            .and_then(|value| value.trim().parse::<f64>().ok());
+
+        let Some(credit) = credit else {
+
+            summary.skipped += 1;
+
+            continue;
+        };
+
+        let Some(point) = point else {
+
+            summary.skipped += 1;
+
+            continue;
+        };
+
+        summary.counted += 1;
+
+        summary.total_credits += credit;
+
+        gpa_weight += credit;
+
+        gpa_sum += credit * point;
+
+        if let Some(score) = score {
+
+            score_weight += credit;
+
+            score_sum += credit * score;
+
+            if score < 60.0 {
+
+                summary.failed += 1;
+            }
+        } else if grade
+            .passed
+            .as_deref()
+            .is_some_and(|flag| flag.contains("不通过") || flag.contains("未通过"))
+        {
+
+            summary.failed += 1;
+        }
+    }
+
+    if gpa_weight > 0.0 {
+
+        summary.weighted_gpa = Some(gpa_sum / gpa_weight);
+    }
+
+    if score_weight > 0.0 {
+
+        summary.weighted_score = Some(score_sum / score_weight);
+    }
+
+    summary
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 
 pub struct ClassroomRoom {
@@ -161,6 +282,87 @@ impl IClassApi {
             .collect())
     }
 
+    /// Fetches grades for several terms and flattens them into one list.
+    ///
+    /// Why:
+    /// Grades are per-term upstream, but a student looking at their record
+    /// wants the whole thing at once. Loading term by term also means one
+    /// failing term should not hide the others.
+    ///
+    /// How:
+    /// Terms run concurrently, bounded so the portal is not flooded. A term
+    /// that fails is reported by code and skipped; the rest still return.
+
+    pub async fn get_grades_for_terms(&self, term_codes: &[String]) -> GradesForTerms {
+
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        const CONCURRENCY: usize = 4;
+
+        let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
+
+        let mut tasks = Vec::with_capacity(term_codes.len());
+
+        for term_code in term_codes {
+
+            // The semaphore is never closed, so this only fails if it were,
+            // which would mean the whole batch is over anyway.
+            let Ok(permit) = semaphore.clone().acquire_owned().await else {
+
+                break;
+            };
+
+            let api = self.clone();
+
+            let term = term_code.clone();
+
+            tasks.push(tokio::spawn(async move {
+
+                let _permit = permit;
+
+                let outcome = api.get_grades(&term).await;
+
+                (term, outcome)
+            }));
+        }
+
+        let mut grades = Vec::new();
+
+        let mut failed = Vec::new();
+
+        for task in tasks {
+
+            let (term_code, outcome) = match task.await {
+                Ok(value) => value,
+                Err(error) => {
+
+                    failed.push((String::from("<unknown>"), error.to_string()));
+
+                    continue;
+                }
+            };
+
+            match outcome {
+                Ok(mut items) => grades.append(&mut items),
+                Err(error) => failed.push((term_code, error.to_string())),
+            }
+        }
+
+        // Newest term first, then stable within a term by course name.
+        grades.sort_by(|left, right| {
+
+            right
+                .term_code
+                .cmp(&left.term_code)
+                .then_with(|| left.course_name.cmp(&right.course_name))
+        });
+
+        failed.sort();
+
+        GradesForTerms { grades, failed }
+    }
+
     pub async fn query_classrooms(&self, campus: i64, date: &str) -> Result<Vec<ClassroomRoom>> {
 
         let sync_url = academic_url(self.use_vpn, BUAA_CLASSROOM_SYNC_URL);
@@ -257,6 +459,18 @@ fn ensure_academic_response(status: u16, final_url: &str, body: &str, stage: &st
     }
 
     Ok(())
+}
+
+/// Whether a term code has the shape the grade endpoint accepts.
+///
+/// Why:
+/// Graduate GSMIS terms are five-digit codes like `20261`; the score portal
+/// only understands `2025-2026-1`. Filtering up front keeps the all-terms load
+/// from firing a doomed request per graduate term.
+
+pub fn looks_like_score_term(term_code: &str) -> bool {
+
+    parse_grade_term(term_code).is_ok()
 }
 
 fn parse_grade_term(term_code: &str) -> Result<(String, String)> {
@@ -365,7 +579,10 @@ fn classroom_user_agent() -> &'static str {
 
 mod tests {
 
-    use super::{parse_classroom, parse_exam, parse_grade_term};
+    use super::{
+        GradeItem, looks_like_score_term, parse_classroom, parse_exam, parse_grade_term,
+        summarize_grades,
+    };
     use serde_json::json;
 
     #[test]
@@ -399,5 +616,143 @@ mod tests {
         .unwrap();
 
         assert_eq!(room.free_sections, vec![1, 2, 14]);
+    }
+
+    fn grade(credit: Option<f64>, score: Option<&str>, point: Option<&str>) -> GradeItem {
+
+        GradeItem {
+            credit,
+            score: score.map(str::to_string),
+            grade_point: point.map(str::to_string),
+            ..GradeItem::default()
+        }
+    }
+
+    #[test]
+
+    fn summary_weights_gpa_by_credit() {
+
+        // 4 credits at 4.0 and 2 credits at 2.0 -> (16 + 4) / 6 = 3.333...
+        let grades = vec![
+            grade(Some(4.0), Some("95"), Some("4.0")),
+            grade(Some(2.0), Some("70"), Some("2.0")),
+        ];
+
+        let summary = summarize_grades(&grades);
+
+        assert_eq!(summary.counted, 2);
+
+        assert_eq!(summary.total_credits, 6.0);
+
+        let gpa = summary.weighted_gpa.expect("应有 GPA");
+
+        assert!((gpa - 3.3333).abs() < 0.001, "GPA 应按学分加权，得到 {gpa}");
+
+        let avg = summary.weighted_score.expect("应有加权分");
+
+        // (4*95 + 2*70) / 6 = 520 / 6 = 86.67
+        assert!(
+            (avg - 86.6667).abs() < 0.001,
+            "加权分应为 86.67，得到 {avg}"
+        );
+    }
+
+    #[test]
+
+    fn summary_skips_rows_without_credit_or_numeric_point() {
+
+        let grades = vec![
+            grade(Some(3.0), Some("88"), Some("3.7")),
+            // Pass/fail: has credit but no numeric grade point.
+            grade(Some(1.0), Some("合格"), None),
+            // Pending: no credit.
+            grade(None, Some("90"), Some("4.0")),
+            // Zero-credit placeholder.
+            grade(Some(0.0), Some("100"), Some("4.0")),
+        ];
+
+        let summary = summarize_grades(&grades);
+
+        assert_eq!(summary.counted, 1, "只有第一条应计入");
+
+        assert_eq!(summary.skipped, 3);
+
+        assert_eq!(summary.total_credits, 3.0);
+    }
+
+    #[test]
+
+    fn summary_counts_failures_from_score_or_pass_flag() {
+
+        let mut flagged = grade(Some(2.0), None, Some("0"));
+
+        flagged.passed = Some("不通过".to_string());
+
+        let grades = vec![
+            grade(Some(3.0), Some("55"), Some("0")),
+            flagged,
+            grade(Some(2.0), Some("75"), Some("2.5")),
+        ];
+
+        let summary = summarize_grades(&grades);
+
+        assert_eq!(summary.failed, 2, "一条按分数、一条按通过标记判为不及格");
+    }
+
+    #[test]
+
+    fn summary_ignores_terms_without_a_numeric_scale() {
+
+        // A full term of realistic data: two strong, one weak, one pass/fail.
+        let grades = vec![
+            grade(Some(4.0), Some("92"), Some("3.9")),
+            grade(Some(3.0), Some("85"), Some("3.5")),
+            grade(Some(2.0), Some("58"), Some("0.0")),
+            grade(Some(1.0), Some("合格"), None),
+        ];
+
+        let summary = summarize_grades(&grades);
+
+        assert_eq!(summary.counted, 3, "合格/不合格不应计入 GPA");
+
+        assert_eq!(summary.skipped, 1);
+
+        assert_eq!(summary.failed, 1);
+
+        assert_eq!(summary.total_credits, 9.0);
+
+        let gpa = summary.weighted_gpa.expect("应有 GPA");
+
+        // (4*3.9 + 3*3.5 + 2*0.0) / 9 = 26.1 / 9 = 2.9
+        assert!((gpa - 2.9).abs() < 0.0001, "GPA 应为 2.9，得到 {gpa}");
+    }
+
+    #[test]
+
+    fn score_term_shape_is_checked_before_requesting() {
+
+        // Undergraduate codes go through; graduate five-digit codes do not.
+        assert!(looks_like_score_term("2025-2026-1"));
+
+        assert!(looks_like_score_term("2024-2025-2"));
+
+        assert!(!looks_like_score_term("20261"));
+
+        assert!(!looks_like_score_term("2025-2026"));
+
+        assert!(!looks_like_score_term(""));
+    }
+
+    #[test]
+
+    fn summary_of_nothing_has_no_averages() {
+
+        let summary = summarize_grades(&[]);
+
+        assert_eq!(summary.weighted_gpa, None);
+
+        assert_eq!(summary.weighted_score, None);
+
+        assert_eq!(summary.counted, 0);
     }
 }

@@ -154,6 +154,10 @@ pub(crate) struct AcademicListArgs {
     /// Academic term code, such as 2025-2026-1.
     #[arg(long)]
     pub(crate) term:        Option<String>,
+    /// Load every term the portal lists instead of one, and print a
+    /// credit-weighted GPA summary. Only meaningful for `grades`.
+    #[arg(long, conflicts_with = "term")]
+    pub(crate) all:         bool,
     /// Print JSON instead of a human-readable table.
     #[arg(long)]
     pub(crate) json:        bool,

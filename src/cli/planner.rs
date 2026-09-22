@@ -757,6 +757,52 @@ pub(crate) async fn grades_command(args: AcademicListArgs) -> Result<()> {
 
     let semesters = ensure_cached_semesters(&api, &session, &account, args.term.as_deref()).await?;
 
+    if args.all {
+
+        let mut term_codes: Vec<String> = semesters
+            .iter()
+            .flat_map(|semester| semester.terms.iter().map(|term| term.code.clone()))
+            .filter(|code| crate::academic::looks_like_score_term(code))
+            .collect();
+
+        term_codes.sort();
+
+        term_codes.dedup();
+
+        if term_codes.is_empty() {
+
+            bail!("课表缓存里没有可用于成绩查询的学期，请先运行 schedule-import");
+        }
+
+        let loaded = api.get_grades_for_terms(&term_codes).await;
+
+        let summary = crate::academic::summarize_grades(&loaded.grades);
+
+        if args.json {
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "grades": loaded.grades,
+                    "failed_terms": loaded.failed,
+                    "summary": summary,
+                }))?
+            );
+        } else {
+
+            print_grades(&loaded.grades);
+
+            print_grade_summary(&summary);
+
+            for (term, error) in &loaded.failed {
+
+                eprintln!("学期 {term} 加载失败: {error}");
+            }
+        }
+
+        return Ok(());
+    }
+
     let term = cached_semester(&semesters, args.term.as_deref())?;
 
     let grades = api.get_grades(&term.term_code).await?;
@@ -770,6 +816,32 @@ pub(crate) async fn grades_command(args: AcademicListArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_grade_summary(summary: &crate::academic::GradeSummary) {
+
+    println!();
+
+    match summary.weighted_gpa {
+        Some(gpa) => {
+
+            println!(
+                "GPA {gpa:.3}  学分 {:.1}  计入 {} 门  跳过 {} 门",
+                summary.total_credits, summary.counted, summary.skipped
+            )
+        }
+        None => println!("没有可计入 GPA 的成绩"),
+    }
+
+    if let Some(score) = summary.weighted_score {
+
+        println!("学分加权平均分 {score:.2}");
+    }
+
+    if summary.failed > 0 {
+
+        println!("不及格 {} 门", summary.failed);
+    }
 }
 
 pub(crate) async fn classrooms_command(args: ClassroomArgs) -> Result<()> {

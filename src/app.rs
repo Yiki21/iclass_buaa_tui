@@ -44,6 +44,7 @@ pub enum AsyncEvent {
     ScheduleImport(Result<SemesterSchedule, String>),
     Exams(Result<Vec<ExamItem>, String>),
     Grades(Result<Vec<GradeItem>, String>),
+    AllGrades(Result<crate::academic::GradesForTerms, String>),
     Classrooms(Result<Vec<ClassroomRoom>, String>),
     Tasks(Result<Vec<AssignmentItem>, String>),
     VersionCheck(Result<VersionInfo, String>),
@@ -152,11 +153,19 @@ pub struct ScheduleState {
     pub filtering:         bool,
     pub exams:             Vec<ExamItem>,
     pub grades:            Vec<GradeItem>,
-    pub classrooms:        Vec<ClassroomRoom>,
-    pub tasks:             Vec<AssignmentItem>,
-    pub academic_loading:  bool,
-    pub classroom_campus:  i64,
-    pub classroom_date:    String,
+    /// Terms already merged into `grades` by the all-terms load.
+    ///
+    /// Why:
+    /// Once several terms are loaded, "the current term's grades" is no longer
+    /// what the list shows. Recording the count lets the header say so and lets
+    /// a single-term refresh know it would be replacing a wider view.
+    pub grades_all_terms:  bool,
+
+    pub classrooms:       Vec<ClassroomRoom>,
+    pub tasks:            Vec<AssignmentItem>,
+    pub academic_loading: bool,
+    pub classroom_campus: i64,
+    pub classroom_date:   String,
 }
 
 impl ScheduleState {
@@ -1800,9 +1809,51 @@ impl App {
 
                         self.schedule.grades = grades;
 
+                        self.schedule.grades_all_terms = false;
+
                         self.success(format!("成绩已加载，共 {} 条", self.schedule.grades.len()));
                     }
                     Err(error) => self.error(format!("成绩加载失败: {error}")),
+                }
+            }
+            AsyncEvent::AllGrades(result) => {
+
+                self.schedule.academic_loading = false;
+
+                match result {
+                    Ok(loaded) => {
+
+                        let count = loaded.grades.len();
+
+                        self.schedule.grades = loaded.grades;
+
+                        self.schedule.grades_all_terms = true;
+
+                        if loaded.failed.is_empty() {
+
+                            self.success(format!("全部学期成绩已加载，共 {count} 条"));
+                        } else {
+
+                            // Partial success is the common case when a term
+                            // predates the grade system or is not yet released.
+                            self.warn(format!(
+                                "已加载 {count} 条；{} 个学期失败: {}",
+                                loaded.failed.len(),
+                                loaded
+                                    .failed
+                                    .iter()
+                                    .map(|(term, _)| term.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+
+                            for (term, error) in &loaded.failed {
+
+                                self.error(format!("{term} 学期成绩加载失败: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => self.error(format!("全部学期成绩加载失败: {error}")),
                 }
             }
             AsyncEvent::Classrooms(result) => {
@@ -2127,6 +2178,10 @@ impl App {
             }
             KeyCode::Char('u') => self.update_schedule(tx),
             KeyCode::Char('r') => self.refresh_academic_view(tx),
+            KeyCode::Char('A') if self.schedule.view == CourseView::Grades => {
+
+                self.load_all_grades(tx);
+            }
             KeyCode::Char('X') => self.logout(),
             _ => {}
         }
@@ -2322,6 +2377,57 @@ impl App {
         self.info("正在导入整学期课表...");
 
         spawn_schedule_import(session, requested_term, tx.clone());
+    }
+
+    /// Loads grades for every term the portal lists, concurrently.
+    ///
+    /// Why:
+    /// The term list comes from the cached schedule, so this never needs a
+    /// separate request to discover terms and works offline for the list even
+    /// if the grade fetches themselves must go online.
+
+    fn load_all_grades(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(session) = self.session.clone() else {
+
+            self.warn("当前未登录");
+
+            self.screen = Screen::Login;
+
+            return;
+        };
+
+        // Terms are listed in every cached semester; take the union so a stale
+        // snapshot from an older term does not shrink the set.
+        let mut term_codes: Vec<String> = self
+            .schedule
+            .semesters
+            .iter()
+            .flat_map(|semester| semester.terms.iter().map(|term| term.code.clone()))
+            .filter(|code| crate::academic::looks_like_score_term(code))
+            .collect();
+
+        term_codes.sort();
+
+        term_codes.dedup();
+
+        if term_codes.is_empty() {
+
+            self.warn("请先按 u 导入课表，系统才能确定学期列表");
+
+            return;
+        }
+
+        if self.schedule.academic_loading {
+
+            return;
+        }
+
+        self.schedule.academic_loading = true;
+
+        self.info(format!("正在加载 {} 个学期的成绩", term_codes.len()));
+
+        spawn_all_grades(session, term_codes, tx.clone());
     }
 
     fn refresh_academic_view(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -3481,6 +3587,16 @@ fn spawn_grades(session: Session, term_code: String, tx: UnboundedSender<AsyncEv
             .map_err(format_anyhow_error);
 
         let _ = tx.send(AsyncEvent::Grades(result));
+    });
+}
+
+fn spawn_all_grades(session: Session, term_codes: Vec<String>, tx: UnboundedSender<AsyncEvent>) {
+
+    tokio::spawn(async move {
+
+        let result = Ok(session.api.get_grades_for_terms(&term_codes).await);
+
+        let _ = tx.send(AsyncEvent::AllGrades(result));
     });
 }
 
