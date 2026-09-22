@@ -50,6 +50,31 @@ pub enum AsyncEvent {
     Tasks(Result<Vec<AssignmentItem>, String>),
     VersionCheck(Result<VersionInfo, String>),
     Doctor(Result<DoctorReport, String>),
+    Venues(Result<Vec<crate::cgyy::VenueSite>, String>),
+    VenueDay(Result<crate::cgyy::DayInfo, String>),
+    VenueOrders(Result<Vec<crate::cgyy::Order>, String>),
+    SeatLibraries(Result<Vec<crate::libbook::Library>, String>),
+    SeatAreas(Result<Vec<crate::libbook::Area>, String>),
+    SeatDetail(Result<crate::libbook::AreaDetail, String>),
+    SeatSeats(Result<Vec<crate::libbook::Seat>, String>),
+    SeatBookings(Result<Vec<crate::libbook::Booking>, String>),
+    ClockinOverview(Result<ClockinOverview, String>),
+    ClockinRecords(Result<Vec<crate::ygdk::Record>, String>),
+    EvalTasks(Result<Vec<crate::evaluation::EvaluationTask>, String>),
+    EvalQuestionnaire(Result<crate::evaluation::Questionnaire, String>),
+    /// A write finished; the message is shown to the user either way.
+    Write(Result<String, String>),
+}
+
+/// Everything the clockin tab shows about one category.
+
+#[derive(Clone, Debug, Default)]
+
+pub struct ClockinOverview {
+    pub classifies: Vec<crate::ygdk::Classify>,
+    pub selected:   usize,
+    pub count:      crate::ygdk::Count,
+    pub items:      Vec<crate::ygdk::Item>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +150,43 @@ pub enum WorkspaceTab {
     Schedule,
     IClass,
     Bykc,
+    /// Seminar-room booking (研讨室 / 场馆预约).
+    Venue,
+    /// Library seat booking (图书馆座位).
+    Seat,
+    /// Sunshine clock-in (阳光打卡).
+    Clockin,
+    /// Course evaluation (评教).
+    Eval,
+}
+
+impl WorkspaceTab {
+    /// Every tab, in the order shown across the top bar.
+
+    pub const ALL: [Self; 7] = [
+        Self::Schedule,
+        Self::IClass,
+        Self::Bykc,
+        Self::Venue,
+        Self::Seat,
+        Self::Clockin,
+        Self::Eval,
+    ];
+
+    /// Short label shown in the top bar.
+
+    pub fn label(self) -> &'static str {
+
+        match self {
+            Self::Schedule => "课表",
+            Self::IClass => "签到",
+            Self::Bykc => "博雅",
+            Self::Venue => "研讨室",
+            Self::Seat => "图书馆",
+            Self::Clockin => "打卡",
+            Self::Eval => "评教",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -835,6 +897,144 @@ pub fn format_remaining(remaining: chrono::Duration) -> String {
     format!("{}d", remaining.num_days())
 }
 
+/// Seminar-room tab state.
+
+#[derive(Clone, Debug, Default)]
+
+pub struct VenueState {
+    pub sites:         Vec<crate::cgyy::VenueSite>,
+    pub selected:      usize,
+    pub loading:       bool,
+    pub loaded:        bool,
+    /// Availability for the selected room, loaded on demand.
+    pub day:           Option<crate::cgyy::DayInfo>,
+    pub day_date:      String,
+    pub day_loading:   bool,
+    pub orders:        Vec<crate::cgyy::Order>,
+    pub orders_loaded: bool,
+    /// Slot ids selected in the day view, in click order.
+    pub chosen_slots:  Vec<i64>,
+    pub selected_slot: usize,
+    /// Reservation form values, edited in the TUI.
+    pub phone:         String,
+    pub theme:         String,
+    pub purpose:       i64,
+    pub joiners:       i64,
+    /// A write waiting for confirmation.
+    pub pending:       Option<PendingWrite>,
+}
+
+/// Library seat tab state.
+
+#[derive(Clone, Debug, Default)]
+
+pub struct SeatState {
+    pub libraries:       Vec<crate::libbook::Library>,
+    pub selected:        usize,
+    pub loading:         bool,
+    pub loaded:          bool,
+    pub areas:           Vec<crate::libbook::Area>,
+    pub selected_area:   usize,
+    pub detail:          Option<crate::libbook::AreaDetail>,
+    pub seats:           Vec<crate::libbook::Seat>,
+    pub selected_seat:   usize,
+    pub bookings:        Vec<crate::libbook::Booking>,
+    pub bookings_loaded: bool,
+    pub date:            String,
+    pub show_seats:      bool,
+    pub pending:         Option<PendingWrite>,
+}
+
+/// Clock-in tab state.
+
+#[derive(Clone, Debug, Default)]
+
+pub struct ClockinState {
+    pub overview:       Option<ClockinOverview>,
+    pub loading:        bool,
+    pub loaded:         bool,
+    pub records:        Vec<crate::ygdk::Record>,
+    pub records_loaded: bool,
+    pub show_records:   bool,
+    pub pending:        Option<PendingWrite>,
+}
+
+/// Evaluation tab state.
+
+#[derive(Clone, Debug, Default)]
+
+pub struct EvalState {
+    pub tasks:              Vec<crate::evaluation::EvaluationTask>,
+    pub selected:           usize,
+    pub loading:            bool,
+    pub loaded:             bool,
+    /// Questionnaire of the selected task, loaded on demand.
+    pub questionnaire:      Option<crate::evaluation::Questionnaire>,
+    pub questionnaire_task: Option<String>,
+    pub show_questionnaire: bool,
+    pub pending:            Option<PendingWrite>,
+}
+
+/// A write awaiting explicit confirmation.
+///
+/// Why:
+/// Booking a room or a seat, submitting a clock-in, and submitting an
+/// evaluation all change real state that cannot be undone by pressing escape.
+/// The TUI must ask before each, exactly like the CLI's `--yes`.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+
+pub enum PendingWrite {
+    /// Reserve the chosen slots in the selected room.
+    VenueReserve,
+    /// Cancel one of the caller's room bookings.
+    VenueCancel(i64),
+    /// Reserve the selected seat.
+    SeatBook,
+    /// Cancel one of the caller's seat bookings.
+    SeatCancel(String),
+    /// Submit a clock-in for the selected item.
+    ClockinSubmit,
+    /// Submit the evaluation for every unevaluated course.
+    EvalSubmitAll,
+    /// Submit the evaluation for the selected course.
+    EvalSubmitOne(String),
+}
+
+impl PendingWrite {
+    /// Question shown in the confirmation dialog.
+
+    pub fn prompt(&self) -> &'static str {
+
+        match self {
+            Self::VenueReserve => "确认预约这间研讨室？预约成功后会占用真实房间。",
+            Self::VenueCancel(_) => "确认取消这条研讨室预约？",
+            Self::SeatBook => "确认预约这个座位？预约成功后会占用真实座位。",
+            Self::SeatCancel(_) => "确认取消这条座位预约？",
+            Self::ClockinSubmit => "确认提交这次打卡？会写入一条真实体育记录。",
+            Self::EvalSubmitAll => "确认提交全部未评课程的评教？将以你的名义作答，且无法撤销。",
+            Self::EvalSubmitOne(_) => "确认提交这门课的评教？将以你的名义作答，且无法撤销。",
+        }
+    }
+
+    /// Consequence line shown under the prompt.
+    ///
+    /// Why:
+    /// The dialog must say what is irreversible, not just ask "sure?".
+
+    pub fn detail(&self) -> &'static str {
+
+        match self {
+            Self::VenueReserve | Self::SeatBook => "此操作不可撤销；如需撤回请在列表里取消。",
+            Self::VenueCancel(_) | Self::SeatCancel(_) => "取消后该时段会释放给其他人。",
+            Self::ClockinSubmit => "打卡记录无法删除。",
+            Self::EvalSubmitAll | Self::EvalSubmitOne(_) => {
+                "评教结果不可撤销；提交前请确认题目与选项。"
+            }
+        }
+    }
+}
+
 /// A clickable region reported by the renderer.
 ///
 /// Why:
@@ -904,6 +1104,10 @@ pub struct App {
     pub selected:              usize,
     pub bykc:                  BykcState,
     pub schedule:              ScheduleState,
+    pub venue:                 VenueState,
+    pub seat:                  SeatState,
+    pub clockin:               ClockinState,
+    pub eval:                  EvalState,
     pub event_log:             Vec<EventEntry>,
     pub status:                String,
     pub busy:                  bool,
@@ -944,6 +1148,10 @@ impl Default for App {
             selected:              0,
             bykc:                  BykcState::default(),
             schedule:              ScheduleState::default(),
+            venue:                 VenueState::default(),
+            seat:                  SeatState::default(),
+            clockin:               ClockinState::default(),
+            eval:                  EvalState::default(),
             event_log:             vec![EventEntry {
                 level:   EventLevel::Info,
                 message: "输入统一认证账号和密码，选择访问模式后按 enter 登录".to_string(),
@@ -1236,6 +1444,24 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
 
             self.should_quit = true;
+
+            return;
+        }
+
+        // The confirmation dialog is modal: nothing else sees the keyboard
+        // until it is answered, and only an explicit yes proceeds.
+        if self.pending_write().is_some() {
+
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => self.confirm_pending_write(tx),
+                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+
+                    self.cancel_pending_write();
+
+                    self.info("已取消");
+                }
+                _ => {}
+            }
 
             return;
         }
@@ -1565,6 +1791,28 @@ impl App {
                     BykcView::Chosen => self.bykc.chosen_courses.len(),
                 }
             }
+            WorkspaceTab::Venue => {
+                match self.venue.day.as_ref() {
+                    Some(day) => day.time_slots.len(),
+                    None => self.venue.sites.len(),
+                }
+            }
+            WorkspaceTab::Seat => {
+                if self.seat.show_seats {
+
+                    self.seat.seats.len()
+                } else {
+
+                    self.seat.libraries.len()
+                }
+            }
+            WorkspaceTab::Clockin => {
+                self.clockin
+                    .overview
+                    .as_ref()
+                    .map_or(0, |overview| overview.items.len())
+            }
+            WorkspaceTab::Eval => self.eval.tasks.len(),
         }
     }
 
@@ -1586,6 +1834,31 @@ impl App {
                     BykcView::Chosen => self.bykc.selected_chosen = index,
                 }
             }
+            WorkspaceTab::Venue => {
+                if self.venue.day.is_some() {
+
+                    self.venue.selected_slot = index;
+                } else {
+
+                    self.venue.selected = index;
+                }
+            }
+            WorkspaceTab::Seat => {
+                if self.seat.show_seats {
+
+                    self.seat.selected_seat = index;
+                } else {
+
+                    self.seat.selected = index;
+                }
+            }
+            WorkspaceTab::Clockin => {
+                if let Some(overview) = self.clockin.overview.as_mut() {
+
+                    overview.selected = index;
+                }
+            }
+            WorkspaceTab::Eval => self.eval.selected = index,
         }
     }
 
@@ -1722,6 +1995,32 @@ impl App {
                 self.selected = clamp_step(self.selected, len, delta);
             }
             WorkspaceTab::Bykc => self.bykc.move_selection(delta),
+            WorkspaceTab::Venue => {
+
+                let len = self.venue.sites.len();
+
+                self.venue.selected = clamp_step(self.venue.selected, len, delta);
+            }
+            WorkspaceTab::Seat => {
+
+                let len = self.seat.libraries.len();
+
+                self.seat.selected = clamp_step(self.seat.selected, len, delta);
+            }
+            WorkspaceTab::Clockin => {
+                if let Some(overview) = self.clockin.overview.as_mut() {
+
+                    let len = overview.items.len();
+
+                    overview.selected = clamp_step(overview.selected, len, delta);
+                }
+            }
+            WorkspaceTab::Eval => {
+
+                let len = self.eval.tasks.len();
+
+                self.eval.selected = clamp_step(self.eval.selected, len, delta);
+            }
         }
     }
 
@@ -2162,6 +2461,272 @@ impl App {
                     }
                 }
             }
+            AsyncEvent::Venues(result) => {
+
+                self.venue.loading = false;
+
+                match result {
+                    Ok(sites) => {
+
+                        self.venue.sites = sites;
+
+                        self.venue.selected = 0;
+
+                        self.venue.loaded = true;
+
+                        self.success(format!("研讨室已加载，共 {} 间", self.venue.sites.len()));
+                    }
+                    Err(error) => self.error(format!("研讨室加载失败: {error}")),
+                }
+            }
+            AsyncEvent::VenueDay(result) => {
+
+                self.venue.day_loading = false;
+
+                match result {
+                    Ok(day) => {
+
+                        let rooms = day.spaces.len();
+
+                        self.venue.selected_slot = 0;
+
+                        self.venue.day = Some(day);
+
+                        self.success(format!("已载入 {rooms} 间房间的时段，用 enter 选择"));
+                    }
+                    Err(error) => self.error(format!("时段加载失败: {error}")),
+                }
+            }
+            AsyncEvent::VenueOrders(result) => {
+                match result {
+                    Ok(orders) => {
+
+                        let count = orders.len();
+
+                        self.venue.orders = orders;
+
+                        self.venue.orders_loaded = true;
+
+                        self.venue.selected = 0;
+
+                        self.success(format!("预约记录已加载，共 {count} 条"));
+                    }
+                    Err(error) => self.error(format!("预约记录加载失败: {error}")),
+                }
+            }
+            AsyncEvent::SeatLibraries(result) => {
+
+                self.seat.loading = false;
+
+                match result {
+                    Ok(libraries) => {
+
+                        self.seat.libraries = libraries;
+
+                        self.seat.selected = 0;
+
+                        self.seat.loaded = true;
+
+                        self.success(format!("图书馆已加载，共 {} 个", self.seat.libraries.len()));
+                    }
+                    Err(error) => self.error(format!("图书馆加载失败: {error}")),
+                }
+            }
+            AsyncEvent::SeatAreas(result) => {
+
+                match result {
+                    Ok(areas) => {
+
+                        let count = areas.len();
+
+                        self.seat.areas = areas;
+
+                        self.seat.selected_area = 0;
+
+                        // With areas known, load the first one's seats so the
+                        // tab is immediately useful.
+                        if let Some(area) = self.seat.areas.first() {
+
+                            let area_id = area.id.clone();
+
+                            self.load_seat_detail(area_id, tx.clone());
+                        }
+
+                        self.success(format!("已载入 {count} 个阅览区"));
+                    }
+                    Err(error) => self.error(format!("阅览区加载失败: {error}")),
+                }
+            }
+            AsyncEvent::SeatDetail(result) => {
+                match result {
+                    Ok(detail) => {
+
+                        self.seat.detail = Some(detail);
+
+                        self.load_seat_seats(tx);
+                    }
+                    Err(error) => self.error(format!("阅览区详情加载失败: {error}")),
+                }
+            }
+            AsyncEvent::SeatSeats(result) => {
+                match result {
+                    Ok(seats) => {
+
+                        let available = seats.iter().filter(|seat| seat.is_available).count();
+
+                        self.seat.seats = seats;
+
+                        self.seat.selected_seat = 0;
+
+                        self.seat.show_seats = true;
+
+                        self.success(format!(
+                            "已载入 {} 个座位，其中 {available} 个可选",
+                            self.seat.seats.len()
+                        ));
+                    }
+                    Err(error) => self.error(format!("座位加载失败: {error}")),
+                }
+            }
+            AsyncEvent::SeatBookings(result) => {
+                match result {
+                    Ok(bookings) => {
+
+                        let count = bookings.len();
+
+                        self.seat.bookings = bookings;
+
+                        self.seat.bookings_loaded = true;
+
+                        self.seat.selected = 0;
+
+                        self.success(format!("座位预约记录已加载，共 {count} 条"));
+                    }
+                    Err(error) => self.error(format!("座位预约记录加载失败: {error}")),
+                }
+            }
+            AsyncEvent::ClockinOverview(result) => {
+
+                self.clockin.loading = false;
+
+                match result {
+                    Ok(overview) => {
+
+                        // A category switch returns only counters and items, so
+                        // the existing category list is preserved.
+                        let merged = match self.clockin.overview.as_mut() {
+                            Some(existing) if overview.classifies.is_empty() => {
+
+                                existing.selected = overview.selected;
+
+                                existing.count = overview.count;
+
+                                existing.items = overview.items;
+
+                                existing.clone()
+                            }
+                            _ => {
+
+                                self.clockin.records.clear();
+
+                                self.clockin.records_loaded = false;
+
+                                overview
+                            }
+                        };
+
+                        let satisfied = merged.count.satisfied();
+
+                        let progress = if merged.count.term_num > 0 {
+
+                            format!(
+                                "{}/{}（还差 {}）",
+                                merged.count.term_count,
+                                merged.count.term_num,
+                                merged.count.remaining()
+                            )
+                        } else {
+
+                            format!("{} 次", merged.count.term_count)
+                        };
+
+                        self.clockin.overview = Some(merged);
+
+                        self.clockin.loaded = true;
+
+                        if satisfied {
+
+                            self.success(format!("阳光打卡已达标：{progress}"));
+                        } else {
+
+                            self.info(format!("阳光打卡进度：{progress}"));
+                        }
+                    }
+                    Err(error) => self.error(format!("打卡信息加载失败: {error}")),
+                }
+            }
+            AsyncEvent::ClockinRecords(result) => {
+                match result {
+                    Ok(records) => {
+
+                        let count = records.len();
+
+                        self.clockin.records = records;
+
+                        self.clockin.records_loaded = true;
+
+                        self.success(format!("打卡记录已加载，共 {count} 条"));
+                    }
+                    Err(error) => self.error(format!("打卡记录加载失败: {error}")),
+                }
+            }
+            AsyncEvent::EvalTasks(result) => {
+
+                self.eval.loading = false;
+
+                match result {
+                    Ok(tasks) => {
+
+                        let pending = tasks.iter().filter(|task| !task.evaluated).count();
+
+                        self.eval.tasks = tasks;
+
+                        self.eval.selected = 0;
+
+                        self.eval.loaded = true;
+
+                        self.success(format!("待评教课程已加载，其中 {pending} 门未评"));
+                    }
+                    Err(error) => self.error(format!("待评教列表加载失败: {error}")),
+                }
+            }
+            AsyncEvent::EvalQuestionnaire(result) => {
+                match result {
+                    Ok(questionnaire) => {
+
+                        let questions = questionnaire.questions.len();
+
+                        self.eval.questionnaire_task = self
+                            .eval
+                            .tasks
+                            .get(self.eval.selected)
+                            .map(|task| task.rwid.clone());
+
+                        self.eval.questionnaire = Some(questionnaire);
+
+                        self.eval.show_questionnaire = true;
+
+                        self.info(format!("问卷已载入，共 {questions} 题，按 s 提交"));
+                    }
+                    Err(error) => self.error(format!("问卷加载失败: {error}")),
+                }
+            }
+            AsyncEvent::Write(result) => {
+                match result {
+                    Ok(message) => self.success(message),
+                    Err(error) => self.error(error),
+                }
+            }
             AsyncEvent::Doctor(result) => {
 
                 self.busy = false;
@@ -2264,6 +2829,393 @@ impl App {
             WorkspaceTab::Schedule => self.handle_schedule_key(key, tx),
             WorkspaceTab::IClass => self.handle_iclass_key(key, tx),
             WorkspaceTab::Bykc => self.handle_bykc_key(key, tx),
+            WorkspaceTab::Venue => self.handle_venue_key(key, tx),
+            WorkspaceTab::Seat => self.handle_seat_key(key, tx),
+            WorkspaceTab::Clockin => self.handle_clockin_key(key, tx),
+            WorkspaceTab::Eval => self.handle_eval_key(key, tx),
+        }
+    }
+
+    /// Keys for the seminar-room tab.
+
+    fn handle_venue_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => {
+
+                let len = if self.venue.day.is_some() {
+
+                    self.venue
+                        .day
+                        .as_ref()
+                        .map_or(0, |day| day.time_slots.len())
+                } else {
+
+                    self.venue.sites.len()
+                };
+
+                if self.venue.day.is_some() {
+
+                    self.venue.selected_slot = clamp_step(self.venue.selected_slot, len, -1);
+                } else {
+
+                    self.venue.selected = clamp_step(self.venue.selected, len, -1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+
+                let len = if self.venue.day.is_some() {
+
+                    self.venue
+                        .day
+                        .as_ref()
+                        .map_or(0, |day| day.time_slots.len())
+                } else {
+
+                    self.venue.sites.len()
+                };
+
+                if self.venue.day.is_some() {
+
+                    self.venue.selected_slot = clamp_step(self.venue.selected_slot, len, 1);
+                } else {
+
+                    self.venue.selected = clamp_step(self.venue.selected, len, 1);
+                }
+            }
+            KeyCode::Char('r') => self.refresh_venue(tx),
+            // Enter opens the day view for the selected room, or toggles a slot
+            // once the day is open.
+            KeyCode::Enter | KeyCode::Char('o') => {
+                if self.venue.day.is_some() {
+
+                    self.toggle_venue_slot();
+                } else {
+
+                    self.load_venue_day(tx);
+                }
+            }
+            // Esc/Backspace is handled above as quit, so the day view is left
+            // with `b`.
+            KeyCode::Char('b') => {
+
+                self.venue.day = None;
+
+                self.venue.chosen_slots.clear();
+            }
+            KeyCode::Char('s') => self.request_venue_reserve(),
+            KeyCode::Char('x') => self.request_venue_cancel(),
+            KeyCode::Char('O') => self.load_venue_orders(tx),
+            _ => {}
+        }
+    }
+
+    /// Keys for the library seat tab.
+
+    fn handle_seat_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.seat.show_seats {
+
+                    let len = self.seat.seats.len();
+
+                    self.seat.selected_seat = clamp_step(self.seat.selected_seat, len, -1);
+                } else {
+
+                    let len = self.seat.libraries.len();
+
+                    self.seat.selected = clamp_step(self.seat.selected, len, -1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.seat.show_seats {
+
+                    let len = self.seat.seats.len();
+
+                    self.seat.selected_seat = clamp_step(self.seat.selected_seat, len, 1);
+                } else {
+
+                    let len = self.seat.libraries.len();
+
+                    self.seat.selected = clamp_step(self.seat.selected, len, 1);
+                }
+            }
+            KeyCode::Char('r') => self.refresh_seat(tx),
+            KeyCode::Enter | KeyCode::Char('o') => {
+                if self.seat.show_seats {
+
+                    self.request_seat_book();
+                } else {
+
+                    self.load_seat_areas(tx);
+                }
+            }
+            KeyCode::Char('b') => {
+
+                self.seat.show_seats = false;
+
+                self.seat.seats.clear();
+            }
+            KeyCode::Char('B') => self.load_seat_bookings(tx),
+            KeyCode::Char('x') => self.request_seat_cancel(),
+            _ => {}
+        }
+    }
+
+    /// Keys for the clock-in tab.
+
+    fn handle_clockin_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => {
+
+                if let Some(overview) = self.clockin.overview.as_mut() {
+
+                    let len = overview.items.len();
+
+                    overview.selected = clamp_step(overview.selected, len, -1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+
+                if let Some(overview) = self.clockin.overview.as_mut() {
+
+                    let len = overview.items.len();
+
+                    overview.selected = clamp_step(overview.selected, len, 1);
+                }
+            }
+            KeyCode::Char('r') => self.refresh_clockin(tx),
+            KeyCode::Char('h') | KeyCode::Left => self.switch_clockin_classify(-1, tx),
+            KeyCode::Char('l') | KeyCode::Right => self.switch_clockin_classify(1, tx),
+            KeyCode::Char('t') => {
+
+                self.clockin.show_records = !self.clockin.show_records;
+
+                if self.clockin.show_records && !self.clockin.records_loaded {
+
+                    self.load_clockin_records(tx);
+                }
+            }
+            KeyCode::Char('s') => self.request_clockin(),
+            _ => {}
+        }
+    }
+
+    /// Keys for the evaluation tab.
+
+    fn handle_eval_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => {
+
+                let len = self.eval.tasks.len();
+
+                self.eval.selected = clamp_step(self.eval.selected, len, -1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+
+                let len = self.eval.tasks.len();
+
+                self.eval.selected = clamp_step(self.eval.selected, len, 1);
+            }
+            KeyCode::Char('r') => self.refresh_eval(tx),
+            // Enter loads and shows the questionnaire, which is what makes the
+            // submission reviewable before it happens.
+            KeyCode::Enter | KeyCode::Char('o') => self.load_eval_questionnaire(tx),
+            KeyCode::Char('s') => self.request_eval_submit(),
+            KeyCode::Char('S') => {
+
+                self.eval.pending = Some(PendingWrite::EvalSubmitAll);
+            }
+            _ => {}
+        }
+    }
+
+    /// Toggles the slot under the cursor in the reservation selection.
+
+    fn toggle_venue_slot(&mut self) {
+
+        let Some(day) = self.venue.day.as_ref() else {
+
+            return;
+        };
+
+        let Some(slot) = day.time_slots.get(self.venue.selected_slot) else {
+
+            return;
+        };
+
+        let slot_id = slot.id;
+
+        if let Some(position) = self.venue.chosen_slots.iter().position(|id| *id == slot_id) {
+
+            self.venue.chosen_slots.remove(position);
+        } else {
+
+            self.venue.chosen_slots.push(slot_id);
+        }
+    }
+
+    /// Asks for confirmation before reserving.
+
+    fn request_venue_reserve(&mut self) {
+
+        if self.venue.chosen_slots.is_empty() {
+
+            self.warn("先用 enter 选中要预约的时段");
+
+            return;
+        }
+
+        if self.venue.phone.trim().is_empty() || self.venue.theme.trim().is_empty() {
+
+            self.warn("请先按 e 填写联系电话和主题（预约需要）");
+
+            return;
+        }
+
+        self.venue.pending = Some(PendingWrite::VenueReserve);
+    }
+
+    /// Asks for confirmation before cancelling a room booking.
+
+    fn request_venue_cancel(&mut self) {
+
+        let Some(order) = self.venue.orders.get(self.venue.selected) else {
+
+            self.warn("请先按 O 载入预约记录，再选择要取消的一条");
+
+            return;
+        };
+
+        let id = order.id;
+
+        self.venue.pending = Some(PendingWrite::VenueCancel(id));
+    }
+
+    fn request_seat_book(&mut self) {
+
+        if self.seat.seats.is_empty() {
+
+            self.warn("没有可选座位，请先按 r 刷新");
+
+            return;
+        }
+
+        self.seat.pending = Some(PendingWrite::SeatBook);
+    }
+
+    fn request_seat_cancel(&mut self) {
+
+        let Some(booking) = self.seat.bookings.get(self.seat.selected) else {
+
+            self.warn("请先按 B 载入预约记录，再选择要取消的一条");
+
+            return;
+        };
+
+        let id = booking.id.clone();
+
+        self.seat.pending = Some(PendingWrite::SeatCancel(id));
+    }
+
+    fn request_clockin(&mut self) {
+
+        let Some(overview) = self.clockin.overview.as_ref() else {
+
+            self.warn("请先按 r 载入打卡类别");
+
+            return;
+        };
+
+        if overview.items.is_empty() {
+
+            self.warn("该类别没有可打卡项目");
+
+            return;
+        }
+
+        // A clock-in needs a photo, which the TUI cannot pick. The CLI is the
+        // place for that, and the dialog says so rather than pretending.
+        self.clockin.pending = Some(PendingWrite::ClockinSubmit);
+    }
+
+    fn request_eval_submit(&mut self) {
+
+        let Some(task) = self.eval.tasks.get(self.eval.selected) else {
+
+            self.warn("请先按 r 载入待评教列表");
+
+            return;
+        };
+
+        let rwid = task.rwid.clone();
+
+        self.eval.pending = Some(PendingWrite::EvalSubmitOne(rwid));
+    }
+
+    /// Confirms the pending write and starts it.
+
+    fn confirm_pending_write(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(pending) = self.take_pending() else {
+
+            return;
+        };
+
+        match pending {
+            PendingWrite::VenueReserve => self.submit_venue_reserve(tx),
+            PendingWrite::VenueCancel(id) => self.submit_venue_cancel(id, tx),
+            PendingWrite::SeatBook => self.submit_seat_book(tx),
+            PendingWrite::SeatCancel(id) => self.submit_seat_cancel(id, tx),
+            PendingWrite::ClockinSubmit => self.submit_clockin(tx),
+            PendingWrite::EvalSubmitOne(rwid) => self.submit_eval(rwid, tx),
+            PendingWrite::EvalSubmitAll => self.submit_eval_all(tx),
+        }
+    }
+
+    /// Removes and returns the pending write, if any.
+
+    fn take_pending(&mut self) -> Option<PendingWrite> {
+
+        match self.active_tab {
+            WorkspaceTab::Venue => self.venue.pending.take(),
+            WorkspaceTab::Seat => self.seat.pending.take(),
+            WorkspaceTab::Clockin => self.clockin.pending.take(),
+            WorkspaceTab::Eval => self.eval.pending.take(),
+            _ => None,
+        }
+    }
+
+    /// The pending write for the active tab, if any.
+
+    pub fn pending_write(&self) -> Option<&PendingWrite> {
+
+        match self.active_tab {
+            WorkspaceTab::Venue => self.venue.pending.as_ref(),
+            WorkspaceTab::Seat => self.seat.pending.as_ref(),
+            WorkspaceTab::Clockin => self.clockin.pending.as_ref(),
+            WorkspaceTab::Eval => self.eval.pending.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Discards the pending write.
+
+    fn cancel_pending_write(&mut self) {
+
+        match self.active_tab {
+            WorkspaceTab::Venue => self.venue.pending = None,
+            WorkspaceTab::Seat => self.seat.pending = None,
+            WorkspaceTab::Clockin => self.clockin.pending = None,
+            WorkspaceTab::Eval => self.eval.pending = None,
+            _ => {}
         }
     }
 
@@ -2867,6 +3819,897 @@ impl App {
             }
             CourseView::Tasks => spawn_tasks(session, tx.clone()),
             CourseView::Today | CourseView::Schedule => {}
+        }
+    }
+
+    /// Starts an authenticated task and maps its result to an event.
+    ///
+    /// Why:
+    /// Every new tab needs a session before it can talk to its own service, and
+    /// the CGYY, library, clock-in and evaluation services each need their own
+    /// token derived from the shared login. Sharing this helper keeps that
+    /// token dance out of each loader.
+    ///
+    /// How:
+    /// Returns false when there is no session, so callers can report it without
+    /// duplicating the check.
+
+    fn spawn_authenticated<F, Fut, T, M>(
+        &self,
+        task: F,
+        tx: UnboundedSender<AsyncEvent>,
+        map: M,
+    ) -> bool
+    where
+        F: FnOnce(crate::model::Session) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+        T: Send + 'static,
+        M: Fn(Result<T, String>) -> AsyncEvent + Send + 'static,
+    {
+
+        let Some(session) = self.session.clone() else {
+
+            return false;
+        };
+
+        tokio::spawn(async move {
+
+            let result = task(session).await;
+
+            let _ = tx.send(map(result));
+        });
+
+        true
+    }
+
+    /// Loads the seminar-room list.
+
+    fn refresh_venue(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.venue.loading {
+
+            return;
+        }
+
+        self.venue.loading = true;
+
+        let tx = tx.clone();
+
+        if !self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .cgyy_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .cgyy_list_sites(&token)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::Venues(result),
+        ) {
+
+            self.venue.loading = false;
+
+            self.warn("当前未登录");
+        }
+    }
+
+    /// Loads one room's availability for a date.
+
+    fn load_venue_day(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(site) = self.venue.sites.get(self.venue.selected) else {
+
+            self.warn("请先按 r 载入研讨室列表");
+
+            return;
+        };
+
+        let site_id = site.id;
+
+        let date = if self.venue.day_date.is_empty() {
+
+            Local::now().date_naive().to_string()
+        } else {
+
+            self.venue.day_date.clone()
+        };
+
+        self.venue.day_date = date.clone();
+
+        self.venue.day_loading = true;
+
+        self.venue.chosen_slots.clear();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .cgyy_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .cgyy_day_info(&token, site_id, &date)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::VenueDay(result),
+        );
+    }
+
+    /// Loads the caller's own room bookings.
+
+    fn load_venue_orders(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .cgyy_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .cgyy_orders(&token, 1, 20)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::VenueOrders(result),
+        );
+    }
+
+    /// Submits the room reservation after confirmation.
+
+    fn submit_venue_reserve(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(day) = self.venue.day.clone() else {
+
+            return;
+        };
+
+        let Some(space) = day.spaces.first() else {
+
+            self.warn("该场地没有可预约房间");
+
+            return;
+        };
+
+        let request = crate::cgyy::ReservationRequest {
+            venue_site_id: day.venue_site_id,
+            date:          day.date.clone(),
+            space_id:      space.space_id,
+            time_ids:      self.venue.chosen_slots.clone(),
+            phone:         self.venue.phone.clone(),
+            theme:         self.venue.theme.clone(),
+            purpose_type:  self.venue.purpose,
+            joiner_num:    self.venue.joiners.max(1),
+            activity:      "小组讨论".to_string(),
+            joiners:       String::new(),
+        };
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .cgyy_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .cgyy_reserve(&token, &request)
+                        .await
+                        .map(|order| {
+
+                            format!(
+                                "已预约 {} {}",
+                                order.space_name.unwrap_or_default(),
+                                order.reservation_date.unwrap_or_default()
+                            )
+                        })
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::Write(result),
+        );
+    }
+
+    fn submit_venue_cancel(&mut self, order_id: i64, tx: &UnboundedSender<AsyncEvent>) {
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .cgyy_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .cgyy_cancel(&token, order_id)
+                        .await
+                        .map(|()| format!("已取消研讨室预约 {order_id}"))
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::Write(result),
+        );
+    }
+
+    /// Loads the library list, then the areas of the selected library.
+
+    fn refresh_seat(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.seat.loading {
+
+            return;
+        }
+
+        if self.seat.date.is_empty() {
+
+            self.seat.date = Local::now().date_naive().to_string();
+        }
+
+        self.seat.loading = true;
+
+        let date = self.seat.date.clone();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_libraries(&token, &date)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::SeatLibraries(result),
+        );
+    }
+
+    /// Loads the areas of the selected library, then its seats.
+
+    fn load_seat_areas(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(library) = self.seat.libraries.get(self.seat.selected) else {
+
+            self.warn("请先按 r 载入图书馆列表");
+
+            return;
+        };
+
+        let premises = library.id.clone();
+
+        let date = self.seat.date.clone();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_areas(&token, &premises, &date)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::SeatAreas(result),
+        );
+    }
+
+    /// Loads one area's dates and segments, then its seats.
+
+    fn load_seat_detail(&mut self, area_id: String, tx: UnboundedSender<AsyncEvent>) {
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_area_detail(&token, &area_id)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::SeatDetail(result),
+        );
+    }
+
+    /// Loads the seats of the chosen area for the first segment.
+
+    fn load_seat_seats(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(detail) = self.seat.detail.clone() else {
+
+            self.warn("请先选择一个阅览区");
+
+            return;
+        };
+
+        let Some(segment) = detail.time_slots.first().cloned() else {
+
+            self.warn("该阅览区没有可预约时段");
+
+            return;
+        };
+
+        let area = detail.id.clone();
+
+        let date = self.seat.date.clone();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_seats(&token, &area, &date, &segment.start, &segment.end)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::SeatSeats(result),
+        );
+    }
+
+    fn load_seat_bookings(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_bookings(&token, 1, 20)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::SeatBookings(result),
+        );
+    }
+
+    /// Submits the seat reservation after confirmation.
+
+    fn submit_seat_book(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(seat) = self.seat.seats.get(self.seat.selected_seat) else {
+
+            return;
+        };
+
+        let seat_id = seat.id.clone();
+
+        let seat_no = seat.no.clone();
+
+        let Some(detail) = self.seat.detail.clone() else {
+
+            return;
+        };
+
+        let Some(segment) = detail.time_slots.first() else {
+
+            self.warn("该阅览区没有可预约时段");
+
+            return;
+        };
+
+        let segment_id = segment.id.clone();
+
+        let date = self.seat.date.clone();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_reserve(&token, &seat_id, &segment_id, &date)
+                        .await
+                        .map(|_| format!("已预约座位 {seat_no}"))
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::Write(result),
+        );
+    }
+
+    fn submit_seat_cancel(&mut self, booking_id: String, tx: &UnboundedSender<AsyncEvent>) {
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let token = session
+                        .api
+                        .libbook_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .libbook_cancel(&token, &booking_id)
+                        .await
+                        .map(|()| format!("已取消座位预约 {booking_id}"))
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::Write(result),
+        );
+    }
+
+    /// Loads the clock-in categories, counters and items.
+
+    fn refresh_clockin(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.clockin.loading {
+
+            return;
+        }
+
+        self.clockin.loading = true;
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let ygdk = session
+                        .api
+                        .ygdk_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    let classifies = session
+                        .api
+                        .ygdk_classifies(&ygdk)
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    let Some(first) = classifies.first() else {
+
+                        return Ok(ClockinOverview::default());
+                    };
+
+                    let id = first.id;
+
+                    let count = session
+                        .api
+                        .ygdk_count(&ygdk, id)
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    let items = session
+                        .api
+                        .ygdk_items(&ygdk, id)
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    Ok(ClockinOverview {
+                        classifies,
+                        selected: 0,
+                        count,
+                        items,
+                    })
+                }
+            },
+            tx,
+            |result| AsyncEvent::ClockinOverview(result),
+        );
+    }
+
+    /// Switches the clock-in category and reloads its counters.
+
+    fn switch_clockin_classify(&mut self, delta: isize, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(overview) = self.clockin.overview.as_ref() else {
+
+            return;
+        };
+
+        let next = clamp_step(overview.selected, overview.classifies.len(), delta);
+
+        let Some(next_classify) = overview.classifies.get(next) else {
+
+            return;
+        };
+
+        let id = next_classify.id;
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let ygdk = session
+                        .api
+                        .ygdk_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    let count = session
+                        .api
+                        .ygdk_count(&ygdk, id)
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    let items = session
+                        .api
+                        .ygdk_items(&ygdk, id)
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    Ok(ClockinOverview {
+                        classifies: Vec::new(),
+                        selected: next,
+                        count,
+                        items,
+                    })
+                }
+            },
+            tx,
+            |result| AsyncEvent::ClockinOverview(result),
+        );
+    }
+
+    fn load_clockin_records(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(overview) = self.clockin.overview.as_ref() else {
+
+            return;
+        };
+
+        let Some(classify) = overview.classifies.get(overview.selected) else {
+
+            return;
+        };
+
+        let id = classify.id;
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let ygdk = session
+                        .api
+                        .ygdk_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    session
+                        .api
+                        .ygdk_records(&ygdk, id, 1, 30)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::ClockinRecords(result),
+        );
+    }
+
+    /// Reports that a clock-in needs a photo, which the TUI cannot supply.
+    ///
+    /// Why:
+    /// The service requires an attached photo. Rather than silently failing,
+    /// the tab says what is missing and points at the CLI, which accepts one.
+
+    fn submit_clockin(&mut self, _tx: &UnboundedSender<AsyncEvent>) {
+
+        self.warn("打卡需要上传照片，请用 CLI：iclass_buaa_tui clockin-submit --photo <文件>");
+    }
+
+    /// Loads the courses awaiting evaluation.
+
+    fn refresh_eval(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.eval.loading {
+
+            return;
+        }
+
+        self.eval.loading = true;
+
+        let user_id = self
+            .schedule
+            .account
+            .clone()
+            .or_else(|| self.session.as_ref().map(|session| session.user_id.clone()))
+            .unwrap_or_default();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    session
+                        .api
+                        .evaluation_tasks(&user_id)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::EvalTasks(result),
+        );
+    }
+
+    /// Loads the questionnaire of the selected course.
+
+    fn load_eval_questionnaire(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(task) = self.eval.tasks.get(self.eval.selected).cloned() else {
+
+            self.warn("请先按 r 载入待评教列表");
+
+            return;
+        };
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    session
+                        .api
+                        .evaluation_questionnaire(&task)
+                        .await
+                        .map_err(format_anyhow_error)
+                }
+            },
+            tx,
+            |result| AsyncEvent::EvalQuestionnaire(result),
+        );
+    }
+
+    /// Submits one course's evaluation after confirmation.
+
+    fn submit_eval(&mut self, rwid: String, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(task) = self
+            .eval
+            .tasks
+            .iter()
+            .find(|task| task.rwid == rwid)
+            .cloned()
+        else {
+
+            return;
+        };
+
+        let answers = self
+            .eval
+            .questionnaire
+            .as_ref()
+            .map(crate::evaluation::Questionnaire::default_answers)
+            .unwrap_or_default();
+
+        let course = task.course.clone();
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let outcome = session
+                        .api
+                        .evaluation_submit(&task, &answers)
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    if outcome.success {
+
+                        Ok(format!("已提交 {} 的评教", outcome.course))
+                    } else {
+
+                        Err(format!("{} 评教失败: {}", outcome.course, outcome.message))
+                    }
+                }
+            },
+            tx,
+            |result| AsyncEvent::Write(result),
+        );
+
+        // The submitted course is no longer pending.
+        if let Some(task) = self.eval.tasks.iter_mut().find(|task| task.rwid == rwid) {
+
+            let _ = course;
+
+            task.evaluated = true;
+        }
+    }
+
+    /// Submits every unevaluated course.
+
+    fn submit_eval_all(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let pending: Vec<crate::evaluation::EvaluationTask> = self
+            .eval
+            .tasks
+            .iter()
+            .filter(|task| !task.evaluated)
+            .cloned()
+            .collect();
+
+        if pending.is_empty() {
+
+            self.warn("没有待评教课程");
+
+            return;
+        }
+
+        let tx = tx.clone();
+
+        self.spawn_authenticated(
+            move |session| {
+
+                async move {
+
+                    let mut succeeded = 0_usize;
+
+                    let mut failures = Vec::new();
+
+                    for task in &pending {
+
+                        let questionnaire = session
+                            .api
+                            .evaluation_questionnaire(task)
+                            .await
+                            .map_err(format_anyhow_error)?;
+
+                        let answers = questionnaire.default_answers();
+
+                        match session.api.evaluation_submit(task, &answers).await {
+                            Ok(outcome) if outcome.success => succeeded += 1,
+                            Ok(outcome) => {
+                                failures.push(format!("{}: {}", task.course, outcome.message))
+                            }
+                            Err(error) => {
+                                failures.push(format!(
+                                    "{}: {}",
+                                    task.course,
+                                    format_anyhow_error(error)
+                                ))
+                            }
+                        }
+                    }
+
+                    if failures.is_empty() {
+
+                        Ok(format!("已提交 {succeeded} 门评教"))
+                    } else {
+
+                        Err(format!(
+                            "成功 {succeeded} 门，失败 {} 门：{}",
+                            failures.len(),
+                            failures.join("；")
+                        ))
+                    }
+                }
+            },
+            tx,
+            |result| AsyncEvent::Write(result),
+        );
+
+        for task in self.eval.tasks.iter_mut() {
+
+            task.evaluated = true;
         }
     }
 

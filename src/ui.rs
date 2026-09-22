@@ -66,6 +66,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if app.active_tab == WorkspaceTab::Bykc && app.bykc.show_detail_popup {
 
         render_bykc_detail_popup(frame, app);
+    } else if app.pending_write().is_some() {
+
+        render_confirm_popup(frame, app);
     } else if app.active_tab == WorkspaceTab::Schedule && app.schedule.show_task_detail {
 
         render_task_detail_popup(frame, app);
@@ -75,6 +78,65 @@ pub fn render(frame: &mut Frame, app: &App) {
 
         render_help_popup(frame, app);
     }
+}
+
+/// Renders the confirmation dialog for a pending write.
+///
+/// Why:
+/// Booking a room, booking a seat, submitting a clock-in and submitting an
+/// evaluation all change real state. The CLI requires an explicit flag for
+/// each; this is that flag in the TUI, and it is modal so the answer cannot be
+/// given by accident.
+///
+/// How:
+/// Names the action and its consequence, and defaults to cancelling: only `y`
+/// or `enter` proceeds, while `n`, `esc` and `q` all decline.
+
+fn render_confirm_popup(frame: &mut Frame, app: &App) {
+
+    let Some(pending) = app.pending_write() else {
+
+        return;
+    };
+
+    let area = centered_rect(72, 30, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(" 需要确认 ", theme::title_style()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ERROR));
+
+    let inner = block.inner(area);
+
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(pending.prompt().to_string(), theme::text_style()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                pending.detail().to_string(),
+                Style::default().fg(theme::WARN),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("y / enter", theme::label_style()),
+            Span::styled(" 确认    ", theme::muted_style()),
+            Span::styled("n / esc / q", theme::label_style()),
+            Span::styled(" 取消", theme::muted_style()),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Renders the login screen as a centered card.
@@ -333,6 +395,10 @@ fn render_workspace(frame: &mut Frame, app: &App) {
         WorkspaceTab::Schedule => render_schedule(frame, content_inner, app),
         WorkspaceTab::IClass => render_iclass(frame, content_inner, app),
         WorkspaceTab::Bykc => render_bykc(frame, content_inner, app),
+        WorkspaceTab::Venue => render_venue(frame, content_inner, app),
+        WorkspaceTab::Seat => render_seat(frame, content_inner, app),
+        WorkspaceTab::Clockin => render_clockin(frame, content_inner, app),
+        WorkspaceTab::Eval => render_eval(frame, content_inner, app),
     }
 
     render_footer(frame, footer, app);
@@ -351,22 +417,29 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
     // clipped tab label is unreadable, while the indicator and identity can
     // lose a trailing detail. Budget for 80 columns: the brand is 10 cells and
     // each of the three tabs is 7, so tabs need 31 and get priority.
-    let [tabs_area, todo_area, identity_area] = Layout::horizontal([
-        Constraint::Min(31),
-        Constraint::Length(28),
-        Constraint::Length(20),
-    ])
-    .areas(area);
+    // Seven tabs plus the brand need roughly 63 cells. The identity column
+    // gives up its space and the todo indicator moves to the status strip.
+    let [tabs_area, identity_area] =
+        Layout::horizontal([Constraint::Min(62), Constraint::Length(18)]).areas(area);
 
     let brand = BRAND;
 
     let mut spans = vec![Span::styled(brand, theme::title_style())];
 
-    let tabs = [
-        (WorkspaceTab::Schedule, app.schedule.portal_label()),
-        (WorkspaceTab::IClass, "签到"),
-        (WorkspaceTab::Bykc, "博雅"),
-    ];
+    // Built from the enum so a new tab cannot be forgotten here.
+    let tabs: Vec<(WorkspaceTab, &str)> = WorkspaceTab::ALL
+        .into_iter()
+        .map(|tab| {
+
+            let label = match tab {
+                WorkspaceTab::Schedule => app.schedule.portal_label(),
+
+                other => other.label(),
+            };
+
+            (tab, label)
+        })
+        .collect();
 
     // Track each label's columns so the same text the user sees is what they
     // can click. Widths are measured in display cells, which is what the
@@ -404,124 +477,6 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
 
-    // Todo indicator. It only speaks about sources that have been loaded, so it
-    // stays silent on a fresh login rather than reporting a false all-clear.
-    let todo = app.todo_summary();
-
-    if todo.any_loaded() {
-
-        let mut todo_spans: Vec<Span> = Vec::new();
-
-        // Track the column so each item can be clicked to jump to its tab.
-        // The leading "⚑ " is two cells wide.
-        let mut column = todo_area.x + 2;
-
-        // Items are appended in one scoped pass so the closure's borrow of
-        // todo_spans ends before the countdown is added below.
-        {
-
-            let mut push_item = |count: Option<usize>, label: &str, action: HotAction| {
-
-                let Some(count) = count else {
-
-                    return;
-                };
-
-                if count == 0 {
-
-                    return;
-                };
-
-                if !todo_spans.is_empty() {
-
-                    todo_spans.push(Span::styled("  ", theme::muted_style()));
-
-                    column += 2;
-                }
-
-                // Compact form: the count carries the meaning and the label
-                // names the source; the tab it belongs to sits right beside it.
-                let text = format!("{count} {label}");
-
-                let width = display_width(&text) as u16;
-
-                todo_spans.push(Span::styled(
-                    count.to_string(),
-                    Style::default()
-                        .fg(theme::WARN)
-                        .add_modifier(Modifier::BOLD),
-                ));
-
-                todo_spans.push(Span::styled(format!(" {label}"), theme::text_style()));
-
-                app.record_hotspot(
-                    Rect {
-                        x: column,
-                        y: todo_area.y,
-                        width,
-                        height: 1,
-                    },
-                    action,
-                );
-
-                column += width;
-            };
-
-            push_item(
-                todo.unsigned_classes,
-                "未签到",
-                HotAction::WorkspaceTab(WorkspaceTab::IClass),
-            );
-
-            push_item(todo.pending_tasks, "待交", HotAction::CourseTasks);
-
-            push_item(
-                todo.signable_bykc,
-                "可签",
-                HotAction::WorkspaceTab(WorkspaceTab::Bykc),
-            );
-        }
-
-        // Countdown to the nearest deadline. Only shown when something is
-        // actually pending, so it never dangles next to an empty list.
-        if todo.pending_tasks.is_some_and(|count| count > 0)
-            && let Some(remaining) = todo.nearest_due
-        {
-
-            let urgency = if remaining.num_hours() < 24 {
-
-                Style::default()
-                    .fg(theme::ERROR)
-                    .add_modifier(Modifier::BOLD)
-            } else if remaining.num_hours() < 72 {
-
-                Style::default().fg(theme::WARN)
-            } else {
-
-                theme::muted_style()
-            };
-
-            todo_spans.push(Span::styled(
-                format!(" · 最近 {}", crate::app::format_remaining(remaining)),
-                urgency,
-            ));
-        }
-
-        let indicator = if todo_spans.is_empty() {
-
-            Line::from(Span::styled("✓ 今日无待办", Style::default().fg(theme::OK)))
-        } else {
-
-            let mut line = vec![Span::styled("⚑ ", Style::default().fg(theme::WARN))];
-
-            line.extend(todo_spans);
-
-            Line::from(line)
-        };
-
-        frame.render_widget(Paragraph::new(indicator), todo_area);
-    }
-
     let identity = if let Some(session) = &app.session {
 
         Line::from(vec![
@@ -558,9 +513,190 @@ fn render_status_strip(frame: &mut Frame, area: Rect, app: &App) {
         WorkspaceTab::Schedule => schedule_status_line(app),
         WorkspaceTab::IClass => iclass_status_line(app),
         WorkspaceTab::Bykc => bykc_status_line(app),
+        WorkspaceTab::Venue => venue_status_line(app),
+        WorkspaceTab::Seat => seat_status_line(app),
+        WorkspaceTab::Clockin => clockin_status_line(app),
+        WorkspaceTab::Eval => eval_status_line(app),
     };
 
-    frame.render_widget(Paragraph::new(line), area);
+    // The indicator reserves its own columns rather than drawing over the
+    // status text, so the two can never overwrite each other.
+    let status_area = match todo_indicator_width(app) {
+        Some(width) => {
+
+            let [status, todo] =
+                Layout::horizontal([Constraint::Min(10), Constraint::Length(width)]).areas(area);
+
+            render_todo_indicator(frame, todo, app);
+
+            status
+        }
+        None => area,
+    };
+
+    frame.render_widget(Paragraph::new(line), status_area);
+}
+
+/// Columns the todo indicator needs, or `None` when it has nothing to say.
+
+fn todo_indicator_width(app: &App) -> Option<u16> {
+
+    let todo = app.todo_summary();
+
+    if !todo.any_loaded() {
+
+        return None;
+    }
+
+    let mut width = 2; // the "⚑ " bullet
+
+    let mut any = false;
+
+    for count in [
+        todo.unsigned_classes,
+        todo.pending_tasks,
+        todo.signable_bykc,
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|count| *count > 0)
+    {
+
+        if any {
+
+            width += 2;
+        }
+
+        width += display_width(&format!("{count} 未签到"));
+
+        any = true;
+    }
+
+    if !any {
+
+        return Some(display_width("✓ 今日无待办") as u16);
+    }
+
+    if todo.pending_tasks.is_some_and(|count| count > 0)
+        && let Some(remaining) = todo.nearest_due
+    {
+
+        width += display_width(&format!(
+            " · 最近 {}",
+            crate::app::format_remaining(remaining)
+        ));
+    }
+
+    Some(width as u16)
+}
+
+/// Draws the todo indicator into its reserved columns and records hotspots.
+///
+/// Why:
+/// Items are the only part worth clicking, and their columns depend on the
+/// layout, so both are computed here together.
+
+fn render_todo_indicator(frame: &mut Frame, area: Rect, app: &App) {
+
+    let todo = app.todo_summary();
+
+    let mut items: Vec<(usize, &str, HotAction)> = Vec::new();
+
+    if let Some(count) = todo.unsigned_classes.filter(|count| *count > 0) {
+
+        items.push((
+            count,
+            "未签到",
+            HotAction::WorkspaceTab(WorkspaceTab::IClass),
+        ));
+    }
+
+    if let Some(count) = todo.pending_tasks.filter(|count| *count > 0) {
+
+        items.push((count, "待交", HotAction::CourseTasks));
+    }
+
+    if let Some(count) = todo.signable_bykc.filter(|count| *count > 0) {
+
+        items.push((count, "可签", HotAction::WorkspaceTab(WorkspaceTab::Bykc)));
+    }
+
+    if items.is_empty() {
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "✓ 今日无待办",
+                Style::default().fg(theme::OK),
+            ))),
+            area,
+        );
+
+        return;
+    }
+
+    let mut spans: Vec<Span> = vec![Span::styled("⚑ ", Style::default().fg(theme::WARN))];
+
+    let mut column = 2_u16;
+
+    for (index, (count, label, action)) in items.iter().enumerate() {
+
+        if index > 0 {
+
+            spans.push(Span::styled("  ", theme::muted_style()));
+
+            column += 2;
+        }
+
+        let text = format!("{count} {label}");
+
+        let width = display_width(&text) as u16;
+
+        spans.push(Span::styled(
+            count.to_string(),
+            Style::default()
+                .fg(theme::WARN)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        spans.push(Span::styled(format!(" {label}"), theme::text_style()));
+
+        app.record_hotspot(
+            Rect {
+                x: area.x + column,
+                y: area.y,
+                width,
+                height: 1,
+            },
+            action.clone(),
+        );
+
+        column += width;
+    }
+
+    if todo.pending_tasks.is_some_and(|count| count > 0)
+        && let Some(remaining) = todo.nearest_due
+    {
+
+        let urgency = if remaining.num_hours() < 24 {
+
+            Style::default()
+                .fg(theme::ERROR)
+                .add_modifier(Modifier::BOLD)
+        } else if remaining.num_hours() < 72 {
+
+            Style::default().fg(theme::WARN)
+        } else {
+
+            theme::muted_style()
+        };
+
+        spans.push(Span::styled(
+            format!(" · 最近 {}", crate::app::format_remaining(remaining)),
+            urgency,
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Footer: the latest event on the left, global keys on the right.
@@ -932,6 +1068,900 @@ fn display_width(text: &str) -> usize {
             }
         })
         .sum()
+}
+
+/// Status line for the seminar-room tab.
+
+fn venue_status_line(app: &App) -> Line<'static> {
+
+    let mut spans = vec![Span::raw(" ")];
+
+    if let Some(day) = app.venue.day.as_ref() {
+
+        spans.push(Span::styled(
+            day.date.clone(),
+            Style::default().fg(theme::INFO),
+        ));
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("{} 间房", day.spaces.len()),
+            theme::text_style(),
+        ));
+
+        spans.push(sep());
+
+        spans.push(Span::styled(
+            format!("已选 {} 段", app.venue.chosen_slots.len()),
+            if app.venue.chosen_slots.is_empty() {
+
+                theme::muted_style()
+            } else {
+
+                Style::default().fg(theme::OK)
+            },
+        ));
+
+        spans.push(Span::styled("  b 返回  s 预约", theme::muted_style()));
+    } else {
+
+        spans.push(Span::styled(
+            format!("{} 间研讨室", app.venue.sites.len()),
+            theme::text_style(),
+        ));
+
+        spans.push(sep());
+
+        spans.push(theme::activity_badge(
+            app.tick,
+            app.venue.loading,
+            if app.venue.loading {
+
+                "正在加载"
+            } else {
+
+                "就绪"
+            },
+        ));
+
+        spans.push(Span::styled(
+            "  enter 看时段  O 我的预约",
+            theme::muted_style(),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Status line for the library seat tab.
+
+fn seat_status_line(app: &App) -> Line<'static> {
+
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(app.seat.date.clone(), Style::default().fg(theme::INFO)),
+        sep(),
+    ];
+
+    if app.seat.show_seats {
+
+        let available = app
+            .seat
+            .seats
+            .iter()
+            .filter(|seat| seat.is_available)
+            .count();
+
+        spans.push(Span::styled(
+            format!("{} 个座位，{available} 可选", app.seat.seats.len()),
+            theme::text_style(),
+        ));
+
+        spans.push(Span::styled("  enter 预约  b 返回", theme::muted_style()));
+    } else {
+
+        spans.push(Span::styled(
+            format!("{} 个图书馆", app.seat.libraries.len()),
+            theme::text_style(),
+        ));
+
+        spans.push(sep());
+
+        spans.push(theme::activity_badge(
+            app.tick,
+            app.seat.loading,
+            if app.seat.loading {
+
+                "正在加载"
+            } else {
+
+                "就绪"
+            },
+        ));
+
+        spans.push(Span::styled(
+            "  enter 看阅览区  B 我的预约",
+            theme::muted_style(),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Status line for the clock-in tab.
+
+fn clockin_status_line(app: &App) -> Line<'static> {
+
+    let mut spans = vec![Span::raw(" ")];
+
+    match app.clockin.overview.as_ref() {
+        Some(overview) => {
+
+            if let Some(classify) = overview.classifies.get(overview.selected) {
+
+                spans.push(Span::styled(
+                    classify.name.clone(),
+                    Style::default().fg(theme::INFO),
+                ));
+
+                spans.push(sep());
+            }
+
+            let count = &overview.count;
+
+            if count.term_num > 0 {
+
+                spans.push(Span::styled(
+                    format!("{}/{}", count.term_count, count.term_num),
+                    if count.satisfied() {
+
+                        Style::default().fg(theme::OK)
+                    } else {
+
+                        Style::default().fg(theme::WARN)
+                    },
+                ));
+
+                spans.push(Span::styled(
+                    if count.satisfied() {
+
+                        "  已达标"
+                    } else {
+
+                        "  未达标"
+                    },
+                    theme::muted_style(),
+                ));
+            } else {
+
+                spans.push(Span::styled(
+                    format!("本学期 {} 次", count.term_count),
+                    theme::text_style(),
+                ));
+            }
+
+            spans.push(Span::styled(
+                "  h/l 切类别  t 记录  s 打卡",
+                theme::muted_style(),
+            ));
+        }
+        None => {
+
+            spans.push(Span::styled("阳光打卡", theme::text_style()));
+
+            spans.push(sep());
+
+            spans.push(theme::activity_badge(
+                app.tick,
+                app.clockin.loading,
+                if app.clockin.loading {
+
+                    "正在加载"
+                } else {
+
+                    "就绪"
+                },
+            ));
+        }
+    }
+
+    Line::from(spans)
+}
+
+/// Status line for the evaluation tab.
+
+fn eval_status_line(app: &App) -> Line<'static> {
+
+    let pending = app.eval.tasks.iter().filter(|task| !task.evaluated).count();
+
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(
+            format!("{pending} 门待评"),
+            if pending > 0 {
+
+                Style::default().fg(theme::WARN)
+            } else {
+
+                Style::default().fg(theme::OK)
+            },
+        ),
+        sep(),
+        theme::activity_badge(
+            app.tick,
+            app.eval.loading,
+            if app.eval.loading {
+
+                "正在加载"
+            } else {
+
+                "就绪"
+            },
+        ),
+    ];
+
+    spans.push(Span::styled(
+        "  enter 看问卷  s 评这门  S 全部（提交需确认）",
+        theme::muted_style(),
+    ));
+
+    Line::from(spans)
+}
+
+/// Splits a tab body into content and a one-row key hint.
+
+fn course_layout_pair(area: Rect) -> [Rect; 2] {
+
+    Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).areas(area)
+}
+
+/// Truncates a string to a cell budget, appending an ellipsis.
+
+fn truncate(text: &str, budget: usize) -> String {
+
+    if display_width(text) <= budget {
+
+        return text.to_string();
+    }
+
+    let mut output = String::new();
+
+    let mut used = 0;
+
+    for character in text.chars() {
+
+        let size = display_width(&character.to_string());
+
+        if used + size > budget.saturating_sub(1) {
+
+            break;
+        }
+
+        output.push(character);
+
+        used += size;
+    }
+
+    output.push('…');
+
+    output
+}
+
+/// Renders the seminar-room tab.
+///
+/// How:
+/// Two levels: the room list, then one room's slots for a date. Slots are
+/// toggled with enter and the selection is shown, because a reservation covers
+/// whichever slots are chosen and that must be visible before confirming.
+
+fn render_venue(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [body, footer] = course_layout_pair(area);
+
+    let Some(day) = app.venue.day.as_ref() else {
+
+        let items = if app.venue.sites.is_empty() {
+
+            vec![empty_row(
+                app.venue.loading,
+                app.tick,
+                "正在加载研讨室",
+                "按 r 载入研讨室列表",
+            )]
+        } else {
+
+            let selected_id = app.venue.sites.get(app.venue.selected).map(|site| site.id);
+
+            app.venue
+                .sites
+                .iter()
+                .map(|site| {
+
+                    let line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(format!("{:<10}", site.campus_name), theme::muted_style()),
+                        Span::styled(format!("{:<14}", site.venue_name), theme::label_style()),
+                        Span::styled(site.site_name.clone(), theme::text_style()),
+                        Span::styled(
+                            site.seat_count
+                                .map(|count| format!("  {count} 座"))
+                                .unwrap_or_default(),
+                            theme::muted_style(),
+                        ),
+                    ]);
+
+                    let item = ListItem::new(line);
+
+                    if Some(site.id) == selected_id {
+
+                        item.style(theme::selection_style())
+                    } else {
+
+                        item
+                    }
+                })
+                .collect()
+        };
+
+        record_list_rows(app, body, 0, app.venue.sites.len());
+
+        frame.render_widget(List::new(items), body);
+
+        render_key_hint(
+            frame,
+            footer,
+            "j/k 选房间  enter 看时段  r 刷新  O 我的预约  x 取消预约",
+        );
+
+        return;
+    };
+
+    render_venue_day(frame, body, app, day);
+
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选时段  enter 选中/取消  s 预约  b 返回房间列表",
+    );
+}
+
+/// Renders one room's slots for a date.
+
+fn render_venue_day(frame: &mut Frame, area: Rect, app: &App, day: &crate::cgyy::DayInfo) {
+
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+
+    let room = day.spaces.first();
+
+    render_view_summary(
+        frame,
+        summary_area,
+        vec![
+            Span::styled(
+                room.map(|space| space.space_name.clone())
+                    .unwrap_or_else(|| "未知房间".to_string()),
+                theme::text_style(),
+            ),
+            sep(),
+            Span::styled(day.date.clone(), Style::default().fg(theme::INFO)),
+            sep(),
+            Span::styled(
+                format!("已选 {} 段", app.venue.chosen_slots.len()),
+                if app.venue.chosen_slots.is_empty() {
+
+                    theme::muted_style()
+                } else {
+
+                    Style::default().fg(theme::OK)
+                },
+            ),
+        ],
+    );
+
+    let items: Vec<ListItem> = day
+        .time_slots
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+
+            let available = room
+                .and_then(|space| space.slots.iter().find(|status| status.time_id == slot.id))
+                .is_some_and(|status| status.reservable);
+
+            let chosen = app.venue.chosen_slots.contains(&slot.id);
+
+            let selected = index == app.venue.selected_slot;
+
+            let (state, state_style) = if !available {
+
+                ("不可预约", theme::muted_style())
+            } else if chosen {
+
+                ("已选中", Style::default().fg(theme::OK))
+            } else {
+
+                ("可预约", Style::default().fg(theme::INFO))
+            };
+
+            let line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    if chosen { "[x]" } else { "[ ]" },
+                    if chosen {
+
+                        Style::default().fg(theme::OK)
+                    } else {
+
+                        theme::muted_style()
+                    },
+                ),
+                Span::styled(
+                    format!("  {}-{}", slot.begin_time, slot.end_time),
+                    if selected {
+
+                        Style::default()
+                    } else {
+
+                        theme::text_style()
+                    },
+                ),
+                Span::styled(
+                    format!("  {}", slot.label),
+                    if selected {
+
+                        Style::default()
+                    } else {
+
+                        theme::muted_style()
+                    },
+                ),
+                Span::raw("  "),
+                Span::styled(state, state_style),
+            ]);
+
+            let item = ListItem::new(line);
+
+            if selected {
+
+                item.style(theme::selection_style())
+            } else {
+
+                item
+            }
+        })
+        .collect();
+
+    record_list_rows(app, list_area, 0, day.time_slots.len());
+
+    frame.render_widget(List::new(items), list_area);
+}
+
+/// Renders the library seat tab.
+
+fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [body, footer] = course_layout_pair(area);
+
+    if app.seat.show_seats {
+
+        let items: Vec<ListItem> = if app.seat.seats.is_empty() {
+
+            vec![empty_row(
+                false,
+                app.tick,
+                "",
+                "该阅览区没有座位数据，按 r 刷新",
+            )]
+        } else {
+
+            app.seat
+                .seats
+                .iter()
+                .enumerate()
+                .map(|(index, seat)| {
+
+                    let line = Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(format!("{:<10}", seat.no), theme::label_style()),
+                        Span::styled(seat.name.clone(), theme::text_style()),
+                        Span::raw("  "),
+                        Span::styled(
+                            if seat.is_available {
+
+                                "可预约"
+                            } else {
+
+                                "已占用"
+                            },
+                            if seat.is_available {
+
+                                Style::default().fg(theme::OK)
+                            } else {
+
+                                theme::muted_style()
+                            },
+                        ),
+                        Span::styled(format!("  {}", seat.status_name), theme::muted_style()),
+                    ]);
+
+                    let item = ListItem::new(line);
+
+                    if index == app.seat.selected_seat {
+
+                        item.style(theme::selection_style())
+                    } else {
+
+                        item
+                    }
+                })
+                .collect()
+        };
+
+        record_list_rows(app, body, 0, app.seat.seats.len());
+
+        frame.render_widget(List::new(items), body);
+
+        render_key_hint(frame, footer, "j/k 选座位  enter 预约（需确认）  b 返回");
+
+        return;
+    }
+
+    let items = if app.seat.libraries.is_empty() {
+
+        vec![empty_row(
+            app.seat.loading,
+            app.tick,
+            "正在加载图书馆",
+            "按 r 载入图书馆列表",
+        )]
+    } else {
+
+        app.seat
+            .libraries
+            .iter()
+            .enumerate()
+            .map(|(index, library)| {
+
+                let line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(library.name.clone(), theme::text_style()),
+                    Span::styled(
+                        format!("  {}/{}", library.free_num, library.total_num),
+                        if library.free_num > 0 {
+
+                            Style::default().fg(theme::OK)
+                        } else {
+
+                            Style::default().fg(theme::ERROR)
+                        },
+                    ),
+                    Span::styled(" 空闲", theme::muted_style()),
+                ]);
+
+                let item = ListItem::new(line);
+
+                if index == app.seat.selected {
+
+                    item.style(theme::selection_style())
+                } else {
+
+                    item
+                }
+            })
+            .collect()
+    };
+
+    record_list_rows(app, body, 0, app.seat.libraries.len());
+
+    frame.render_widget(List::new(items), body);
+
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选图书馆  enter 看阅览区与座位  r 刷新  B 我的预约  x 取消预约",
+    );
+}
+
+/// Renders the clock-in tab.
+
+fn render_clockin(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [body, footer] = course_layout_pair(area);
+
+    let Some(overview) = app.clockin.overview.as_ref() else {
+
+        frame.render_widget(
+            List::new(vec![empty_row(
+                app.clockin.loading,
+                app.tick,
+                "正在加载打卡信息",
+                "按 r 载入阳光打卡信息",
+            )]),
+            body,
+        );
+
+        render_key_hint(frame, footer, "r 刷新");
+
+        return;
+    };
+
+    if app.clockin.show_records {
+
+        let items: Vec<ListItem> = if app.clockin.records.is_empty() {
+
+            vec![empty_row(false, app.tick, "", "没有打卡记录")]
+        } else {
+
+            app.clockin
+                .records
+                .iter()
+                .map(|record| {
+
+                    ListItem::new(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(format!("{:<12}", record.create_at), theme::muted_style()),
+                        Span::styled(record.item_name.clone(), theme::text_style()),
+                        Span::styled(format!("  {}", record.place), theme::label_style()),
+                    ]))
+                })
+                .collect()
+        };
+
+        frame.render_widget(List::new(items), body);
+
+        render_key_hint(frame, footer, "t 返回进度  h/l 切类别  r 刷新");
+
+        return;
+    }
+
+    let [summary_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+    let count = &overview.count;
+
+    render_view_summary(
+        frame,
+        summary_area,
+        vec![
+            Span::styled(
+                overview
+                    .classifies
+                    .get(overview.selected)
+                    .map(|classify| classify.name.clone())
+                    .unwrap_or_else(|| "阳光打卡".to_string()),
+                Style::default().fg(theme::INFO),
+            ),
+            sep(),
+            Span::styled(
+                if count.term_num > 0 {
+
+                    format!("{}/{}", count.term_count, count.term_num)
+                } else {
+
+                    format!("{} 次", count.term_count)
+                },
+                if count.satisfied() {
+
+                    Style::default().fg(theme::OK).add_modifier(Modifier::BOLD)
+                } else {
+
+                    Style::default()
+                        .fg(theme::WARN)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::styled(
+                if count.satisfied() {
+
+                    "  已达标".to_string()
+                } else {
+
+                    format!("  还差 {}", count.remaining())
+                },
+                theme::muted_style(),
+            ),
+            sep(),
+            Span::styled(
+                format!(
+                    "周 {}/{}  本月 {}/{}  今日 {}",
+                    count.week_count,
+                    count.week_num,
+                    count.month_count,
+                    count.month_num,
+                    count.day_count
+                ),
+                theme::muted_style(),
+            ),
+        ],
+    );
+
+    let items: Vec<ListItem> = overview
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+
+            let line = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(item.name.clone(), theme::text_style()),
+                Span::styled(format!("  #{}", item.id), theme::muted_style()),
+            ]);
+
+            let entry = ListItem::new(line);
+
+            if index == overview.selected {
+
+                entry.style(theme::selection_style())
+            } else {
+
+                entry
+            }
+        })
+        .collect();
+
+    record_list_rows(app, list_area, 0, overview.items.len());
+
+    frame.render_widget(List::new(items), list_area);
+
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选项目  h/l 切类别  t 查看记录  s 打卡（需 CLI 上传照片）",
+    );
+}
+
+/// Renders the evaluation tab.
+
+fn render_eval(frame: &mut Frame, area: Rect, app: &App) {
+
+    let [body, footer] = course_layout_pair(area);
+
+    // The questionnaire takes over the body so it can be reviewed before any
+    // submission, which is the point of showing it at all.
+    if app.eval.show_questionnaire {
+
+        let Some(questionnaire) = app.eval.questionnaire.as_ref() else {
+
+            frame.render_widget(Paragraph::new(""), body);
+
+            return;
+        };
+
+        let [summary_area, list_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+
+        let course = app
+            .eval
+            .tasks
+            .iter()
+            .find(|task| Some(&task.rwid) == app.eval.questionnaire_task.as_ref())
+            .map(|task| task.course.clone())
+            .unwrap_or_default();
+
+        render_view_summary(
+            frame,
+            summary_area,
+            vec![
+                Span::styled(course, theme::text_style()),
+                sep(),
+                Span::styled(
+                    format!("{} 题", questionnaire.questions.len()),
+                    theme::muted_style(),
+                ),
+                sep(),
+                Span::styled("提交后不可撤销", Style::default().fg(theme::ERROR)),
+            ],
+        );
+
+        let answers = questionnaire.default_answers();
+
+        let items: Vec<ListItem> = questionnaire
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+
+                let answer = answers
+                    .iter()
+                    .find(|(id, _)| *id == question.id)
+                    .map(|(_, option)| option.as_str());
+
+                let text = if question.text.is_empty() {
+
+                    "(未提供题干)".to_string()
+                } else {
+
+                    question.text.clone()
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {}. ", index + 1), theme::muted_style()),
+                    Span::styled(format!("{:<36}", truncate(&text, 36)), theme::text_style()),
+                    Span::styled(
+                        match answer {
+                            Some(option) => format!("将选 {option}"),
+                            None => "不作答".to_string(),
+                        },
+                        if answer.is_some() {
+
+                            Style::default().fg(theme::WARN)
+                        } else {
+
+                            theme::muted_style()
+                        },
+                    ),
+                ]))
+            })
+            .collect();
+
+        frame.render_widget(List::new(items), list_area);
+
+        render_key_hint(
+            frame,
+            footer,
+            "s 提交这门课（需确认）  r 刷新  b 返回课程列表",
+        );
+
+        return;
+    }
+
+    let items = if app.eval.tasks.is_empty() {
+
+        vec![empty_row(
+            app.eval.loading,
+            app.tick,
+            "正在加载待评教课程",
+            "按 r 载入待评教列表",
+        )]
+    } else {
+
+        app.eval
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| {
+
+                let line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        if task.evaluated { "已评" } else { "未评" },
+                        if task.evaluated {
+
+                            Style::default().fg(theme::OK)
+                        } else {
+
+                            Style::default().fg(theme::WARN)
+                        },
+                    ),
+                    Span::raw("  "),
+                    Span::styled(format!("{:<24}", task.course), theme::text_style()),
+                    Span::styled(task.teacher.clone(), theme::muted_style()),
+                ]);
+
+                let item = ListItem::new(line);
+
+                if index == app.eval.selected {
+
+                    item.style(theme::selection_style())
+                } else {
+
+                    item
+                }
+            })
+            .collect()
+    };
+
+    record_list_rows(app, body, 0, app.eval.tasks.len());
+
+    frame.render_widget(List::new(items), body);
+
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选课程  enter 看问卷  s 提交这门  S 提交全部  r 刷新",
+    );
 }
 
 /// One-row banner for the soonest exam.
@@ -4332,7 +5362,11 @@ mod tests {
             .filter(|hotspot| matches!(hotspot.action, HotAction::WorkspaceTab(_)))
             .collect();
 
-        assert_eq!(tab_hotspots.len(), 3, "应有三个页签热区：\n{output}");
+        assert_eq!(
+            tab_hotspots.len(),
+            WorkspaceTab::ALL.len(),
+            "每个页签都应有热区：\n{output}"
+        );
 
         for hotspot in &tab_hotspots {
 
@@ -4588,6 +5622,101 @@ mod tests {
 
             assert!(!output.contains(gone), "旧框标题 {gone} 仍在：\n{output}");
         }
+    }
+
+    #[test]
+
+    fn all_seven_tabs_fit_and_render_their_labels() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        // Seven tabs plus the brand: the widest case the top bar must survive.
+        for width in [80u16, 100, 140] {
+
+            let out = render_text(width, 30, |frame| render_workspace(frame, &app));
+
+            let bar = out.lines().next().expect("应有顶栏");
+
+            for tab in WorkspaceTab::ALL {
+
+                let label = match tab {
+                    WorkspaceTab::Schedule => "课表",
+
+                    other => other.label(),
+                };
+
+                assert!(
+                    bar.contains(label),
+                    "{width} 列时顶栏缺少页签 {label}：\n{out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+
+    fn every_tab_renders_without_panicking() {
+
+        // Each tab has its own layout; an empty state must still draw.
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        for tab in WorkspaceTab::ALL {
+
+            app.active_tab = tab;
+
+            let out = render_text(120, 30, |frame| render_workspace(frame, &app));
+
+            assert!(!out.trim().is_empty(), "{tab:?} 页签渲染为空白");
+        }
+    }
+
+    #[test]
+
+    fn confirm_dialog_is_modal_and_names_the_consequence() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Venue;
+
+        app.venue.pending = Some(crate::app::PendingWrite::VenueReserve);
+
+        let out = render_text(120, 34, |frame| render(frame, &app));
+
+        assert!(out.contains("需要确认"), "应显示确认弹窗：\n{out}");
+
+        assert!(out.contains("研讨室"), "应说明要做什么：\n{out}");
+
+        assert!(out.contains("不可撤销"), "应说明后果：\n{out}");
+
+        assert!(out.contains("取消"), "应列出取消键：\n{out}");
+    }
+
+    #[test]
+
+    fn evaluation_confirm_says_it_answers_in_your_name() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Eval;
+
+        app.eval.pending = Some(crate::app::PendingWrite::EvalSubmitAll);
+
+        let out = render_text(120, 34, |frame| render(frame, &app));
+
+        // The dialog must not be a bare "sure?" — it has to say what submitting
+        // actually does.
+        assert!(
+            out.contains("以你的名义"),
+            "评教确认应说明是代你作答：\n{out}"
+        );
     }
 
     #[test]
