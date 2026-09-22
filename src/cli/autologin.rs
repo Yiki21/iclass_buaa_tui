@@ -17,7 +17,46 @@ use super::config::{
 
 const DEFAULT_AUTOLOGIN_PREFIX: &str = "iclass-buaa";
 
+/// Reports the scheduler entry that would be installed, without writing it.
+///
+/// Why:
+/// Installation writes into systemd, launchd or the Windows task store. The
+/// preview shows the generated command so the schedule can be reviewed before
+/// anything is registered.
+
+fn describe_install(args: &InstallAutologinArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let binary = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "iclass_buaa_tui".to_string());
+
+    println!("将安装定时任务：");
+
+    println!();
+
+    println!("命令\t{binary} plan --yes --config <config>");
+
+    println!("账号\t{}", config.student_id);
+
+    println!("时间\t{}", config.planner_time);
+
+    println!("间隔\t{} 分钟", config.planner_interval_minutes);
+
+    println!();
+
+    println!("这是预览。确认无误后加上 --yes 才会真正安装。");
+
+    Ok(())
+}
+
 pub(crate) fn install_autologin(args: InstallAutologinArgs) -> Result<()> {
+
+    if !args.yes {
+
+        return describe_install(&args);
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -47,6 +86,17 @@ pub(crate) fn install_autologin(args: InstallAutologinArgs) -> Result<()> {
 }
 
 pub(crate) fn uninstall_autologin(args: UninstallAutologinArgs) -> Result<()> {
+
+    if !args.yes {
+
+        println!("将移除本工具安装的定时任务。");
+
+        println!();
+
+        println!("这是预览。确认无误后加上 --yes 才会真正移除。");
+
+        return Ok(());
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -752,7 +802,7 @@ fn render_planner_service(exe_path: &Path, config_path: &Path) -> String {
 
     let _ = writeln!(
         content,
-        "ExecStart={} plan --config {}",
+        "ExecStart={} plan --yes --config {}",
         escape_exec_arg(&exe_path.display().to_string()),
         escape_exec_arg(&config_path.display().to_string()),
     );
@@ -819,6 +869,7 @@ fn render_launchd_plist(
             "\n  <array>",
             "\n    <string>{}</string>",
             "\n    <string>plan</string>",
+            "\n    <string>--yes</string>",
             "\n    <string>--config</string>",
             "\n    <string>{}</string>",
             "\n  </array>",
@@ -839,7 +890,7 @@ fn render_launchd_plist(
 fn render_windows_wrapper(exe_path: &Path, config_path: &Path) -> String {
 
     format!(
-        "@echo off\r\n\"{}\" plan --config \"{}\"\r\n",
+        "@echo off\r\n\"{}\" plan --yes --config \"{}\"\r\n",
         escape_cmd_arg(&exe_path.display().to_string()),
         escape_cmd_arg(&config_path.display().to_string()),
     )

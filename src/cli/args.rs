@@ -133,6 +133,13 @@ pub(crate) struct SignArgs {
     /// Print a JSON result instead of human-readable text.
     #[arg(long)]
     pub(crate) json:                   bool,
+    /// Confirm the action. Without this the command only previews.
+    ///
+    /// Why:
+    /// Signing changes real attendance state. Requiring an explicit flag
+    /// keeps a mistyped command from signing something.
+    #[arg(long)]
+    pub(crate) yes:                    bool,
 }
 
 #[derive(Debug, Args)]
@@ -153,6 +160,13 @@ pub(crate) struct PlanArgs {
     /// Print a JSON result instead of human-readable text.
     #[arg(long)]
     pub(crate) json:        bool,
+    /// Confirm the action. Without this the command only previews.
+    ///
+    /// Why:
+    /// Signing changes real attendance state. Requiring an explicit flag
+    /// keeps a mistyped command from signing something.
+    #[arg(long)]
+    pub(crate) yes:         bool,
 }
 
 #[derive(Debug, Args)]
@@ -564,19 +578,22 @@ pub(crate) struct ScheduleDiffArgs {
 pub(crate) struct InstallAutologinArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
-    pub(crate) config:                   Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     /// Target directory for generated scheduler files when applicable.
     #[arg(long)]
-    pub(crate) output_dir:               Option<PathBuf>,
+    pub(crate) output_dir: Option<PathBuf>,
     /// Prefix for generated scheduler task names.
     #[arg(long)]
-    pub(crate) unit_prefix:              Option<String>,
+    pub(crate) unit_prefix: Option<String>,
     /// Override planner_time from config when generating the scheduler entry.
     #[arg(long)]
-    pub(crate) planner_time:             Option<String>,
+    pub(crate) planner_time: Option<String>,
     /// Override planner_interval_minutes from config when generating the scheduler entry.
     #[arg(long)]
     pub(crate) planner_interval_minutes: Option<u32>,
+    /// Confirm. Without this the command only reports what it would change.
+    #[arg(long)]
+    pub(crate) yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -599,6 +616,9 @@ pub(crate) struct UninstallAutologinArgs {
     /// Prefix for generated scheduler task names.
     #[arg(long)]
     pub(crate) unit_prefix: Option<String>,
+    /// Confirm. Without this the command only reports what it would change.
+    #[arg(long)]
+    pub(crate) yes:         bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

@@ -272,6 +272,57 @@ pub(crate) async fn sign_command(args: SignArgs) -> Result<()> {
 
     let config = load_config(args.config.as_deref())?;
 
+    // Signing changes real attendance state, so it needs the same explicit
+    // confirmation the booking commands require.
+    if !args.yes {
+
+        let source: SignSource = args.source.into();
+
+        let action: SignAction = args.action.into();
+
+        if args.json {
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "action": "sign",
+                    "submitted": false,
+                    "target": {
+                        "source": source.label(),
+                        "action": action.label(),
+                        "course_sched_id": args.course_sched_id,
+                        "bykc_course_id": args.bykc_course_id,
+                        "course_name": args.course_name,
+                    },
+                    "hint": "加上 --yes 才会真正签到",
+                }))?
+            );
+        } else {
+
+            println!(
+                "将签到\t{}\t{}\t{}",
+                source.label(),
+                action.label(),
+                args.course_name.as_deref().unwrap_or_else(|| {
+
+                    if args.bykc_course_id.is_some() {
+
+                        "BYKC 课程"
+                    } else {
+
+                        "(未命名)"
+                    }
+                }),
+            );
+
+            println!();
+
+            println!("这是预览。确认无误后加上 --yes 才会真正签到。");
+        }
+
+        return Ok(());
+    }
+
     let retry = RetryPolicy {
         max_attempts:      args.retry_count.unwrap_or(config.retry_count),
         interval_seconds:  args
@@ -422,7 +473,56 @@ pub(crate) async fn plan_command(args: PlanArgs) -> Result<()> {
 
         let evaluated = evaluate_today_courses_for_dry_run(&config, args.debug_login).await?;
 
-        print_dry_run_courses(&evaluated);
+        if args.json {
+
+            let only_evaluated: Vec<EvaluatedCourse> = evaluated
+                .iter()
+                .filter_map(|e| e.evaluation.clone())
+                .collect();
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&evaluated_json(&only_evaluated))?
+            );
+        } else {
+
+            print_dry_run_courses(&evaluated);
+        }
+
+        return Ok(());
+    }
+
+    // A planner cycle signs real attendance state. Without confirmation it
+    // reports what it would have done and stops, so a mistyped invocation
+    // cannot sign anything.
+    if !args.yes {
+
+        let evaluated = evaluate_today_courses_for_dry_run(&config, args.debug_login).await?;
+
+        if args.json {
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "action": "plan",
+                    "submitted": false,
+                    "evaluated": evaluated_json(
+                        &evaluated
+                            .iter()
+                            .filter_map(|entry| entry.evaluation.clone())
+                            .collect::<Vec<_>>()
+                    ),
+                    "hint": "加上 --yes 才会真正签到；--dry-run 只评估不登录签到",
+                }))?
+            );
+        } else {
+
+            print_dry_run_courses(&evaluated);
+
+            println!();
+
+            println!("这是预览。确认无误后加上 --yes 才会真正签到。");
+        }
 
         return Ok(());
     }
@@ -665,6 +765,31 @@ fn notify_sign_success(config: &AutomationConfig, target: &ListedTarget, message
 
         eprintln!("桌面通知发送失败: {error}");
     }
+}
+
+/// Serializes an evaluation run for machine-readable output.
+
+fn evaluated_json(evaluated: &[EvaluatedCourse]) -> serde_json::Value {
+
+    serde_json::Value::Array(
+        evaluated
+            .iter()
+            .map(|entry| {
+
+                json!({
+                    "source": entry.course.source.label(),
+                    "action": entry.course.action.label(),
+                    "course_name": entry.course.name,
+                    "target_id": entry.course.target_id,
+                    "date": entry.course.date,
+                    "start_time": entry.course.start_time,
+                    "end_time": entry.course.end_time,
+                    "already_signed": entry.course.signed,
+                    "status": format!("{:?}", entry.status),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn planner_run_id() -> String {
