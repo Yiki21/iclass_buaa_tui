@@ -553,6 +553,12 @@ pub struct BykcState {
     pub detail_cache:      HashMap<i64, BykcCourseDetail>,
     pub detail_course_id:  Option<i64>,
     pub show_detail_popup: bool,
+    /// Vertical scroll offset inside the detail popup.
+    ///
+    /// Why:
+    /// Course descriptions run to many lines and used to be cut off silently
+    /// once the popup filled. Scrolling makes the whole description reachable.
+    pub detail_scroll:     u16,
 }
 
 impl BykcState {
@@ -1155,6 +1161,38 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('o') => {
 
                     self.bykc.show_detail_popup = false;
+
+                    return;
+                }
+                // Scroll rather than move the list selection, since the popup
+                // owns the keyboard while it is open.
+                KeyCode::Up | KeyCode::Char('k') => {
+
+                    self.bykc.detail_scroll = self.bykc.detail_scroll.saturating_sub(1);
+
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+
+                    self.bykc.detail_scroll = self.bykc.detail_scroll.saturating_add(1);
+
+                    return;
+                }
+                KeyCode::PageUp => {
+
+                    self.bykc.detail_scroll = self.bykc.detail_scroll.saturating_sub(8);
+
+                    return;
+                }
+                KeyCode::PageDown => {
+
+                    self.bykc.detail_scroll = self.bykc.detail_scroll.saturating_add(8);
+
+                    return;
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+
+                    self.bykc.detail_scroll = 0;
 
                     return;
                 }
@@ -2118,6 +2156,10 @@ impl App {
             self.bykc.detail = Some(detail);
 
             self.bykc.detail_course_id = Some(course_id);
+
+            // A new course starts at the top; a stale offset would open it
+            // mid-description.
+            self.bykc.detail_scroll = 0;
 
             self.bykc.show_detail_popup = true;
 

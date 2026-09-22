@@ -1579,296 +1579,233 @@ fn render_bykc_chosen_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// Renders the inline BYKC detail panel under the current list.
+/// Renders the inline BYKC summary under the course list.
 ///
 /// Why:
-/// Users should see location, windows, and basic status immediately on cursor
-/// movement, even before opening the full popup. This panel therefore prefers
-/// cached detail, but falls back to lighter list payloads when necessary.
+/// This panel gets ten usable rows. The old version stacked twelve or more
+/// label/value lines into it, so the tail was always clipped and it duplicated
+/// the popup. A summary that fits, plus a pointer to `o` for the rest, tells
+/// the reader more than a truncated copy of everything.
+///
+/// How:
+/// Course name and sign-in verdict on the first line, then only the fields a
+/// student checks while scrolling the list: when it runs, where, and what the
+/// sign-in window is. Empty fields are omitted rather than rendered as dashes.
 
 fn render_bykc_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     let lines = if let Some(detail) = app.bykc.selected_cached_detail() {
 
-        vec![
-            Line::from(vec![
-                Span::styled("课程: ", theme::label_style()),
-                Span::raw(detail.course_name.as_str()),
-            ]),
-            Line::from(vec![
-                Span::styled("教师: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(if detail.course_teacher.is_empty() {
+        let (sign_text, sign_style) = bykc_sign_state(detail);
 
-                    "-"
-                } else {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(detail.course_name.clone(), theme::text_style()),
+            Span::raw("  "),
+            Span::styled(sign_text, sign_style),
+        ])];
 
-                    detail.course_teacher.as_str()
-                }),
-            ]),
-            Line::from(vec![
-                Span::styled("地点: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(if detail.course_position.is_empty() {
+        lines.extend(field(
+            "分类",
+            bykc_category_label(&detail.category, &detail.sub_category),
+        ));
 
-                    "-"
-                } else {
+        lines.extend(field("教师", detail.course_teacher.clone()));
 
-                    detail.course_position.as_str()
-                }),
-            ]),
-            Line::from(vec![
-                Span::styled("状态: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(detail.status.as_str()),
-            ]),
-            Line::from(vec![
-                Span::styled("分类: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(bykc_category_label(&detail.category, &detail.sub_category)),
-            ]),
-            Line::from(vec![
-                Span::styled("签到模式: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(bykc_sign_type_label(detail.course_sign_type)),
-            ]),
-            Line::from(vec![
-                Span::styled("自主签到: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(bykc_self_sign_value(
-                    detail
-                        .sign_config
-                        .as_ref()
-                        .is_some_and(|config| !config.sign_points.is_empty()),
-                )),
-            ]),
-            Line::from(vec![
-                Span::styled("选课时间: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(format!(
-                    "{} ~ {}",
-                    empty_dash(&detail.course_select_start_date),
-                    empty_dash(&detail.course_select_end_date)
-                )),
-            ]),
-            Line::from(vec![
-                Span::styled("签到窗口: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(
-                    detail
-                        .sign_config
-                        .as_ref()
-                        .map(|config| {
+        lines.extend(field("地点", detail.course_position.clone()));
 
-                            format!(
-                                "{} ~ {}",
-                                empty_dash(&config.sign_start_date),
-                                empty_dash(&config.sign_end_date)
-                            )
-                        })
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("签退窗口: ", Style::default().fg(theme::ACCENT_WARM)),
-                Span::raw(
-                    detail
-                        .sign_config
-                        .as_ref()
-                        .map(|config| {
+        lines.extend(field(
+            "档期",
+            format!(
+                "{} ~ {}",
+                empty_dash(&detail.course_start_date),
+                empty_dash(&detail.course_end_date)
+            ),
+        ));
 
-                            format!(
-                                "{} ~ {}",
-                                empty_dash(&config.sign_out_start_date),
-                                empty_dash(&config.sign_out_end_date)
-                            )
-                        })
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-            ]),
-            Line::from("操作: o 打开详情浮窗 | s 报名/签到 | x 退选 | u 签退 | a 切换 include_all"),
-        ]
+        lines.extend(field("签到窗口", window_text(detail, true)));
+
+        lines.extend(field("签退窗口", window_text(detail, false)));
+
+        lines.extend(field(
+            "人数",
+            format!(
+                "{}/{}",
+                detail.course_current_count, detail.course_max_count
+            ),
+        ));
+
+        lines.push(Line::from(Span::styled(
+            "o 完整详情 | s 报名/签到 | u 签退 | x 退选 | a include_all",
+            theme::muted_style(),
+        )));
+
+        lines
     } else {
 
         let fallback = match app.bykc.view {
             BykcView::Courses => {
                 app.bykc.selected_course().map(|course| {
 
-                    vec![
-                        Line::from(vec![
-                            Span::styled("课程: ", theme::label_style()),
-                            Span::raw(course.course_name.as_str()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("状态: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(course.status.as_str()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("分类: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(bykc_category_label(&course.category, &course.sub_category)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("签到模式: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(bykc_sign_type_label(course.course_sign_type)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("自主签到: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(bykc_self_sign_value(course.has_sign_points)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("教师: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(empty_dash(&course.course_teacher)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("地点: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(empty_dash(&course.course_position)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("上课时间: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(format!(
-                                "{} ~ {}",
-                                empty_dash(&course.course_start_date),
-                                empty_dash(&course.course_end_date)
-                            )),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("选课时间: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(format!(
-                                "{} ~ {}",
-                                empty_dash(&course.course_select_start_date),
-                                empty_dash(&course.course_select_end_date)
-                            )),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("退选提示: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(
-                                app.bykc
-                                    .chosen_course_for(course.id)
-                                    .map(|chosen| {
-                                        if can_deselect_bykc_course(&chosen.course_cancel_end_date)
-                                        {
+                    let mut lines = vec![Line::from(Span::styled(
+                        course.course_name.clone(),
+                        theme::text_style(),
+                    ))];
 
-                                            format!(
-                                                "可退选，截止 {}",
-                                                empty_dash(&chosen.course_cancel_end_date)
-                                            )
-                                        } else {
+                    lines.extend(field(
+                        "分类",
+                        bykc_category_label(&course.category, &course.sub_category),
+                    ));
 
-                                            format!(
-                                                "已过退选时间 {}",
-                                                empty_dash(&chosen.course_cancel_end_date)
-                                            )
-                                        }
-                                    })
-                                    .unwrap_or_else(|| {
-                                        if course.selected {
+                    lines.extend(field("状态", course.status.clone()));
 
-                                            "已报，但未找到退选记录".to_string()
-                                        } else {
+                    lines.extend(field("教师", course.course_teacher.clone()));
 
-                                            "-".to_string()
-                                        }
-                                    }),
-                            ),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("简介: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(empty_dash(&course.course_desc)),
-                        ]),
-                        Line::from("按 s 报名，已报课程可按 x 退选；如需补充字段可按 o 或 enter"),
-                    ]
+                    lines.extend(field("地点", course.course_position.clone()));
+
+                    lines.extend(field(
+                        "档期",
+                        format!(
+                            "{} ~ {}",
+                            empty_dash(&course.course_start_date),
+                            empty_dash(&course.course_end_date)
+                        ),
+                    ));
+
+                    lines.extend(field(
+                        "选课时间",
+                        format!(
+                            "{} ~ {}",
+                            empty_dash(&course.course_select_start_date),
+                            empty_dash(&course.course_select_end_date)
+                        ),
+                    ));
+
+                    if let Some(hint) = deselect_hint(app, course) {
+
+                        lines.extend(field("退选", hint));
+                    }
+
+                    lines.push(Line::from(Span::styled(
+                        "o 完整详情 | s 报名 | x 退选",
+                        theme::muted_style(),
+                    )));
+
+                    lines
                 })
             }
             BykcView::Chosen => {
                 app.bykc.selected_chosen_course().map(|course| {
 
-                    vec![
-                        Line::from(vec![
-                            Span::styled("课程: ", theme::label_style()),
-                            Span::raw(course.course_name.as_str()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("签到状态: ", theme::label_style()),
-                            Span::raw(course.checkin.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("分类: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(bykc_category_label(&course.category, &course.sub_category)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("签到模式: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(bykc_sign_type_label(course.course_sign_type)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("自主签到: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(bykc_self_sign_value(
-                                course
-                                    .sign_config
-                                    .as_ref()
-                                    .is_some_and(|config| !config.sign_points.is_empty()),
-                            )),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("教师: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(empty_dash(&course.course_teacher)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("地点: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(empty_dash(&course.course_position)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("上课时间: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(format!(
-                                "{} ~ {}",
-                                empty_dash(&course.course_start_date),
-                                empty_dash(&course.course_end_date)
-                            )),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("签到窗口: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(
-                                course
-                                    .sign_config
-                                    .as_ref()
-                                    .map(|config| {
+                    let mut lines = vec![Line::from(Span::styled(
+                        course.course_name.clone(),
+                        theme::text_style(),
+                    ))];
 
-                                        format!(
-                                            "{} ~ {}",
-                                            empty_dash(&config.sign_start_date),
-                                            empty_dash(&config.sign_end_date)
-                                        )
-                                    })
-                                    .unwrap_or_else(|| "-".to_string()),
-                            ),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("签退窗口: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(
-                                course
-                                    .sign_config
-                                    .as_ref()
-                                    .map(|config| {
+                    lines.extend(field(
+                        "分类",
+                        bykc_category_label(&course.category, &course.sub_category),
+                    ));
 
-                                        format!(
-                                            "{} ~ {}",
-                                            empty_dash(&config.sign_out_start_date),
-                                            empty_dash(&config.sign_out_end_date)
-                                        )
-                                    })
-                                    .unwrap_or_else(|| "-".to_string()),
-                            ),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("签到备注: ", Style::default().fg(theme::ACCENT_WARM)),
-                            Span::raw(empty_dash(&course.sign_info)),
-                        ]),
-                        Line::from("按 s 签到，u 签退，x 退选；如需补充字段可按 o 或 enter"),
-                    ]
+                    lines.extend(field("教师", course.course_teacher.clone()));
+
+                    lines.extend(field("地点", course.course_position.clone()));
+
+                    lines.extend(field(
+                        "档期",
+                        format!(
+                            "{} ~ {}",
+                            empty_dash(&course.course_start_date),
+                            empty_dash(&course.course_end_date)
+                        ),
+                    ));
+
+                    if let Some(config) = course.sign_config.as_ref() {
+
+                        let window = format!(
+                            "{} ~ {}",
+                            empty_dash(&config.sign_start_date),
+                            empty_dash(&config.sign_end_date)
+                        );
+
+                        lines.extend(field("签到窗口", window));
+                    }
+
+                    lines.extend(field("签到备注", course.sign_info.clone()));
+
+                    lines.push(Line::from(Span::styled(
+                        "o 完整详情 | s 签到 | u 签退 | x 退选",
+                        theme::muted_style(),
+                    )));
+
+                    lines
                 })
             }
         };
 
-        fallback.unwrap_or_else(|| vec![Line::from("当前没有可显示的博雅课程")])
+        fallback.unwrap_or_else(|| {
+
+            vec![Line::from(Span::styled(
+                "当前没有可显示的博雅课程",
+                theme::muted_style(),
+            ))]
+        })
     };
 
     let detail = Paragraph::new(lines)
-        .block(Block::default().title("详情").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("详情")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER_IDLE))
+                .title_style(theme::title_style()),
+        )
         .wrap(Wrap { trim: true });
 
     frame.render_widget(detail, area);
 }
+
+/// Explains whether the selected course can still be dropped.
+
+fn deselect_hint(app: &App, course: &crate::bykc::BykcCourse) -> Option<String> {
+
+    if let Some(chosen) = app.bykc.chosen_course_for(course.id) {
+
+        return Some(
+            if can_deselect_bykc_course(&chosen.course_cancel_end_date) {
+
+                format!(
+                    "可退选，截止 {}",
+                    empty_dash(&chosen.course_cancel_end_date)
+                )
+            } else {
+
+                format!(
+                    "已过退选时间 {}",
+                    empty_dash(&chosen.course_cancel_end_date)
+                )
+            },
+        );
+    }
+
+    course
+        .selected
+        .then(|| "已报，但未找到退选记录".to_string())
+}
+
+/// Renders the BYKC course detail as a single, grouped panel.
+///
+/// Why:
+/// The previous layout drew two nested boxes ("BYKC 详情" around "详细信息"),
+/// which wasted the frame, cramped the body, and said nothing the title could
+/// not. Fourteen fields were stacked in one flat list, so sign-in windows --
+/// the reason to open this at all -- sat below three date ranges, and empty
+/// fields printed as "-" columns of noise.
+///
+/// How:
+/// One border, a live sign-in summary in the title, then fields grouped by what
+/// the reader wants to know, in the order they want it. Blank fields disappear
+/// entirely, values are colored by meaning, and the body scrolls so a long
+/// description is reachable instead of being silently clipped.
 
 fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
 
@@ -1877,129 +1814,280 @@ fn render_bykc_detail_popup(frame: &mut Frame, app: &App) {
         return;
     };
 
-    let area = centered_rect(72, 70, frame.area());
+    let area = centered_rect(76, 78, frame.area());
 
     frame.render_widget(Clear, area);
 
-    let outer = Block::default()
-        .title("BYKC 详情")
+    let (sign_text, sign_style) = bykc_sign_state(detail);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 选课详情 ", theme::title_style()),
+            Span::styled(detail.course_name.clone(), Style::default().fg(theme::TEXT)),
+            Span::styled("  ", theme::muted_style()),
+            Span::styled(sign_text, sign_style),
+            Span::raw(" "),
+        ]))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::OK));
+        .border_style(Style::default().fg(theme::BORDER_FOCUS));
 
-    let inner = outer.inner(area);
+    let inner = block.inner(area);
 
-    frame.render_widget(outer, area);
+    frame.render_widget(block, area);
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("课程: ", theme::label_style()),
-            Span::raw(detail.course_name.as_str()),
-        ]),
-        Line::from(vec![
-            Span::styled("教师: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(empty_dash(&detail.course_teacher)),
-        ]),
-        Line::from(vec![
-            Span::styled("地点: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(empty_dash(&detail.course_position)),
-        ]),
-        Line::from(vec![
-            Span::styled("联系人: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(empty_dash(&detail.course_contact)),
-        ]),
-        Line::from(vec![
-            Span::styled("联系电话: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(empty_dash(&detail.course_contact_mobile)),
-        ]),
-        Line::from(vec![
-            Span::styled("上课时间: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(format!(
-                "{} ~ {}",
-                empty_dash(&detail.course_start_date),
-                empty_dash(&detail.course_end_date)
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("选课时间: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(format!(
-                "{} ~ {}",
-                empty_dash(&detail.course_select_start_date),
-                empty_dash(&detail.course_select_end_date)
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("退选截止: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(empty_dash(&detail.course_cancel_end_date)),
-        ]),
-        Line::from(vec![
-            Span::styled("状态: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(detail.status.as_str()),
-        ]),
-        Line::from(vec![
-            Span::styled("分类: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(bykc_category_label(&detail.category, &detail.sub_category)),
-        ]),
-        Line::from(vec![
-            Span::styled("签到模式: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(bykc_sign_type_label(detail.course_sign_type)),
-        ]),
-        Line::from(vec![
-            Span::styled("自主签到: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(bykc_self_sign_value(
-                detail
-                    .sign_config
-                    .as_ref()
-                    .is_some_and(|config| !config.sign_points.is_empty()),
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("签到窗口: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(
-                detail
-                    .sign_config
-                    .as_ref()
-                    .map(|config| {
+    // Reserve the last inner row for the scroll hint so the body never draws
+    // underneath it.
+    let [body_area, hint_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
-                        format!(
-                            "{} ~ {}",
-                            empty_dash(&config.sign_start_date),
-                            empty_dash(&config.sign_end_date)
-                        )
-                    })
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("签退窗口: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(
-                detail
-                    .sign_config
-                    .as_ref()
-                    .map(|config| {
+    let mut lines: Vec<Line> = Vec::new();
 
-                        format!(
-                            "{} ~ {}",
-                            empty_dash(&config.sign_out_start_date),
-                            empty_dash(&config.sign_out_end_date)
-                        )
-                    })
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("简介: ", Style::default().fg(theme::ACCENT_WARM)),
-            Span::raw(empty_dash(&detail.course_desc)),
-        ]),
-        Line::from(""),
-        Line::from("按 esc / o / enter 关闭"),
-    ];
+    lines.push(section("课程"));
 
-    let detail = Paragraph::new(lines)
-        .block(Block::default().title("详细信息").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
+    lines.extend(field(
+        "分类",
+        bykc_category_label(&detail.category, &detail.sub_category),
+    ));
 
-    frame.render_widget(detail, inner);
+    lines.extend(field("教师", detail.course_teacher.clone()));
+
+    lines.extend(field("地点", detail.course_position.clone()));
+
+    if let Some(contact) = contact_line(detail) {
+
+        lines.extend(field("联系", contact));
+    }
+
+    lines.extend(field(
+        "档期",
+        format!(
+            "{} ~ {}",
+            empty_dash(&detail.course_start_date),
+            empty_dash(&detail.course_end_date)
+        ),
+    ));
+
+    lines.push(Line::from(""));
+
+    lines.push(section("签到"));
+
+    lines.extend(field(
+        "模式",
+        bykc_sign_type_label(detail.course_sign_type).to_string(),
+    ));
+
+    lines.extend(field(
+        "自主签到",
+        bykc_self_sign_value(
+            detail
+                .sign_config
+                .as_ref()
+                .is_some_and(|config| !config.sign_points.is_empty()),
+        )
+        .to_string(),
+    ));
+
+    lines.extend(field("签到窗口", window_text(detail, true)));
+
+    lines.extend(field("签退窗口", window_text(detail, false)));
+
+    if let Some(config) = detail.sign_config.as_ref()
+        && !config.sign_points.is_empty()
+    {
+
+        lines.extend(field(
+            "签到点数",
+            format!("{} 个", config.sign_points.len()),
+        ));
+    }
+
+    lines.push(Line::from(""));
+
+    lines.push(section("选课"));
+
+    lines.extend(field("状态", detail.status.clone()));
+
+    lines.extend(field(
+        "选课时间",
+        format!(
+            "{} ~ {}",
+            empty_dash(&detail.course_select_start_date),
+            empty_dash(&detail.course_select_end_date)
+        ),
+    ));
+
+    lines.extend(field(
+        "退选截止",
+        empty_dash(&detail.course_cancel_end_date),
+    ));
+
+    lines.extend(field(
+        "人数",
+        format!(
+            "{}/{}",
+            detail.course_current_count, detail.course_max_count
+        ),
+    ));
+
+    if !detail.course_desc.trim().is_empty() {
+
+        lines.push(Line::from(""));
+
+        lines.push(section("简介"));
+
+        for paragraph in detail.course_desc.lines() {
+
+            lines.push(Line::from(Span::styled(
+                paragraph.to_string(),
+                theme::text_style(),
+            )));
+        }
+    }
+
+    let body = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((app.bykc.detail_scroll, 0));
+
+    frame.render_widget(body, body_area);
+
+    render_scroll_hint(frame, hint_area, app);
+}
+
+/// A section heading inside the detail panel.
+///
+/// Why:
+/// Grouping is what makes fourteen fields scannable. A colored label plus a rule
+/// marks the boundary without spending a whole line on decoration.
+
+fn section(title: &str) -> Line<'static> {
+
+    Line::from(vec![
+        Span::styled(title.to_string(), theme::label_style()),
+        Span::styled("  ", theme::muted_style()),
+        Span::styled("─".repeat(24), Style::default().fg(theme::BORDER_IDLE)),
+    ])
+}
+
+/// A label/value row, or nothing at all when the value is empty.
+///
+/// Why:
+/// An absent value carries no information, and printing "-" for it turns the
+/// panel into a wall of dashes that hides the fields that do have content.
+
+fn field(label: &str, value: impl Into<String>) -> Option<Line<'static>> {
+
+    let value = value.into();
+
+    let value = value.trim();
+
+    if value.is_empty() {
+
+        return None;
+    }
+
+    Some(Line::from(vec![
+        Span::styled(format!("  {label:<10}"), theme::muted_style()),
+        Span::styled(value.to_string(), theme::text_style()),
+    ]))
+}
+
+/// Joins the contact name and phone when either is present.
+
+fn contact_line(detail: &crate::bykc::BykcCourseDetail) -> Option<String> {
+
+    let name = detail.course_contact.trim();
+
+    let phone = detail.course_contact_mobile.trim();
+
+    match (name.is_empty(), phone.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(name.to_string()),
+        (true, false) => Some(phone.to_string()),
+        (false, false) => Some(format!("{name} {phone}")),
+    }
+}
+
+/// Formats a sign or sign-out window, preferring the configured points.
+
+fn window_text(detail: &crate::bykc::BykcCourseDetail, sign_in: bool) -> String {
+
+    let Some(config) = detail.sign_config.as_ref() else {
+
+        return String::new();
+    };
+
+    let (start, end) = if sign_in {
+
+        (&config.sign_start_date, &config.sign_end_date)
+    } else {
+
+        (&config.sign_out_start_date, &config.sign_out_end_date)
+    };
+
+    if start.trim().is_empty() && end.trim().is_empty() {
+
+        return String::new();
+    }
+
+    format!("{} ~ {}", empty_dash(start), empty_dash(end))
+}
+
+/// The one-line sign-in verdict shown in the panel title.
+///
+/// Why:
+/// Whether signing is possible right now is the question this screen exists to
+/// answer, so it belongs where the eye lands first rather than seven rows down.
+
+fn bykc_sign_state(detail: &crate::bykc::BykcCourseDetail) -> (String, Style) {
+
+    if detail.can_sign {
+
+        return ("● 可签到".to_string(), Style::default().fg(theme::OK));
+    }
+
+    if detail.can_sign_out {
+
+        return ("● 可签退".to_string(), Style::default().fg(theme::OK));
+    }
+
+    let has_window = detail.sign_config.as_ref().is_some_and(|config| {
+
+        !config.sign_start_date.trim().is_empty() || !config.sign_end_date.trim().is_empty()
+    });
+
+    if has_window {
+
+        (
+            "○ 当前不在签到窗口".to_string(),
+            Style::default().fg(theme::MUTED),
+        )
+    } else {
+
+        ("○ 无需签到".to_string(), Style::default().fg(theme::MUTED))
+    }
+}
+
+/// Draws the scroll affordance on the panel's last inner row.
+///
+/// Why:
+/// A clipped body with no hint reads as "that is all there is". Showing the
+/// offset confirms the view actually moved.
+
+fn render_scroll_hint(frame: &mut Frame, hint_area: Rect, app: &App) {
+
+    let mut spans = vec![Span::styled("j/k 或 ↑↓ 滚动", theme::muted_style())];
+
+    if app.bykc.detail_scroll > 0 {
+
+        spans.push(Span::styled(
+            format!("  已滚动 {} 行", app.bykc.detail_scroll),
+            Style::default().fg(theme::INFO),
+        ));
+    }
+
+    spans.push(Span::styled("    esc/o/enter 关闭", theme::muted_style()));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), hint_area);
 }
 
 fn render_input(
@@ -2590,5 +2678,208 @@ fn empty_dash(value: &str) -> String {
     } else {
 
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use super::*;
+    use crate::bykc::{BykcCourseDetail, BykcSignConfig};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn fixture() -> BykcCourseDetail {
+
+        BykcCourseDetail {
+            id: 1,
+            course_name: "航空发动机原理".to_string(),
+            course_position: "沙河校区 J3-201".to_string(),
+            course_contact: "张老师".to_string(),
+            course_contact_mobile: "13800000000".to_string(),
+            course_teacher: "张老师".to_string(),
+            course_start_date: "2026-03-02".to_string(),
+            course_end_date: "2026-06-19".to_string(),
+            course_select_start_date: "2026-02-20".to_string(),
+            course_select_end_date: "2026-02-25".to_string(),
+            course_cancel_end_date: "2026-03-08".to_string(),
+            course_max_count: 80,
+            course_current_count: 63,
+            category: "博雅".to_string(),
+            sub_category: "工程".to_string(),
+            status: "已报".to_string(),
+            selected: true,
+            // Long enough to prove the body scrolls instead of clipping.
+            course_desc: (1..=40)
+                .map(|index| format!("第 {index} 行课程简介内容"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            course_sign_type: Some(1),
+            sign_config: Some(BykcSignConfig {
+                sign_start_date:     "2026-03-02 08:00".to_string(),
+                sign_end_date:       "2026-03-02 08:30".to_string(),
+                sign_out_start_date: "2026-03-02 11:00".to_string(),
+                sign_out_end_date:   "2026-03-02 11:30".to_string(),
+                sign_points:         Vec::new(),
+            }),
+            checkin: Some(0),
+            pass: None,
+            can_sign: true,
+            can_sign_out: false,
+        }
+    }
+
+    fn render_popup(app: &App, width: u16, height: u16) -> String {
+
+        let backend = TestBackend::new(width, height);
+
+        let mut terminal = Terminal::new(backend).expect("终端应可创建");
+
+        terminal
+            .draw(|frame| render_bykc_detail_popup(frame, app))
+            .expect("应可渲染详情浮窗");
+
+        let buffer = terminal.backend().buffer().clone();
+
+        // A wide glyph occupies two cells and the second holds a filler space,
+        // and alignment padding surrounds every label. Dropping spaces leaves
+        // exactly the visible content, which is what these tests assert on
+        // rather than the exact column layout.
+        (0..buffer.area.height)
+            .map(|y| {
+
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .replace([' ', '\u{3000}'], "")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn app_with_detail(detail: BykcCourseDetail) -> App {
+
+        let mut app = App::default();
+
+        // The popup resolves its target through the list selection, so the
+        // course must exist in the list for the cached detail to be found.
+        app.bykc.courses.push(crate::bykc::BykcCourse {
+            id: detail.id,
+            course_name: detail.course_name.clone(),
+            ..Default::default()
+        });
+
+        app.bykc.selected_course = 0;
+
+        app.bykc.detail_course_id = Some(detail.id);
+
+        app.bykc.detail_cache.insert(detail.id, detail);
+
+        app.bykc.show_detail_popup = true;
+
+        app
+    }
+
+    #[test]
+
+    fn detail_popup_draws_a_single_frame_and_shows_sign_state() {
+
+        let app = app_with_detail(fixture());
+
+        let output = render_popup(&app, 90, 28);
+
+        // One border only: the old layout nested "BYKC 详情" around "详细信息".
+        assert!(
+            !output.contains("详细信息") && !output.contains("BYKC 详情"),
+            "浮窗不应再有两层标题：\n{output}"
+        );
+
+        // The actionable verdict belongs on the first line.
+        assert!(output.contains("可签到"), "标题应显示签到状态：\n{output}");
+
+        assert!(
+            output.contains("航空发动机原理"),
+            "应显示课程名：\n{output}"
+        );
+
+        // Grouped sections rather than one flat list.
+        for heading in ["课程", "签到", "选课"] {
+
+            assert!(output.contains(heading), "缺少分组 {heading}：\n{output}");
+        }
+
+        assert!(
+            output.contains("13800000000"),
+            "联系方式应合并显示：\n{output}"
+        );
+
+        assert!(output.contains("63/80"), "应显示人数：\n{output}");
+    }
+
+    #[test]
+
+    fn detail_popup_omits_empty_fields_instead_of_dashing_them() {
+
+        let detail = BykcCourseDetail {
+            course_teacher: String::new(),
+            course_position: String::new(),
+            course_contact: String::new(),
+            course_contact_mobile: String::new(),
+            course_desc: String::new(),
+            sign_config: None,
+            ..fixture()
+        };
+
+        let app = app_with_detail(detail);
+
+        let output = render_popup(&app, 90, 28);
+
+        assert!(!output.contains("教师"), "空教师字段应整行省略：\n{output}");
+
+        assert!(!output.contains("联系"), "空联系字段应整行省略：\n{output}");
+
+        assert!(
+            !output.contains("简介"),
+            "空简介不应产生分组标题：\n{output}"
+        );
+    }
+
+    #[test]
+
+    fn detail_popup_reaches_a_description_that_does_not_fit() {
+
+        let mut app = app_with_detail(fixture());
+
+        // The fixture description is far taller than the popup, so its opening
+        // line sits below the fold. That is exactly the case the old layout
+        // clipped with no way to reach the rest.
+        let top = render_popup(&app, 90, 28);
+
+        assert!(!top.contains("第1行"), "简介开头本应在首屏之下：\n{top}");
+
+        let mut found = false;
+
+        for offset in 1..=60 {
+
+            app.bykc.detail_scroll = offset;
+
+            if render_popup(&app, 90, 28).contains("第1行") {
+
+                found = true;
+
+                break;
+            }
+        }
+
+        assert!(found, "滚动后应能看到简介开头");
+
+        // At the bottom the last line must also be reachable.
+        app.bykc.detail_scroll = 60;
+
+        assert!(
+            render_popup(&app, 90, 28).contains("已滚动60行"),
+            "滚动后应提示偏移量"
+        );
     }
 }
