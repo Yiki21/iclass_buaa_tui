@@ -52,6 +52,10 @@ pub(crate) enum CommandKind {
     Clockin(ClockinArgs),
     /// Submit a sunshine clock-in. Requires --yes and a photo.
     ClockinSubmit(ClockinSubmitArgs),
+    /// List courses awaiting evaluation (评教).
+    Eval(EvalArgs),
+    /// Submit course evaluations. Requires --yes; answers are recorded as yours.
+    EvalSubmit(EvalSubmitArgs),
     /// Show today's cached academic courses and next class.
     Today(TodayArgs),
     /// Show exam arrangements for one academic term.
@@ -138,6 +142,48 @@ pub(crate) struct PlanArgs {
     /// Only print today's evaluation without attempting sign.
     #[arg(long)]
     pub(crate) dry_run:     bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct EvalArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Show the questionnaire of this task id and the answers that would be sent.
+    #[arg(long)]
+    pub(crate) show:        Option<String>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct EvalSubmitArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Only submit for this task id. Repeated flags submit several.
+    #[arg(long = "task")]
+    pub(crate) tasks:       Vec<String>,
+    /// Submit for every unevaluated course.
+    #[arg(long, conflicts_with = "tasks")]
+    pub(crate) all:         bool,
+    /// Confirm submission.
+    ///
+    /// Why:
+    /// This records answers in the user's name without them reading the
+    /// questions, and the result is permanent. Requiring an explicit flag means
+    /// it can never happen by accident.
+    #[arg(long)]
+    pub(crate) yes:         bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,

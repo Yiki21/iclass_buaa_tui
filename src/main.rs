@@ -6,6 +6,7 @@ mod bykc;
 mod cgyy;
 mod cli;
 mod constants;
+mod evaluation;
 mod iclass;
 mod libbook;
 mod logging;
