@@ -208,6 +208,29 @@ impl ScheduleState {
         self.current_schedule()?.entries.get(self.selected_entry)
     }
 
+    /// Portal label for the schedule tab, based on the cached snapshot.
+    ///
+    /// Why:
+    /// Undergraduate BYXT and graduate GSMIS are different systems. Until a
+    /// snapshot exists the portal is unknown, so the tab stays neutral instead
+    /// of claiming to be the graduate timetable.
+
+    pub fn portal_label(&self) -> &'static str {
+
+        self.semesters
+            .first()
+            .map(|semester| semester.portal.label())
+            .unwrap_or("课表")
+    }
+
+    pub fn portal(&self) -> crate::schedule::PortalKind {
+
+        self.semesters
+            .first()
+            .map(|semester| semester.portal)
+            .unwrap_or_default()
+    }
+
     pub fn visible_entries(&self) -> Vec<(usize, &ScheduleEntry)> {
 
         let query = self.query.trim();
@@ -726,6 +749,13 @@ pub struct EventEntry {
 pub struct App {
     pub screen:                Screen,
     pub active_tab:            WorkspaceTab,
+    /// Frame counter advanced on every tick.
+    ///
+    /// Why:
+    /// Animated indicators need a clock. Deriving them from this counter means
+    /// no widget keeps its own timer, and animation stays in step with the
+    /// redraw the event loop already performs.
+    pub tick:                  u64,
     pub login:                 LoginForm,
     pub session:               Option<Session>,
     pub courses:               Vec<CourseDetailItem>,
@@ -762,6 +792,7 @@ impl Default for App {
         Self {
             screen:                Screen::Login,
             active_tab:            WorkspaceTab::IClass,
+            tick:                  0,
             login:                 LoginForm::default(),
             session:               None,
             courses:               Vec::new(),
@@ -952,6 +983,17 @@ impl App {
         self.info("已清空事件日志");
     }
 
+    /// Reports whether a text field currently owns the keystroke.
+    ///
+    /// Why:
+    /// Global single-letter shortcuts must not steal characters from the login
+    /// form or the course search box, or typing a course name would trigger them.
+
+    pub fn is_text_input_active(&self) -> bool {
+
+        (self.screen == Screen::Login && !self.busy) || self.schedule.filtering
+    }
+
     pub fn copy_latest_error_to_clipboard(&mut self) {
 
         let Some(entry) = self
@@ -1088,6 +1130,22 @@ impl App {
             return;
         }
 
+        // The event block on every screen advertises `C` and `y`. They used to
+        // work only once the popup was open, which contradicted that hint.
+        if key.code == KeyCode::Char('C') && !self.is_text_input_active() {
+
+            self.clear_event_log();
+
+            return;
+        }
+
+        if key.code == KeyCode::Char('y') && !self.is_text_input_active() {
+
+            self.copy_latest_error_to_clipboard();
+
+            return;
+        }
+
         if self.screen == Screen::Workspace
             && self.active_tab == WorkspaceTab::Bykc
             && self.bykc.show_detail_popup
@@ -1111,6 +1169,8 @@ impl App {
     }
 
     pub fn handle_tick(&mut self) {
+
+        self.tick = self.tick.wrapping_add(1);
 
         if !self.qr_refreshing || self.active_tab != WorkspaceTab::IClass {
 

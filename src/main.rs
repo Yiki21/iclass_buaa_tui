@@ -10,6 +10,7 @@ mod logging;
 mod model;
 mod schedule;
 mod tasks;
+mod theme;
 mod ui;
 
 use std::{env, io, time::Duration};

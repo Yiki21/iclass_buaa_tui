@@ -87,6 +87,38 @@ pub struct SemesterSchedule {
     pub weeks:      Vec<Week>,
     pub schedules:  BTreeMap<usize, WeeklySchedule>,
     pub updated_at: String,
+    /// Which academic portal supplied this snapshot.
+    ///
+    /// Why:
+    /// Undergraduate BYXT and graduate GSMIS are different systems with the
+    /// same shape of data. The UI needs to say which one it is showing, and the
+    /// import path needs to stop guessing when one of them is unavailable.
+    #[serde(default)]
+    pub portal:     PortalKind,
+}
+
+/// Academic portal that a snapshot came from.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+
+pub enum PortalKind {
+    /// Which portal this account uses has not been established yet.
+    #[default]
+    Unknown,
+    /// Undergraduate portal, BYXT.
+    Undergraduate,
+    /// Graduate portal, GSMIS "我的课表".
+    Graduate,
+}
+
+impl PortalKind {
+    pub fn label(self) -> &'static str {
+
+        match self {
+            Self::Unknown => "未知门户",
+            Self::Undergraduate => "本科课表",
+            Self::Graduate => "研究生课表",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -112,8 +144,37 @@ impl SemesterSchedule {
 }
 
 impl IClassApi {
-    /// Imports every week of one academic term, preferring the undergraduate
-    /// portal and falling back to GSMIS for graduate accounts.
+    /// Detects which academic portal this account uses.
+    ///
+    /// Why:
+    /// Undergraduate BYXT and graduate GSMIS serve different data. The previous
+    /// probe reduced this to a single boolean, so an undergraduate whose BYXT
+    /// session merely needed SSO activation was silently treated as a graduate
+    /// and sent to GSMIS, which then failed with `HTTP 401`.
+    ///
+    /// How:
+    /// Ask BYXT for the current user. A JSON answer means undergraduate. A
+    /// redirect to SSO means the account may still be undergraduate but the
+    /// BYXT session is not active, which is reported separately rather than
+    /// being confused with "this is a graduate account".
+
+    pub async fn detect_portal(&self) -> PortalKind {
+
+        match self
+            .schedule_get(&schedule_url(self.use_vpn, BYXT_CURRENT_USER_URL))
+            .await
+        {
+            Ok(response) => classify_portal_probe(&response),
+            Err(_) => PortalKind::Unknown,
+        }
+    }
+
+    /// Imports every week of one academic term from the account's own portal.
+    ///
+    /// How:
+    /// Detect the portal first. Only fall back to GSMIS when BYXT genuinely
+    /// looks unavailable and the account is not known to be undergraduate, so a
+    /// failed undergraduate probe no longer reports itself as a graduate error.
 
     pub async fn import_semester_schedule(
         &self,
@@ -121,46 +182,36 @@ impl IClassApi {
         requested_term: Option<&str>,
     ) -> Result<SemesterSchedule> {
 
-        if self.undergraduate_portal_ready().await.unwrap_or(false) {
+        let portal = self.detect_portal().await;
 
-            return self
-                .import_undergraduate_schedule(requested_term)
-                .await
-                .context("本科课表导入失败");
+        if portal != PortalKind::Graduate {
+
+            match self.import_undergraduate_schedule(requested_term).await {
+                Ok(mut schedule) => {
+
+                    schedule.portal = PortalKind::Undergraduate;
+
+                    return Ok(schedule);
+                }
+                Err(undergraduate_error) => {
+
+                    // The undergraduate portal answered but the request failed.
+                    // Do not silently relabel this as a graduate problem.
+                    return Err(undergraduate_error)
+                        .context(format!("{}导入失败", PortalKind::Undergraduate.label()));
+                }
+            }
         }
 
         self.import_graduate_schedule(requested_term)
             .await
-            .context("研究生课表导入失败")
-    }
+            .map(|mut schedule| {
 
-    async fn undergraduate_portal_ready(&self) -> Result<bool> {
+                schedule.portal = PortalKind::Graduate;
 
-        let response = self
-            .schedule_get(&schedule_url(self.use_vpn, BYXT_CURRENT_USER_URL))
-            .await?;
-
-        if response.status != 200 || looks_like_sso_response(&response) {
-
-            return Ok(false);
-        }
-
-        let body = response.body.trim_start();
-
-        if !body.starts_with(['{', '[']) {
-
-            return Ok(false);
-        }
-
-        let value: Value = match serde_json::from_str(body) {
-            Ok(value) => value,
-            Err(_) => return Ok(false),
-        };
-
-        Ok(value
-            .get("code")
-            .and_then(scalar_string)
-            .is_none_or(|code| code == "0"))
+                schedule
+            })
+            .context(format!("{}导入失败", PortalKind::Graduate.label()))
     }
 
     async fn import_undergraduate_schedule(
@@ -241,6 +292,7 @@ impl IClassApi {
             weeks,
             schedules,
             updated_at: now_text(),
+            portal: PortalKind::Unknown,
         })
     }
 
@@ -290,6 +342,7 @@ impl IClassApi {
             weeks,
             schedules,
             updated_at: now_text(),
+            portal: PortalKind::Unknown,
         })
     }
 
@@ -394,6 +447,52 @@ fn ensure_schedule_response(response: &ScheduleHttpResponse, stage: &str) -> Res
     }
 
     Ok(())
+}
+
+/// Classifies a BYXT `currentUser` probe into a portal kind.
+///
+/// Why:
+/// The distinction that matters is "BYXT answers as an undergraduate portal"
+/// versus "BYXT is not usable here". A JSON payload is undergraduate; an SSO
+/// redirect means the session is not activated, which must not be reported as
+/// "this account is a graduate", or undergraduates get routed to GSMIS.
+
+fn classify_portal_probe(response: &ScheduleHttpResponse) -> PortalKind {
+
+    if looks_like_sso_response(response) {
+
+        return PortalKind::Unknown;
+    }
+
+    if !(200..300).contains(&response.status) {
+
+        return PortalKind::Unknown;
+    }
+
+    let body = response.body.trim_start();
+
+    if !body.starts_with(['{', '[']) {
+
+        return PortalKind::Unknown;
+    }
+
+    match serde_json::from_str::<Value>(body) {
+        Ok(value) => {
+
+            if value
+                .get("code")
+                .and_then(scalar_string)
+                .is_none_or(|code| code == "0")
+            {
+
+                PortalKind::Undergraduate
+            } else {
+
+                PortalKind::Unknown
+            }
+        }
+        Err(_) => PortalKind::Unknown,
+    }
 }
 
 fn looks_like_sso_response(response: &ScheduleHttpResponse) -> bool {
@@ -1367,8 +1466,63 @@ fn ics_escape(value: &str) -> String {
 mod tests {
 
     use super::{
-        ScheduleHttpResponse, parse_graduate_schedule, parse_graduate_terms, parse_weekly_schedule,
+        PortalKind, ScheduleHttpResponse, classify_portal_probe, parse_graduate_schedule,
+        parse_graduate_terms, parse_weekly_schedule,
     };
+
+    fn probe(status: u16, final_url: &str, body: &str) -> ScheduleHttpResponse {
+
+        ScheduleHttpResponse {
+            status,
+            final_url: final_url.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+
+    fn portal_probe_reads_json_as_undergraduate() {
+
+        let response = probe(
+            200,
+            "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/api/home/currentUser.do",
+            r#"{"code":"0","datas":{"userId":"22"}}"#,
+        );
+
+        assert_eq!(classify_portal_probe(&response), PortalKind::Undergraduate);
+    }
+
+    #[test]
+
+    fn portal_probe_does_not_call_sso_redirect_a_graduate() {
+
+        // An undergraduate whose BYXT session is not yet activated used to be
+        // routed to GSMIS and fail with HTTP 401 labelled as a graduate error.
+        let response = probe(
+            401,
+            "https://d.buaa.edu.cn/https/enc/login?service=byxt",
+            "<html><input name=\"execution\" value=\"e1s1\"></html>",
+        );
+
+        assert_eq!(classify_portal_probe(&response), PortalKind::Unknown);
+
+        let plain_401 = probe(401, "https://byxt.buaa.edu.cn/x", "");
+
+        assert_eq!(classify_portal_probe(&plain_401), PortalKind::Unknown);
+    }
+
+    #[test]
+
+    fn portal_probe_treats_html_as_unknown() {
+
+        let response = probe(
+            200,
+            "https://byxt.buaa.edu.cn/x",
+            "<!DOCTYPE html><html></html>",
+        );
+
+        assert_eq!(classify_portal_probe(&response), PortalKind::Unknown);
+    }
 
     #[test]
 

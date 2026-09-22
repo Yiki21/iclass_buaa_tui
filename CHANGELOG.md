@@ -19,8 +19,16 @@
 
 - 直连和 WebVPN 登录统一走 SSO 会话；iClass 登录统一通过 MyCenter 跳转解析临时 `loginName`。
 
+### 界面
+
+- 改为 24 位真彩色配色，标题和进度条使用渐变色，整体更接近 btop 的观感。
+- 动画只用于表示真实活动：导入课表、加载课程、登录处理中会显示旋转指示，空闲时界面保持静止。
+- 今日课程页新增签到进度条；成绩按分段着色，低分与高分一眼可辨。
+
 ### 修复
 
+- 修复课表门户判断错误：此前把“BYXT 会话未激活”当成“研究生账号”，导致本科生按 `u` 导入课表时被送到 GSMIS 并报 `研究生课表导入失败: HTTP 401`。现在先探测门户，探测不出时不会冒充研究生课表。
+- 修复主页事件日志区提示 `C 清空` 与 `y 复制最近错误` 无法使用的问题：这两个快捷键此前只在日志弹窗打开后生效。现在任何界面都可使用，输入账号密码或课程搜索时不会误触发。
 - 修复 WebVPN 模式下 iClass 登录失败并返回 `ERRCODE=106 / 用户不存在` 的问题。
 - 原因：旧流程在 SSO 登录后直接把学号作为 `app/user/login.action` 的 `phone` 参数传给 iClass；真实网页会先进入 WebVPN CAS service，再访问 iClass `jumpMyCenter`，从 302 `Location` 中获取临时 `loginName`，最后用 `loginName` 调 iClass app 登录接口。
 - 修复方式：VPN 登录入口改为浏览器实际使用的 `service=https://d.buaa.edu.cn/login?cas_login=true`；HTTP 客户端共享同一个 cookie jar；iClass 登录前用 no-redirect client 逐跳处理 `jumpMyCenter` 的 302 并解析 `loginName`。
