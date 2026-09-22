@@ -1511,9 +1511,10 @@ fn diagnose_login_error(
         LoginFailureKind::Unreachable => {
 
             format!(
-                "登录失败：无法建立到 iClass 服务器的加密连接，阶段: \
-                 {stage}。该服务使用校内地址（iclass.buaa.edu.cn 解析到 \
-                 10.x），当前网络访问不到它，或它在 TLS 握手阶段直接断开连接。"
+                "登录失败：到 iClass 的加密连接在 TLS 握手阶段就被断开，阶段: \
+                 {stage}。最常见的原因是本机代理 / VPN（Clash、Mihomo、Surge \
+                 等）把校内网段也接管了：iclass.buaa.edu.cn 解析到 10.x \
+                 校内地址，本应直连。请把这些网段设为直连后重试。"
             )
         }
         LoginFailureKind::Captcha => "登录失败：当前需要验证码".to_string(),
@@ -1631,9 +1632,12 @@ fn login_suggestions(kind: LoginFailureKind) -> Vec<String> {
         LoginFailureKind::Unreachable => {
 
             vec![
-                "确认已接入校园网；iclass.buaa.edu.cn 是校内地址，校外无法直连".to_string(),
-                "在校外或访客网络下改用在 WebVPN 模式下登录".to_string(),
-                "用 `doctor` 检查各上游服务的连通性".to_string(),
+                "检查本机代理 / VPN 是否把校内网段也走了代理（Clash / Mihomo 的 tun 模式常见）"
+                    .to_string(),
+                "把 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16 与 *.buaa.edu.cn 设为直连"
+                    .to_string(),
+                "用 `ip route get 10.20.11.166` 看是否走到了 Mihomo / tun0 这类代理网卡"
+                    .to_string(),
             ]
         }
         LoginFailureKind::Timeout | LoginFailureKind::Network => {
@@ -1824,9 +1828,11 @@ fn doctor_suggestion(
             // The advice has to account for WebVPN itself being unreachable:
             // telling someone to connect to it is useless when the check for it
             // also failed, which is the common case off campus.
-            return "连接失败：该校内地址当前不可达。若在校园网内仍失败，\
-                    说明服务端在维护或限制了来源；若不在校园网，WebVPN \
-                    本身通常也不可达，需要先接入校园网（或学校提供的其他入口）。"
+            // Campus hosts are normally reachable directly from the campus
+            // network, so a connection failure here usually means a local proxy
+            // captured the campus ranges rather than the host being down.
+            return "连接失败：校内地址通常在校园网内可直连，请检查本机代理 / VPN 是否把 \
+                    10.0.0.0/8 等校内网段也走了代理。"
                 .to_string();
         }
 

@@ -18,6 +18,8 @@
 
 ### 修复
 
+- 修正上一版对「TLS 握手被断开」的解释：真正原因是**本机代理 / VPN 把校内网段也接管了**，不是校内地址在校外不可达、也不是改用 WebVPN 能解决。实测同一台机器上走代理时 `iclass.buaa.edu.cn:8346` 连接被断开，绕过代理后立即返回 302。错误信息与 `doctor` 建议现在直接指向代理绕过设置（`ip route get 10.20.11.166` 可确认是否走到了 Mihomo / tun0）。
+
 - **Tab 键切不到全部页签**：`switch_workspace_tab` 里还留着一份写死的三个页签数组，所以顶栏能看到七个页签，但用 `tab` / `shift+tab` 只能在课表 / 签到 / 博雅之间循环。现在改为从 `WorkspaceTab::ALL` 生成，并加了遍历一整轮的回归测试。
 - **研讨室在 VPN 模式下报「未获取到研讨室 SSO Token」**：`sso/manageLogin` 与 `api/login` 被错误地走了 WebVPN（`d.buaa.edu.cn/...`），而 `sso_buaa_zhjs_token` 是投给 `cgyy.buaa.edu.cn` 的，于是既拿不到 cookie 也找不到它。现在与上游实现一致：这两个握手请求始终直连，cookie 也从直连地址读取。设置 `ICLASS_CGYY_DEBUG=1` 可打印实际存在的 cookie 名称。
 - **登录失败信息不再误导**：iClass 使用校内地址（`iclass.buaa.edu.cn` 解析到 `10.x`），校外网络会在 TLS 握手阶段被直接断开。此前这种情况只报「网络异常」并当作可重试；现在单独识别为「无法建立加密连接」且不再重试，并明确提示需要校园网或改用 WebVPN。
