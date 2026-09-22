@@ -1821,7 +1821,13 @@ fn doctor_suggestion(
 
         if error.is_connect() {
 
-            return "连接失败，若在校外请先连接 WebVPN".to_string();
+            // The advice has to account for WebVPN itself being unreachable:
+            // telling someone to connect to it is useless when the check for it
+            // also failed, which is the common case off campus.
+            return "连接失败：该校内地址当前不可达。若在校园网内仍失败，\
+                    说明服务端在维护或限制了来源；若不在校园网，WebVPN \
+                    本身通常也不可达，需要先接入校园网（或学校提供的其他入口）。"
+                .to_string();
         }
 
         return "请求失败，建议稍后重试并保留诊断输出".to_string();
