@@ -47,6 +47,8 @@ pub struct SolvedCaptcha {
     pub point_json_data:      String,
     pub point_json:           String,
     pub captcha_verification: String,
+    /// Challenge token, echoed back to the verify endpoint.
+    pub token:                String,
 }
 
 /// A decoded image reduced to what the solver needs.
@@ -427,6 +429,7 @@ pub fn solve(challenge: &CaptchaChallenge) -> Result<SolvedCaptcha> {
         point_json_data,
         point_json,
         captcha_verification,
+        token: challenge.token.clone(),
     })
 }
 

@@ -5,8 +5,12 @@
 //! gates submission behind a slider captcha. Both are handled here so the rest
 //! of the app only deals with rooms and times.
 
+mod api;
 mod captcha;
 mod signer;
 
+pub use api::{
+    DayInfo, Order, ReservationRequest, SlotStatus, SpaceAvailability, TimeSlot, VenueSite,
+};
 pub use captcha::{CaptchaChallenge, SolvedCaptcha, solve as solve_captcha};
 pub use signer::{APP_KEY, add_nocache, sign, sign_payload};
