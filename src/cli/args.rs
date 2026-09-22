@@ -42,6 +42,12 @@ pub(crate) enum CommandKind {
     VenueReserve(VenueReserveArgs),
     /// List and optionally cancel your seminar-room reservations.
     VenueOrders(VenueOrdersArgs),
+    /// List libraries and their free seats for a day.
+    Seats(SeatArgs),
+    /// Reserve a library seat. Requires --yes; this claims a real seat.
+    SeatBook(SeatBookArgs),
+    /// List and optionally cancel your library seat reservations.
+    SeatOrders(SeatOrdersArgs),
     /// Show today's cached academic courses and next class.
     Today(TodayArgs),
     /// Show exam arrangements for one academic term.
@@ -128,6 +134,76 @@ pub(crate) struct PlanArgs {
     /// Only print today's evaluation without attempting sign.
     #[arg(long)]
     pub(crate) dry_run:     bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct SeatArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Also list the areas of this library id.
+    #[arg(long)]
+    pub(crate) library:     Option<String>,
+    /// Date in YYYY-MM-DD format. Defaults to today.
+    #[arg(long)]
+    pub(crate) date:        Option<String>,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct SeatBookArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Area id from `seats --library`.
+    #[arg(long)]
+    pub(crate) area:        String,
+    /// Seat id from `seats --library`.
+    #[arg(long)]
+    pub(crate) seat:        String,
+    /// Date in YYYY-MM-DD format.
+    #[arg(long)]
+    pub(crate) date:        String,
+    /// Time segment id. Defaults to the first the service offers.
+    #[arg(long)]
+    pub(crate) segment:     Option<String>,
+    /// Confirm the reservation. Without this the command only previews.
+    ///
+    /// Why:
+    /// A seat is a shared, finite resource. Requiring an explicit flag means a
+    /// mistyped command cannot take one.
+    #[arg(long)]
+    pub(crate) yes:         bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct SeatOrdersArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Cancel this booking id. Requires --yes.
+    #[arg(long)]
+    pub(crate) cancel:      Option<String>,
+    /// Confirm the cancellation.
+    #[arg(long)]
+    pub(crate) yes:         bool,
+    /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
     /// Print structured login diagnostics on login failure.
     #[arg(long)]
     pub(crate) debug_login: bool,

@@ -7,6 +7,7 @@ mod cgyy;
 mod cli;
 mod constants;
 mod iclass;
+mod libbook;
 mod logging;
 mod model;
 mod notify;

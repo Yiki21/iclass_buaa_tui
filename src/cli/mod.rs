@@ -5,6 +5,7 @@ mod autologin;
 mod config;
 mod core;
 mod planner;
+mod seat;
 mod venue;
 
 use std::ffi::OsString;
@@ -48,6 +49,9 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::VenueSlots(args) => venue::venue_slots_command(args).await,
         CommandKind::VenueReserve(args) => venue::venue_reserve_command(args).await,
         CommandKind::VenueOrders(args) => venue::venue_orders_command(args).await,
+        CommandKind::Seats(args) => seat::seats_command(args).await,
+        CommandKind::SeatBook(args) => seat::seat_book_command(args).await,
+        CommandKind::SeatOrders(args) => seat::seat_orders_command(args).await,
         CommandKind::Today(args) => planner::today_command(args).await,
         CommandKind::Exams(args) => planner::exams_command(args).await,
         CommandKind::Grades(args) => planner::grades_command(args).await,

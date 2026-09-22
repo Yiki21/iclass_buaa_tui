@@ -132,7 +132,7 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " Controll Your Campus Life In Terminal",
+            " 在终端里掌控你的校园生活",
             theme::subtitle_style(),
         ))),
         title,

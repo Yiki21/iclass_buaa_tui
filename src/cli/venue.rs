@@ -21,7 +21,10 @@ use super::config::{AutomationConfig, load_config};
 /// that the planner's shared helper also prepares. Logging in directly keeps
 /// the dependency surface small and mirrors how the diagnostic is reported.
 
-async fn authenticated_api(config: &AutomationConfig, debug_login: bool) -> Result<IClassApi> {
+pub(crate) async fn authenticated_api(
+    config: &AutomationConfig,
+    debug_login: bool,
+) -> Result<IClassApi> {
 
     let api = IClassApi::new(config.use_vpn)?;
 
