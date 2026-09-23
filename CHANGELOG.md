@@ -1,8 +1,8 @@
 # ChangeLog
 
-## 0.8.1
+## 0.8.2
 
-修复 0.8.0 发布构建的 CI Rust 工具链不一致问题：仓库使用 nightly-only 的编译参数和 Rustfmt 配置，质量门禁与发布构建现在统一固定到 `nightly-2026-09-21`。
+修复发布构建在 GitHub runner 上使用本机专用 linker 参数失败的问题：移除 `.cargo/config.toml` 中的 `--ld-path=wild` 和 `-Zshare-generics`，统一使用 runner 默认 linker；质量门禁与发布构建固定使用 `nightly-2026-09-21`。
 
 ## 0.8.0
 
