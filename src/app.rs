@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use qrcode::{EcLevel, QrCode, render::svg};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::ListState;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -33,13 +34,31 @@ use crate::tasks::AssignmentItem;
 
 const MAX_EVENT_LOG_ENTRIES: usize = 8;
 
+#[cfg(test)]
+#[path = "app/regression_tests.rs"]
+mod regression_tests;
+
+#[path = "app/venue_form.rs"]
+mod venue_form;
+
+pub use venue_form::VenueForm;
+
+#[path = "app/operations.rs"]
+mod operations;
+
+use operations::TaskSender;
+
 #[derive(Clone, Debug)]
 
 pub enum AsyncEvent {
+    Scoped {
+        generation: u64,
+        event:      Box<AsyncEvent>,
+    },
     Login(Result<LoginSuccess, LoginFailure>),
     LoginCaptcha(Result<PendingCaptchaLogin, String>),
     Refresh(Result<Vec<CourseDetailItem>, String>),
-    Sign(Result<SignOutcome, String>),
+    Sign(String, Result<SignOutcome, String>),
     BykcSync(Box<Result<BykcSyncSuccess, String>>),
     ScheduleImport(Result<SemesterSchedule, String>),
     Exams(Result<Vec<ExamItem>, String>),
@@ -51,7 +70,7 @@ pub enum AsyncEvent {
     VersionCheck(Result<VersionInfo, String>),
     Doctor(Result<DoctorReport, String>),
     Venues(Result<Vec<crate::cgyy::VenueSite>, String>),
-    VenueDay(Result<crate::cgyy::DayInfo, String>),
+    VenueDay(u64, Result<crate::cgyy::DayInfo, String>),
     VenueOrders(Result<Vec<crate::cgyy::Order>, String>),
     SeatLibraries(Result<Vec<crate::libbook::Library>, String>),
     SeatAreas(Result<Vec<crate::libbook::Area>, String>),
@@ -61,9 +80,18 @@ pub enum AsyncEvent {
     ClockinOverview(Result<ClockinOverview, String>),
     ClockinRecords(Result<Vec<crate::ygdk::Record>, String>),
     EvalTasks(Result<Vec<crate::evaluation::EvaluationTask>, String>),
-    EvalQuestionnaire(Result<crate::evaluation::Questionnaire, String>),
+    EvalQuestionnaire(String, Result<crate::evaluation::Questionnaire, String>),
+    Evaluations(Result<Vec<EvaluationCompletion>, String>),
     /// A write finished; the message is shown to the user either way.
     Write(Result<String, String>),
+}
+
+#[derive(Clone, Debug)]
+
+pub struct EvaluationCompletion {
+    pub rwid:   String,
+    pub course: String,
+    pub result: Result<(), String>,
 }
 
 /// Everything the clockin tab shows about one category.
@@ -398,6 +426,21 @@ impl ScheduleState {
     }
 
     pub fn move_entry(&mut self, delta: isize) {
+
+        let flat_len = match self.view {
+            CourseView::Exams => Some(self.exams.len()),
+            CourseView::Grades => Some(self.grades.len()),
+            CourseView::Classrooms => Some(self.classrooms.len()),
+            CourseView::Tasks => Some(self.tasks.len()),
+            _ => None,
+        };
+
+        if let Some(len) = flat_len {
+
+            self.selected_entry = clamp_step(self.selected_entry, len, delta);
+
+            return;
+        }
 
         let visible = match self.view {
             CourseView::Today => self.today_entries(),
@@ -902,26 +945,31 @@ pub fn format_remaining(remaining: chrono::Duration) -> String {
 #[derive(Clone, Debug, Default)]
 
 pub struct VenueState {
-    pub sites:         Vec<crate::cgyy::VenueSite>,
-    pub selected:      usize,
-    pub loading:       bool,
-    pub loaded:        bool,
+    pub sites:               Vec<crate::cgyy::VenueSite>,
+    pub selected:            usize,
+    pub loading:             bool,
+    pub loaded:              bool,
     /// Availability for the selected room, loaded on demand.
-    pub day:           Option<crate::cgyy::DayInfo>,
-    pub day_date:      String,
-    pub day_loading:   bool,
-    pub orders:        Vec<crate::cgyy::Order>,
-    pub orders_loaded: bool,
+    pub day:                 Option<crate::cgyy::DayInfo>,
+    pub day_date:            String,
+    pub day_loading:         bool,
+    pub day_request:         u64,
+    pub orders:              Vec<crate::cgyy::Order>,
+    pub orders_loaded:       bool,
     /// Slot ids selected in the day view, in click order.
-    pub chosen_slots:  Vec<i64>,
-    pub selected_slot: usize,
+    pub chosen_slots:        Vec<i64>,
+    pub selected_slot:       usize,
+    pub selected_space:      usize,
+    pub form:                Option<VenueForm>,
+    pub show_orders:         bool,
+    pub pending_reservation: Option<(crate::cgyy::ReservationRequest, String)>,
     /// Reservation form values, edited in the TUI.
-    pub phone:         String,
-    pub theme:         String,
-    pub purpose:       i64,
-    pub joiners:       i64,
+    pub phone:               String,
+    pub theme:               String,
+    pub purpose:             i64,
+    pub joiners:             i64,
     /// A write waiting for confirmation.
-    pub pending:       Option<PendingWrite>,
+    pub pending:             Option<PendingWrite>,
 }
 
 /// Library seat tab state.
@@ -973,6 +1021,7 @@ pub struct EvalState {
     pub questionnaire_task: Option<String>,
     pub show_questionnaire: bool,
     pub pending:            Option<PendingWrite>,
+    pub submitting:         bool,
 }
 
 /// A write awaiting explicit confirmation.
@@ -1089,6 +1138,8 @@ pub struct App {
     /// that one-way flow intact instead of threading a collector through every
     /// render function.
     pub hotspots:              RefCell<Vec<Hotspot>>,
+    pub list_state:            RefCell<ListState>,
+    pub list_page_size:        std::cell::Cell<usize>,
     /// Frame counter advanced on every tick.
     ///
     /// Why:
@@ -1098,6 +1149,9 @@ pub struct App {
     pub tick:                  u64,
     pub login:                 LoginForm,
     pub session:               Option<Session>,
+    session_generation:        u64,
+    venue_api:                 std::sync::Arc<tokio::sync::Mutex<Option<IClassApi>>>,
+    read_jobs:                 std::sync::Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
     pub courses:               Vec<CourseDetailItem>,
     pub week_groups:           Vec<WeekGroup>,
     pub selected_week:         usize,
@@ -1111,6 +1165,7 @@ pub struct App {
     pub event_log:             Vec<EventEntry>,
     pub status:                String,
     pub busy:                  bool,
+    pub write_in_flight:       bool,
     pub iclass_loading:        bool,
     pub should_quit:           bool,
     pub show_help:             bool,
@@ -1140,8 +1195,13 @@ impl Default for App {
             active_tab:            WorkspaceTab::IClass,
             tick:                  0,
             hotspots:              RefCell::new(Vec::new()),
+            list_state:            RefCell::new(ListState::default()),
+            list_page_size:        std::cell::Cell::new(10),
             login:                 LoginForm::default(),
             session:               None,
+            session_generation:    0,
+            venue_api:             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            read_jobs:             Default::default(),
             courses:               Vec::new(),
             week_groups:           Vec::new(),
             selected_week:         0,
@@ -1159,6 +1219,7 @@ impl Default for App {
             status:                "输入统一认证账号和密码，选择访问模式后按 enter 登录"
                 .to_string(),
             busy:                  false,
+            write_in_flight:       false,
             iclass_loading:        false,
             should_quit:           false,
             show_help:             false,
@@ -1366,7 +1427,9 @@ impl App {
 
     pub fn is_text_input_active(&self) -> bool {
 
-        (self.screen == Screen::Login && !self.busy) || self.schedule.filtering
+        (self.screen == Screen::Login && !self.busy)
+            || self.schedule.filtering
+            || self.venue.form.is_some()
     }
 
     pub fn copy_latest_error_to_clipboard(&mut self) {
@@ -1453,8 +1516,8 @@ impl App {
         if self.pending_write().is_some() {
 
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.confirm_pending_write(tx),
-                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Char('y') => self.confirm_pending_write(tx),
+                KeyCode::Enter | KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
 
                     self.cancel_pending_write();
 
@@ -1462,6 +1525,23 @@ impl App {
                 }
                 _ => {}
             }
+
+            return;
+        }
+
+        if self.venue.form.is_some() {
+
+            self.handle_venue_form_key(key, tx);
+
+            return;
+        }
+
+        if self.screen == Screen::Workspace
+            && self.active_tab == WorkspaceTab::Venue
+            && key.code == KeyCode::Char('e')
+        {
+
+            self.open_venue_form();
 
             return;
         }
@@ -1516,7 +1596,7 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Char('e') {
+        if key.code == KeyCode::Char('e') && !self.is_text_input_active() {
 
             self.show_event_log = true;
 
@@ -1792,6 +1872,12 @@ impl App {
                 }
             }
             WorkspaceTab::Venue => {
+
+                if self.venue.show_orders {
+
+                    return self.venue.orders.len();
+                }
+
                 match self.venue.day.as_ref() {
                     Some(day) => day.time_slots.len(),
                     None => self.venue.sites.len(),
@@ -1826,7 +1912,19 @@ impl App {
         }
 
         match self.active_tab {
-            WorkspaceTab::Schedule => self.schedule.selected_entry = index,
+            WorkspaceTab::Schedule => {
+
+                self.schedule.selected_entry = if self.schedule.view == CourseView::Today {
+
+                    self.schedule
+                        .today_entries()
+                        .get(index)
+                        .map_or(0, |(id, _)| *id)
+                } else {
+
+                    index
+                };
+            }
             WorkspaceTab::IClass => self.selected = index,
             WorkspaceTab::Bykc => {
                 match self.bykc.view {
@@ -1835,7 +1933,7 @@ impl App {
                 }
             }
             WorkspaceTab::Venue => {
-                if self.venue.day.is_some() {
+                if self.venue.day.is_some() && !self.venue.show_orders {
 
                     self.venue.selected_slot = index;
                 } else {
@@ -1872,7 +1970,7 @@ impl App {
 
     pub fn handle_mouse(&mut self, event: MouseEvent, tx: &UnboundedSender<AsyncEvent>) {
 
-        if self.busy {
+        if self.busy || self.pending_write().is_some() || self.venue.form.is_some() {
 
             return;
         }
@@ -1919,8 +2017,8 @@ impl App {
         }
 
         match event.kind {
-            MouseEventKind::ScrollDown => self.scroll_active(-1, tx),
-            MouseEventKind::ScrollUp => self.scroll_active(1, tx),
+            MouseEventKind::ScrollDown => self.scroll_active(3, tx),
+            MouseEventKind::ScrollUp => self.scroll_active(-3, tx),
             MouseEventKind::Down(MouseButton::Left) => {
 
                 let Some(action) = self.hotspot_at(event.column, event.row) else {
@@ -1996,16 +2094,30 @@ impl App {
             }
             WorkspaceTab::Bykc => self.bykc.move_selection(delta),
             WorkspaceTab::Venue => {
+                if self.venue.show_orders {
 
-                let len = self.venue.sites.len();
+                    self.venue.selected =
+                        clamp_step(self.venue.selected, self.venue.orders.len(), delta);
+                } else if let Some(day) = &self.venue.day {
 
-                self.venue.selected = clamp_step(self.venue.selected, len, delta);
+                    self.venue.selected_slot =
+                        clamp_step(self.venue.selected_slot, day.time_slots.len(), delta);
+                } else {
+
+                    self.venue.selected =
+                        clamp_step(self.venue.selected, self.venue.sites.len(), delta);
+                }
             }
             WorkspaceTab::Seat => {
+                if self.seat.show_seats {
 
-                let len = self.seat.libraries.len();
+                    self.seat.selected_seat =
+                        clamp_step(self.seat.selected_seat, self.seat.seats.len(), delta);
+                } else {
 
-                self.seat.selected = clamp_step(self.seat.selected, len, delta);
+                    self.seat.selected =
+                        clamp_step(self.seat.selected, self.seat.libraries.len(), delta);
+                }
             }
             WorkspaceTab::Clockin => {
                 if let Some(overview) = self.clockin.overview.as_mut() {
@@ -2077,6 +2189,12 @@ impl App {
     pub fn handle_async(&mut self, event: AsyncEvent, tx: &UnboundedSender<AsyncEvent>) {
 
         match event {
+            AsyncEvent::Scoped { generation, event } => {
+                if generation == self.session_generation {
+
+                    self.handle_async(*event, tx);
+                }
+            }
             AsyncEvent::Login(result) => {
 
                 self.busy = false;
@@ -2228,7 +2346,7 @@ impl App {
                     }
                 }
             }
-            AsyncEvent::Sign(result) => {
+            AsyncEvent::Sign(course_sched_id, result) => {
 
                 self.iclass_loading = false;
 
@@ -2244,8 +2362,10 @@ impl App {
                         }
 
                         if outcome.success_like
-                            && let Some(index) = self.selected_course_absolute_index()
-                            && let Some(item) = self.courses.get_mut(index)
+                            && let Some(item) = self
+                                .courses
+                                .iter_mut()
+                                .find(|item| item.course_sched_id == course_sched_id)
                         {
 
                             item.sign_status = "1".to_string();
@@ -2479,7 +2599,12 @@ impl App {
                     Err(error) => self.error(format!("研讨室加载失败: {error}")),
                 }
             }
-            AsyncEvent::VenueDay(result) => {
+            AsyncEvent::VenueDay(request_id, result) => {
+
+                if request_id != self.venue.day_request {
+
+                    return;
+                }
 
                 self.venue.day_loading = false;
 
@@ -2489,6 +2614,12 @@ impl App {
                         let rooms = day.spaces.len();
 
                         self.venue.selected_slot = 0;
+
+                        self.venue.selected_space = 0;
+
+                        self.venue.chosen_slots.clear();
+
+                        self.venue.show_orders = false;
 
                         self.venue.day = Some(day);
 
@@ -2506,6 +2637,8 @@ impl App {
                         self.venue.orders = orders;
 
                         self.venue.orders_loaded = true;
+
+                        self.venue.show_orders = true;
 
                         self.venue.selected = 0;
 
@@ -2700,17 +2833,23 @@ impl App {
                     Err(error) => self.error(format!("待评教列表加载失败: {error}")),
                 }
             }
-            AsyncEvent::EvalQuestionnaire(result) => {
+            AsyncEvent::EvalQuestionnaire(rwid, result) => {
                 match result {
                     Ok(questionnaire) => {
 
                         let questions = questionnaire.questions.len();
 
-                        self.eval.questionnaire_task = self
+                        if self
                             .eval
                             .tasks
                             .get(self.eval.selected)
-                            .map(|task| task.rwid.clone());
+                            .is_none_or(|task| task.rwid != rwid)
+                        {
+
+                            return;
+                        }
+
+                        self.eval.questionnaire_task = Some(rwid);
 
                         self.eval.questionnaire = Some(questionnaire);
 
@@ -2721,7 +2860,49 @@ impl App {
                     Err(error) => self.error(format!("问卷加载失败: {error}")),
                 }
             }
+            AsyncEvent::Evaluations(result) => {
+
+                self.eval.submitting = false;
+
+                match result {
+                    Ok(results) => {
+
+                        let mut succeeded = 0;
+
+                        for completion in results {
+
+                            match completion.result {
+                                Ok(()) => {
+
+                                    if let Some(task) = self
+                                        .eval
+                                        .tasks
+                                        .iter_mut()
+                                        .find(|task| task.rwid == completion.rwid)
+                                    {
+
+                                        task.evaluated = true;
+                                    }
+
+                                    succeeded += 1;
+                                }
+                                Err(error) => {
+                                    self.error(format!("{} 评教未完成: {error}", completion.course))
+                                }
+                            }
+                        }
+
+                        self.info(format!(
+                            "已确认提交 {succeeded} 门评教；未成功的课程仍保留在待评列表"
+                        ));
+                    }
+                    Err(error) => self.error(format!("评教提交失败: {error}")),
+                }
+            }
             AsyncEvent::Write(result) => {
+
+                self.write_in_flight = false;
+
                 match result {
                     Ok(message) => self.success(message),
                     Err(error) => self.error(error),
@@ -2810,6 +2991,30 @@ impl App {
         }
 
         match key.code {
+            KeyCode::PageDown => {
+
+                self.scroll_active(self.list_page_size.get().max(1) as isize, tx);
+
+                return;
+            }
+            KeyCode::PageUp => {
+
+                self.scroll_active(-(self.list_page_size.get().max(1) as isize), tx);
+
+                return;
+            }
+            KeyCode::Home => {
+
+                self.select_list_row(0);
+
+                return;
+            }
+            KeyCode::End => {
+
+                self.select_list_row(self.active_list_len().saturating_sub(1));
+
+                return;
+            }
             KeyCode::Tab => {
 
                 self.switch_workspace_tab(1, tx);
@@ -2842,9 +3047,22 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Left | KeyCode::Char('h')
+                if self.venue.day.is_some() && !self.venue.show_orders =>
+            {
+                self.move_venue_space(-1)
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.venue.day.is_some() && !self.venue.show_orders =>
+            {
+                self.move_venue_space(1)
+            }
             KeyCode::Up | KeyCode::Char('k') => {
 
-                let len = if self.venue.day.is_some() {
+                let len = if self.venue.show_orders {
+
+                    self.venue.orders.len()
+                } else if self.venue.day.is_some() {
 
                     self.venue
                         .day
@@ -2855,7 +3073,7 @@ impl App {
                     self.venue.sites.len()
                 };
 
-                if self.venue.day.is_some() {
+                if self.venue.day.is_some() && !self.venue.show_orders {
 
                     self.venue.selected_slot = clamp_step(self.venue.selected_slot, len, -1);
                 } else {
@@ -2865,7 +3083,10 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
 
-                let len = if self.venue.day.is_some() {
+                let len = if self.venue.show_orders {
+
+                    self.venue.orders.len()
+                } else if self.venue.day.is_some() {
 
                     self.venue
                         .day
@@ -2876,7 +3097,7 @@ impl App {
                     self.venue.sites.len()
                 };
 
-                if self.venue.day.is_some() {
+                if self.venue.day.is_some() && !self.venue.show_orders {
 
                     self.venue.selected_slot = clamp_step(self.venue.selected_slot, len, 1);
                 } else {
@@ -2888,6 +3109,12 @@ impl App {
             // Enter opens the day view for the selected room, or toggles a slot
             // once the day is open.
             KeyCode::Enter | KeyCode::Char('o') => {
+
+                if self.venue.show_orders {
+
+                    return;
+                }
+
                 if self.venue.day.is_some() {
 
                     self.toggle_venue_slot();
@@ -2899,6 +3126,8 @@ impl App {
             // Esc/Backspace is handled above as quit, so the day view is left
             // with `b`.
             KeyCode::Char('b') => {
+
+                self.venue.show_orders = false;
 
                 self.venue.day = None;
 
@@ -3053,6 +3282,19 @@ impl App {
 
         let slot_id = slot.id;
 
+        let available = day
+            .spaces
+            .get(self.venue.selected_space)
+            .and_then(|space| space.slots.iter().find(|status| status.time_id == slot_id))
+            .is_some_and(|status| status.reservable && !status.take_up);
+
+        if !available {
+
+            self.warn("该时段不可预约，请选择其他时段");
+
+            return;
+        }
+
         if let Some(position) = self.venue.chosen_slots.iter().position(|id| *id == slot_id) {
 
             self.venue.chosen_slots.remove(position);
@@ -3065,6 +3307,13 @@ impl App {
     /// Asks for confirmation before reserving.
 
     fn request_venue_reserve(&mut self) {
+
+        if self.write_in_flight {
+
+            self.warn("操作正在提交，请等待结果，勿重复操作");
+
+            return;
+        }
 
         if self.venue.chosen_slots.is_empty() {
 
@@ -3079,6 +3328,32 @@ impl App {
 
             return;
         }
+
+        let Some(day) = self.venue.day.as_ref() else {
+
+            return;
+        };
+
+        let Some(space) = day.spaces.get(self.venue.selected_space) else {
+
+            return;
+        };
+
+        self.venue.pending_reservation = Some((
+            crate::cgyy::ReservationRequest {
+                venue_site_id: day.venue_site_id,
+                date:          day.date.clone(),
+                space_id:      space.space_id,
+                time_ids:      self.venue.chosen_slots.clone(),
+                phone:         self.venue.phone.trim().into(),
+                theme:         self.venue.theme.trim().into(),
+                purpose_type:  self.venue.purpose,
+                joiner_num:    self.venue.joiners.max(1),
+                activity:      "小组讨论".into(),
+                joiners:       String::new(),
+            },
+            space.space_name.clone(),
+        ));
 
         self.venue.pending = Some(PendingWrite::VenueReserve);
     }
@@ -3148,6 +3423,13 @@ impl App {
 
     fn request_eval_submit(&mut self) {
 
+        if self.eval.submitting {
+
+            self.warn("评教正在提交，请等待结果，勿重复操作");
+
+            return;
+        }
+
         let Some(task) = self.eval.tasks.get(self.eval.selected) else {
 
             self.warn("请先按 r 载入待评教列表");
@@ -3163,6 +3445,15 @@ impl App {
     /// Confirms the pending write and starts it.
 
     fn confirm_pending_write(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.write_in_flight || self.eval.submitting {
+
+            self.cancel_pending_write();
+
+            self.warn("操作正在提交，请等待结果");
+
+            return;
+        }
 
         let Some(pending) = self.take_pending() else {
 
@@ -3211,7 +3502,12 @@ impl App {
     fn cancel_pending_write(&mut self) {
 
         match self.active_tab {
-            WorkspaceTab::Venue => self.venue.pending = None,
+            WorkspaceTab::Venue => {
+
+                self.venue.pending = None;
+
+                self.venue.pending_reservation = None;
+            }
             WorkspaceTab::Seat => self.seat.pending = None,
             WorkspaceTab::Clockin => self.clockin.pending = None,
             WorkspaceTab::Eval => self.eval.pending = None,
@@ -3500,7 +3796,7 @@ impl App {
 
             self.info("提交验证码并继续登录...");
 
-            spawn_continue_captcha_login(pending, self.login.captcha.clone(), tx.clone());
+            spawn_continue_captcha_login(pending, self.login.captcha.clone(), self.task_sender(tx));
 
             return;
         }
@@ -3515,7 +3811,7 @@ impl App {
 
         self.info("登录中并拉取课程...");
 
-        spawn_login(input, tx.clone());
+        spawn_login(input, self.task_sender(tx));
     }
 
     fn run_doctor(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -3526,7 +3822,7 @@ impl App {
 
         self.info("执行网络自检中...");
 
-        spawn_doctor(self.login.use_vpn, tx.clone());
+        spawn_doctor(self.login.use_vpn, self.task_sender(tx));
     }
 
     fn persist_remembered_login_status(&self) -> String {
@@ -3561,7 +3857,7 @@ impl App {
 
         self.info("刷新课程中...");
 
-        spawn_refresh(session, tx.clone());
+        spawn_refresh(session, self.task_sender(tx));
     }
 
     fn update_schedule(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -3589,7 +3885,7 @@ impl App {
 
         self.info("正在导入整学期课表...");
 
-        spawn_schedule_import(session, requested_term, tx.clone());
+        spawn_schedule_import(session, requested_term, self.task_sender(tx));
     }
 
     /// Opens the detail panel for the selected assignment.
@@ -3636,17 +3932,20 @@ impl App {
 
         let id = task.id.clone();
 
-        let tx = tx.clone();
+        let tx = self.task_sender(tx);
 
-        tokio::spawn(async move {
+        tx.spawn(|tx| {
 
-            let result = session
-                .api
-                .get_spoc_assignment_detail(&id)
-                .await
-                .map_err(format_anyhow_error);
+            async move {
 
-            let _ = tx.send(AsyncEvent::SpocDetail(id, result));
+                let result = session
+                    .api
+                    .get_spoc_assignment_detail(&id)
+                    .await
+                    .map_err(format_anyhow_error);
+
+                let _ = tx.send(AsyncEvent::SpocDetail(id, result));
+            }
         });
     }
 
@@ -3686,7 +3985,7 @@ impl App {
 
         self.schedule.academic_loading = true;
 
-        spawn_exams(session, term_code, tx.clone());
+        spawn_exams(session, term_code, self.task_sender(tx));
     }
 
     /// The soonest exam within `days`, if any.
@@ -3708,7 +4007,7 @@ impl App {
 
                 let date = exam.exam_date.as_deref()?;
 
-                let parsed = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok()?;
+                let parsed = crate::academic::exam_day(date)?;
 
                 let start = exam
                     .start_time
@@ -3765,7 +4064,7 @@ impl App {
 
         self.info(format!("正在加载 {} 个学期的成绩", term_codes.len()));
 
-        spawn_all_grades(session, term_codes, tx.clone());
+        spawn_all_grades(session, term_codes, self.task_sender(tx));
     }
 
     fn refresh_academic_view(&mut self, tx: &UnboundedSender<AsyncEvent>) {
@@ -3805,17 +4104,17 @@ impl App {
         self.schedule.academic_loading = true;
 
         match view {
-            CourseView::Exams => spawn_exams(session, term_code, tx.clone()),
-            CourseView::Grades => spawn_grades(session, term_code, tx.clone()),
+            CourseView::Exams => spawn_exams(session, term_code, self.task_sender(tx)),
+            CourseView::Grades => spawn_grades(session, term_code, self.task_sender(tx)),
             CourseView::Classrooms => {
                 spawn_classrooms(
                     session,
                     self.schedule.classroom_campus,
                     self.schedule.classroom_date.clone(),
-                    tx.clone(),
+                    self.task_sender(tx),
                 )
             }
-            CourseView::Tasks => spawn_tasks(session, tx.clone()),
+            CourseView::Tasks => spawn_tasks(session, self.task_sender(tx)),
             CourseView::Today | CourseView::Schedule => {}
         }
     }
@@ -3845,19 +4144,113 @@ impl App {
         M: Fn(Result<T, String>) -> AsyncEvent + Send + 'static,
     {
 
+        self.spawn_session_task(task, self.task_sender(&tx), map)
+    }
+
+    fn spawn_authenticated_write<F, Fut, T, M>(
+        &self,
+        task: F,
+        tx: UnboundedSender<AsyncEvent>,
+        map: M,
+    ) -> bool
+    where
+        F: FnOnce(Session) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, String>> + Send + 'static,
+        T: Send + 'static,
+        M: Fn(Result<T, String>) -> AsyncEvent + Send + 'static,
+    {
+
+        self.spawn_session_task(task, self.task_sender(&tx).write(), map)
+    }
+
+    fn spawn_session_task<F, Fut, T, M>(&self, task: F, sender: TaskSender, map: M) -> bool
+    where
+        F: FnOnce(Session) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, String>> + Send + 'static,
+        T: Send + 'static,
+        M: Fn(Result<T, String>) -> AsyncEvent + Send + 'static,
+    {
+
         let Some(session) = self.session.clone() else {
+
+            let _ = sender.send(map(Err("当前未登录".to_string())));
 
             return false;
         };
 
-        tokio::spawn(async move {
+        sender.spawn(|tx| {
 
-            let result = task(session).await;
+            async move {
 
-            let _ = tx.send(map(result));
+                let result = task(session).await;
+
+                let _ = tx.send(map(result));
+            }
         });
 
         true
+    }
+
+    /// CGYY has a direct SSO session independent of the main WebVPN/iClass session.
+
+    fn spawn_venue<F, Fut, T, M>(
+        &self,
+        task: F,
+        tx: UnboundedSender<AsyncEvent>,
+        map: M,
+        write: bool,
+    ) where
+        F: FnOnce(IClassApi) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, String>> + Send + 'static,
+        T: Send + 'static,
+        M: FnOnce(Result<T, String>) -> AsyncEvent + Send + 'static,
+    {
+
+        let input = self.login.to_input();
+
+        let cache = self.venue_api.clone();
+
+        let sender = self.task_sender(&tx);
+
+        let sender = if write { sender.write() } else { sender };
+
+        sender.spawn(|tx| {
+
+            async move {
+
+                let authenticated = async {
+
+                    let mut cached = cache.lock().await;
+
+                    if cached.is_none() {
+
+                        *cached = Some(
+                            IClassApi::for_venue(&input)
+                                .await
+                                .map_err(format_anyhow_error)?,
+                        );
+                    }
+
+                    cached.clone().ok_or_else(|| "研讨室会话未建立".to_string())
+                }
+                .await;
+
+                let result = match authenticated {
+                    Ok(api) => task(api).await,
+                    Err(error) => Err(error),
+                };
+
+                if result.as_ref().err().is_some_and(|error| {
+
+                    error.contains("SSO Token") || error.contains("登录状态已失效")
+                }) {
+
+                    *cache.lock().await = None;
+                }
+
+                let _ = tx.send(map(result));
+            }
+        });
     }
 
     /// Loads the seminar-room list.
@@ -3871,39 +4264,38 @@ impl App {
 
         self.venue.loading = true;
 
+        self.venue.show_orders = false;
+
+        self.venue.day = None;
+
         let tx = tx.clone();
 
-        if !self.spawn_authenticated(
-            move |session| {
+        self.spawn_venue(
+            move |api| {
 
                 async move {
 
-                    let token = session
-                        .api
-                        .cgyy_login()
-                        .await
-                        .map_err(format_anyhow_error)?;
+                    let token = api.cgyy_login().await.map_err(format_anyhow_error)?;
 
-                    session
-                        .api
-                        .cgyy_list_sites(&token)
+                    api.cgyy_list_sites(&token)
                         .await
                         .map_err(format_anyhow_error)
                 }
             },
             tx,
             AsyncEvent::Venues,
-        ) {
-
-            self.venue.loading = false;
-
-            self.warn("当前未登录");
-        }
+            false,
+        );
     }
 
     /// Loads one room's availability for a date.
 
     fn load_venue_day(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.venue.day_loading {
+
+            return;
+        }
 
         let Some(site) = self.venue.sites.get(self.venue.selected) else {
 
@@ -3926,30 +4318,29 @@ impl App {
 
         self.venue.day_loading = true;
 
+        self.venue.day_request = self.venue.day_request.wrapping_add(1);
+
+        let request_id = self.venue.day_request;
+
         self.venue.chosen_slots.clear();
 
         let tx = tx.clone();
 
-        self.spawn_authenticated(
-            move |session| {
+        self.spawn_venue(
+            move |api| {
 
                 async move {
 
-                    let token = session
-                        .api
-                        .cgyy_login()
-                        .await
-                        .map_err(format_anyhow_error)?;
+                    let token = api.cgyy_login().await.map_err(format_anyhow_error)?;
 
-                    session
-                        .api
-                        .cgyy_day_info(&token, site_id, &date)
+                    api.cgyy_day_info(&token, site_id, &date)
                         .await
                         .map_err(format_anyhow_error)
                 }
             },
             tx,
-            AsyncEvent::VenueDay,
+            move |result| AsyncEvent::VenueDay(request_id, result),
+            false,
         );
     }
 
@@ -3959,26 +4350,21 @@ impl App {
 
         let tx = tx.clone();
 
-        self.spawn_authenticated(
-            move |session| {
+        self.spawn_venue(
+            move |api| {
 
                 async move {
 
-                    let token = session
-                        .api
-                        .cgyy_login()
-                        .await
-                        .map_err(format_anyhow_error)?;
+                    let token = api.cgyy_login().await.map_err(format_anyhow_error)?;
 
-                    session
-                        .api
-                        .cgyy_orders(&token, 1, 20)
+                    api.cgyy_orders(&token, 1, 20)
                         .await
                         .map_err(format_anyhow_error)
                 }
             },
             tx,
             AsyncEvent::VenueOrders,
+            false,
         );
     }
 
@@ -3986,47 +4372,23 @@ impl App {
 
     fn submit_venue_reserve(&mut self, tx: &UnboundedSender<AsyncEvent>) {
 
-        let Some(day) = self.venue.day.clone() else {
+        let Some((request, _label)) = self.venue.pending_reservation.take() else {
 
             return;
         };
 
-        let Some(space) = day.spaces.first() else {
-
-            self.warn("该场地没有可预约房间");
-
-            return;
-        };
-
-        let request = crate::cgyy::ReservationRequest {
-            venue_site_id: day.venue_site_id,
-            date:          day.date.clone(),
-            space_id:      space.space_id,
-            time_ids:      self.venue.chosen_slots.clone(),
-            phone:         self.venue.phone.clone(),
-            theme:         self.venue.theme.clone(),
-            purpose_type:  self.venue.purpose,
-            joiner_num:    self.venue.joiners.max(1),
-            activity:      "小组讨论".to_string(),
-            joiners:       String::new(),
-        };
+        self.write_in_flight = true;
 
         let tx = tx.clone();
 
-        self.spawn_authenticated(
-            move |session| {
+        self.spawn_venue(
+            move |api| {
 
                 async move {
 
-                    let token = session
-                        .api
-                        .cgyy_login()
-                        .await
-                        .map_err(format_anyhow_error)?;
+                    let token = api.cgyy_login().await.map_err(format_anyhow_error)?;
 
-                    session
-                        .api
-                        .cgyy_reserve(&token, &request)
+                    api.cgyy_reserve(&token, &request)
                         .await
                         .map(|order| {
 
@@ -4041,27 +4403,24 @@ impl App {
             },
             tx,
             AsyncEvent::Write,
+            true,
         );
     }
 
     fn submit_venue_cancel(&mut self, order_id: i64, tx: &UnboundedSender<AsyncEvent>) {
 
+        self.write_in_flight = true;
+
         let tx = tx.clone();
 
-        self.spawn_authenticated(
-            move |session| {
+        self.spawn_venue(
+            move |api| {
 
                 async move {
 
-                    let token = session
-                        .api
-                        .cgyy_login()
-                        .await
-                        .map_err(format_anyhow_error)?;
+                    let token = api.cgyy_login().await.map_err(format_anyhow_error)?;
 
-                    session
-                        .api
-                        .cgyy_cancel(&token, order_id)
+                    api.cgyy_cancel(&token, order_id)
                         .await
                         .map(|()| format!("已取消研讨室预约 {order_id}"))
                         .map_err(format_anyhow_error)
@@ -4069,6 +4428,7 @@ impl App {
             },
             tx,
             AsyncEvent::Write,
+            true,
         );
     }
 
@@ -4287,7 +4647,7 @@ impl App {
 
         let tx = tx.clone();
 
-        self.spawn_authenticated(
+        self.write_in_flight = self.spawn_authenticated_write(
             move |session| {
 
                 async move {
@@ -4315,7 +4675,7 @@ impl App {
 
         let tx = tx.clone();
 
-        self.spawn_authenticated(
+        self.write_in_flight = self.spawn_authenticated_write(
             move |session| {
 
                 async move {
@@ -4557,6 +4917,8 @@ impl App {
 
         let tx = tx.clone();
 
+        let rwid = task.rwid.clone();
+
         self.spawn_authenticated(
             move |session| {
 
@@ -4570,13 +4932,20 @@ impl App {
                 }
             },
             tx,
-            AsyncEvent::EvalQuestionnaire,
+            move |result| AsyncEvent::EvalQuestionnaire(rwid.clone(), result),
         );
     }
 
     /// Submits one course's evaluation after confirmation.
 
     fn submit_eval(&mut self, rwid: String, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.eval.submitting || self.session.is_none() {
+
+            self.warn("当前未登录或评教正在提交");
+
+            return;
+        }
 
         let Some(task) = self
             .eval
@@ -4589,53 +4958,19 @@ impl App {
             return;
         };
 
-        let answers = self
-            .eval
-            .questionnaire
-            .as_ref()
-            .map(crate::evaluation::Questionnaire::default_answers)
-            .unwrap_or_default();
-
-        let course = task.course.clone();
-
-        let tx = tx.clone();
-
-        self.spawn_authenticated(
-            move |session| {
-
-                async move {
-
-                    let outcome = session
-                        .api
-                        .evaluation_submit(&task, &answers)
-                        .await
-                        .map_err(format_anyhow_error)?;
-
-                    if outcome.success {
-
-                        Ok(format!("已提交 {} 的评教", outcome.course))
-                    } else {
-
-                        Err(format!("{} 评教失败: {}", outcome.course, outcome.message))
-                    }
-                }
-            },
-            tx,
-            AsyncEvent::Write,
-        );
-
-        // The submitted course is no longer pending.
-        if let Some(task) = self.eval.tasks.iter_mut().find(|task| task.rwid == rwid) {
-
-            let _ = course;
-
-            task.evaluated = true;
-        }
+        self.start_evaluations(vec![task], tx);
     }
 
     /// Submits every unevaluated course.
 
     fn submit_eval_all(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.eval.submitting || self.session.is_none() {
+
+            self.warn("当前未登录或评教正在提交");
+
+            return;
+        }
 
         let pending: Vec<crate::evaluation::EvaluationTask> = self
             .eval
@@ -4652,62 +4987,70 @@ impl App {
             return;
         }
 
-        let tx = tx.clone();
+        self.start_evaluations(pending, tx);
+    }
 
-        self.spawn_authenticated(
+    fn start_evaluations(
+        &mut self,
+        tasks: Vec<crate::evaluation::EvaluationTask>,
+        tx: &UnboundedSender<AsyncEvent>,
+    ) {
+
+        self.eval.submitting = true;
+
+        let started = self.spawn_authenticated_write(
             move |session| {
 
                 async move {
 
-                    let mut succeeded = 0_usize;
+                    let mut results = Vec::new();
 
-                    let mut failures = Vec::new();
+                    for task in tasks {
 
-                    for task in &pending {
+                        // Fetch the questionnaire for this exact task; never reuse another course's answers.
+                        let result = async {
 
-                        let questionnaire = session
-                            .api
-                            .evaluation_questionnaire(task)
-                            .await
-                            .map_err(format_anyhow_error)?;
+                            let questionnaire = session
+                                .api
+                                .evaluation_questionnaire(&task)
+                                .await
+                                .map_err(format_anyhow_error)?;
 
-                        let answers = questionnaire.default_answers();
+                            let outcome = session
+                                .api
+                                .evaluation_submit(&task, &questionnaire.default_answers())
+                                .await
+                                .map_err(format_anyhow_error)?;
 
-                        match session.api.evaluation_submit(task, &answers).await {
-                            Ok(outcome) if outcome.success => succeeded += 1,
-                            Ok(outcome) => {
-                                failures.push(format!("{}: {}", task.course, outcome.message))
-                            }
-                            Err(error) => {
-                                failures.push(format!(
-                                    "{}: {}",
-                                    task.course,
-                                    format_anyhow_error(error)
-                                ))
+                            if outcome.success {
+
+                                Ok(())
+                            } else {
+
+                                Err(outcome.message)
                             }
                         }
+                        .await;
+
+                        results.push(EvaluationCompletion {
+                            rwid: task.rwid,
+                            course: task.course,
+                            result,
+                        });
                     }
 
-                    if failures.is_empty() {
-
-                        Ok(format!("已提交 {succeeded} 门评教"))
-                    } else {
-
-                        Err(format!(
-                            "成功 {succeeded} 门，失败 {} 门：{}",
-                            failures.len(),
-                            failures.join("；")
-                        ))
-                    }
+                    Ok(results)
                 }
             },
-            tx,
-            AsyncEvent::Write,
+            tx.clone(),
+            AsyncEvent::Evaluations,
         );
 
-        for task in self.eval.tasks.iter_mut() {
+        if !started {
 
-            task.evaluated = true;
+            self.eval.submitting = false;
+
+            self.warn("当前未登录，未提交评教");
         }
     }
 
@@ -4728,7 +5071,7 @@ impl App {
             self.bykc.detail_course_id,
             Some("BYKC 数据已预热".to_string()),
             false,
-            tx.clone(),
+            self.task_sender(tx),
         );
     }
 
@@ -4760,7 +5103,7 @@ impl App {
             self.bykc.detail_course_id,
             None,
             false,
-            tx.clone(),
+            self.task_sender(tx),
         );
     }
 
@@ -4809,7 +5152,7 @@ impl App {
             Some(course_id),
             None,
             true,
-            tx.clone(),
+            self.task_sender(tx),
         );
     }
 
@@ -4848,7 +5191,7 @@ impl App {
             BykcDetailTarget::CourseFirst(course.id),
             false,
             false,
-            tx.clone(),
+            self.task_sender(tx).write(),
             move |api| async move { api.select_course(course.id).await.map(Some) },
         );
     }
@@ -4890,7 +5233,7 @@ impl App {
             BykcDetailTarget::ChosenFirst(course_id),
             false,
             false,
-            tx.clone(),
+            self.task_sender(tx).write(),
             move |api| async move { api.deselect_course(course_id).await.map(Some) },
         );
     }
@@ -4946,7 +5289,7 @@ impl App {
             BykcDetailTarget::ChosenFirst(course_id),
             false,
             false,
-            tx.clone(),
+            self.task_sender(tx).write(),
             move |api| async move { api.deselect_course(course_id).await.map(Some) },
         );
     }
@@ -5003,12 +5346,17 @@ impl App {
             BykcDetailTarget::ChosenFirst(course.course_id),
             false,
             false,
-            tx.clone(),
+            self.task_sender(tx).write(),
             move |api| async move { api.sign_course(course.course_id, action).await.map(Some) },
         );
     }
 
     fn sign_selected(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        if self.iclass_loading {
+
+            return;
+        }
 
         let Some(session) = self.session.clone() else {
 
@@ -5044,10 +5392,48 @@ impl App {
 
         self.info(format!("签到中: {}", course.name));
 
-        spawn_sign(session, course.course_sched_id, tx.clone());
+        spawn_sign(
+            session,
+            course.course_sched_id,
+            self.task_sender(tx).write(),
+        );
     }
 
     fn logout(&mut self) {
+
+        for handle in self
+            .read_jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+        {
+
+            handle.abort();
+        }
+
+        self.session_generation = self.session_generation.wrapping_add(1);
+
+        self.venue_api = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        self.schedule = ScheduleState::default();
+
+        self.venue = VenueState::default();
+
+        self.seat = SeatState::default();
+
+        self.clockin = ClockinState::default();
+
+        self.eval = EvalState::default();
+
+        self.write_in_flight = false;
+
+        *self.list_state.borrow_mut() = ListState::default();
+
+        self.pending_captcha_login = None;
+
+        self.login.captcha.clear();
+
+        self.login.captcha_required = false;
 
         self.screen = Screen::Login;
 
@@ -5615,96 +6001,98 @@ fn log_level_from_event(level: EventLevel) -> LogLevel {
     }
 }
 
-fn spawn_login(input: LoginInput, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_login(input: LoginInput, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = match crate::iclass::IClassApi::new(input.use_vpn) {
-            Ok(api) => {
-                match api.start_login(&input).await {
-                    Ok(LoginStart::Complete(session)) => {
+        async move {
 
-                        let courses = api.get_merged_course_details(&session, 7).await;
+            let result = match crate::iclass::IClassApi::new(input.use_vpn) {
+                Ok(api) => {
+                    match api.start_login(&input).await {
+                        Ok(LoginStart::Complete(session)) => {
 
-                        Ok(login_success_with_prefetch_result(
-                            session,
-                            courses,
-                            input.student_id.clone(),
-                        ))
-                    }
-                    Ok(LoginStart::Captcha(challenge)) => {
+                            let courses = api.get_merged_course_details(&session, 7).await;
 
-                        let pending = PendingCaptchaLogin {
-                            api,
-                            input,
-                            challenge,
-                        };
+                            Ok(login_success_with_prefetch_result(
+                                session,
+                                courses,
+                                input.student_id.clone(),
+                            ))
+                        }
+                        Ok(LoginStart::Captcha(challenge)) => {
 
-                        let _ = tx.send(AsyncEvent::LoginCaptcha(Ok(pending)));
+                            let pending = PendingCaptchaLogin {
+                                api,
+                                input,
+                                challenge,
+                            };
 
-                        return;
-                    }
-                    Err(diagnostic) => {
-                        Err(LoginFailure {
-                            message: diagnostic.summary.clone(),
-                            diagnostic,
-                        })
+                            let _ = tx.send(AsyncEvent::LoginCaptcha(Ok(pending)));
+
+                            return;
+                        }
+                        Err(diagnostic) => {
+                            Err(LoginFailure {
+                                message: diagnostic.summary.clone(),
+                                diagnostic,
+                            })
+                        }
                     }
                 }
-            }
-            Err(error) => {
-                Err(LoginFailure {
-                    message:    format_anyhow_error(error),
-                    diagnostic: LoginDiagnostic {
-                        kind:        crate::model::LoginFailureKind::Unknown,
-                        stage:       "client_init".to_string(),
-                        summary:     "初始化 HTTP 客户端失败".to_string(),
-                        error_chain: vec!["初始化 HTTP 客户端失败".to_string()],
-                        final_url:   None,
-                        http_status: None,
-                        page_hint:   None,
-                        suggestions: vec!["检查本机 TLS/证书环境".to_string()],
-                    },
-                })
-            }
-        };
+                Err(error) => {
+                    Err(LoginFailure {
+                        message:    format_anyhow_error(error),
+                        diagnostic: LoginDiagnostic {
+                            kind:        crate::model::LoginFailureKind::Unknown,
+                            stage:       "client_init".to_string(),
+                            summary:     "初始化 HTTP 客户端失败".to_string(),
+                            error_chain: vec!["初始化 HTTP 客户端失败".to_string()],
+                            final_url:   None,
+                            http_status: None,
+                            page_hint:   None,
+                            suggestions: vec!["检查本机 TLS/证书环境".to_string()],
+                        },
+                    })
+                }
+            };
 
-        let _ = tx.send(AsyncEvent::Login(result));
+            let _ = tx.send(AsyncEvent::Login(result));
+        }
     });
 }
 
-fn spawn_continue_captcha_login(
-    pending: PendingCaptchaLogin,
-    captcha: String,
-    tx: UnboundedSender<AsyncEvent>,
-) {
+fn spawn_continue_captcha_login(pending: PendingCaptchaLogin, captcha: String, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = match pending
-            .api
-            .continue_captcha_login(&pending.input, &pending.challenge, &captcha)
-            .await
-        {
-            Ok(session) => {
+        async move {
 
-                let courses = pending.api.get_merged_course_details(&session, 7).await;
+            let result = match pending
+                .api
+                .continue_captcha_login(&pending.input, &pending.challenge, &captcha)
+                .await
+            {
+                Ok(session) => {
 
-                Ok(login_success_with_prefetch_result(
-                    session,
-                    courses,
-                    pending.input.student_id.clone(),
-                ))
-            }
-            Err(diagnostic) => {
-                Err(LoginFailure {
-                    message: diagnostic.summary.clone(),
-                    diagnostic,
-                })
-            }
-        };
+                    let courses = pending.api.get_merged_course_details(&session, 7).await;
 
-        let _ = tx.send(AsyncEvent::Login(result));
+                    Ok(login_success_with_prefetch_result(
+                        session,
+                        courses,
+                        pending.input.student_id.clone(),
+                    ))
+                }
+                Err(diagnostic) => {
+                    Err(LoginFailure {
+                        message: diagnostic.summary.clone(),
+                        diagnostic,
+                    })
+                }
+            };
+
+            let _ = tx.send(AsyncEvent::Login(result));
+        }
     });
 }
 
@@ -5734,16 +6122,19 @@ fn login_success_with_prefetch_result(
     }
 }
 
-fn spawn_doctor(use_vpn: bool, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_doctor(use_vpn: bool, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = match crate::iclass::IClassApi::new(use_vpn) {
-            Ok(api) => Ok(api.doctor().await),
-            Err(error) => Err(format_anyhow_error(error)),
-        };
+        async move {
 
-        let _ = tx.send(AsyncEvent::Doctor(result));
+            let result = match crate::iclass::IClassApi::new(use_vpn) {
+                Ok(api) => Ok(api.doctor().await),
+                Err(error) => Err(format_anyhow_error(error)),
+            };
+
+            let _ = tx.send(AsyncEvent::Doctor(result));
+        }
     });
 }
 
@@ -5759,115 +6150,135 @@ pub fn spawn_version_check(tx: UnboundedSender<AsyncEvent>) {
     });
 }
 
-fn spawn_refresh(session: Session, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_refresh(session: Session, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .get_merged_course_details(&session, 7)
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::Refresh(result));
+            let result = session
+                .api
+                .get_merged_course_details(&session, 7)
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::Refresh(result));
+        }
     });
 }
 
-fn spawn_schedule_import(
-    session: Session,
-    requested_term: Option<String>,
-    tx: UnboundedSender<AsyncEvent>,
-) {
+fn spawn_schedule_import(session: Session, requested_term: Option<String>, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .import_semester_schedule(&session, requested_term.as_deref())
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::ScheduleImport(result));
+            let result = session
+                .api
+                .import_semester_schedule(&session, requested_term.as_deref())
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::ScheduleImport(result));
+        }
     });
 }
 
-fn spawn_exams(session: Session, term_code: String, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_exams(session: Session, term_code: String, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .get_exams(&term_code)
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::Exams(result));
+            let result = session
+                .api
+                .get_exams(&term_code)
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::Exams(result));
+        }
     });
 }
 
-fn spawn_grades(session: Session, term_code: String, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_grades(session: Session, term_code: String, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .get_grades(&term_code)
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::Grades(result));
+            let result = session
+                .api
+                .get_grades(&term_code)
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::Grades(result));
+        }
     });
 }
 
-fn spawn_all_grades(session: Session, term_codes: Vec<String>, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_all_grades(session: Session, term_codes: Vec<String>, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = Ok(session.api.get_grades_for_terms(&term_codes).await);
+        async move {
 
-        let _ = tx.send(AsyncEvent::AllGrades(result));
+            let result = Ok(session.api.get_grades_for_terms(&term_codes).await);
+
+            let _ = tx.send(AsyncEvent::AllGrades(result));
+        }
     });
 }
 
-fn spawn_classrooms(session: Session, campus: i64, date: String, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_classrooms(session: Session, campus: i64, date: String, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .query_classrooms(campus, &date)
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::Classrooms(result));
+            let result = session
+                .api
+                .query_classrooms(campus, &date)
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::Classrooms(result));
+        }
     });
 }
 
-fn spawn_tasks(session: Session, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_tasks(session: Session, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .get_assignments()
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::Tasks(result));
+            let result = session
+                .api
+                .get_assignments()
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::Tasks(result));
+        }
     });
 }
 
-fn spawn_sign(session: Session, course_sched_id: String, tx: UnboundedSender<AsyncEvent>) {
+fn spawn_sign(session: Session, course_sched_id: String, tx: TaskSender) {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = session
-            .api
-            .sign_now(&session, &course_sched_id)
-            .await
-            .map_err(format_anyhow_error);
+        async move {
 
-        let _ = tx.send(AsyncEvent::Sign(result));
+            let result = session
+                .api
+                .sign_now(&session, &course_sched_id)
+                .await
+                .map_err(format_anyhow_error);
+
+            let _ = tx.send(AsyncEvent::Sign(course_sched_id, result));
+        }
     });
 }
 
@@ -5884,7 +6295,7 @@ fn spawn_bykc_sync(
     detail_course_id: Option<i64>,
     message: Option<String>,
     open_detail_popup: bool,
-    tx: UnboundedSender<AsyncEvent>,
+    tx: TaskSender,
 ) {
 
     let detail_target =
@@ -5907,38 +6318,41 @@ fn spawn_bykc_task<F, Fut>(
     detail_target: BykcDetailTarget,
     open_detail_popup: bool,
     require_detail: bool,
-    tx: UnboundedSender<AsyncEvent>,
+    tx: TaskSender,
     action: F,
 ) where
     F: FnOnce(BykcApi) -> Fut + Send + 'static,
     Fut: Future<Output = anyhow::Result<Option<String>>> + Send + 'static,
 {
 
-    tokio::spawn(async move {
+    tx.spawn(|tx| {
 
-        let result = async {
+        async move {
 
-            let api = session
-                .bykc_api
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
+            let result = async {
 
-            let message = action(api.clone()).await?;
+                let api = session
+                    .bykc_api
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("博雅功能需要 VPN 模式登录"))?;
 
-            build_bykc_sync_success(
-                &api,
-                include_all,
-                detail_target,
-                message,
-                open_detail_popup,
-                require_detail,
-            )
+                let message = action(api.clone()).await?;
+
+                build_bykc_sync_success(
+                    &api,
+                    include_all,
+                    detail_target,
+                    message,
+                    open_detail_popup,
+                    require_detail,
+                )
+                .await
+            }
             .await
-        }
-        .await
-        .map_err(format_anyhow_error);
+            .map_err(format_anyhow_error);
 
-        let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
+            let _ = tx.send(AsyncEvent::BykcSync(Box::new(result)));
+        }
     });
 }
 

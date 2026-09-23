@@ -26,22 +26,24 @@ use crate::model::{
 #[derive(Clone, Debug)]
 
 pub struct IClassApi {
-    pub(crate) client:             reqwest::Client,
-    pub(crate) no_redirect_client: reqwest::Client,
-    pub(crate) use_vpn:            bool,
+    pub(crate) client:              reqwest::Client,
+    pub(crate) no_redirect_client:  reqwest::Client,
+    pub(crate) use_vpn:             bool,
     /// Cookie jar shared with every client built from this API.
     ///
     /// Why:
     /// BYKC reuses the same BUAA SSO session instead of authenticating on its
     /// own. Building it with a fresh jar left its CAS request unauthenticated,
     /// so no token ever came back.
-    pub(crate) cookie_jar:         Arc<reqwest::cookie::Jar>,
+    pub(crate) cookie_jar:          Arc<reqwest::cookie::Jar>,
     /// Reused client for the library service, with its scoped intermediate
     /// certificate and the same cookie jar as the authentication clients.
-    pub(crate) libbook_client:     reqwest::Client,
-    pub(crate) libbook_token:      Arc<tokio::sync::Mutex<Option<super::CachedToken>>>,
+    pub(crate) libbook_client:      reqwest::Client,
+    pub(crate) libbook_token:       Arc<tokio::sync::Mutex<Option<super::CachedToken>>>,
     #[cfg(test)]
-    sso_entry_override:            Option<String>,
+    sso_entry_override:             Option<String>,
+    #[cfg(test)]
+    pub(crate) venue_base_override: Option<String>,
 }
 
 /// Outcome of the unified-auth phase on its own.
@@ -129,6 +131,8 @@ impl IClassApi {
             libbook_token: Arc::new(tokio::sync::Mutex::new(None)),
             #[cfg(test)]
             sso_entry_override: None,
+            #[cfg(test)]
+            venue_base_override: None,
         })
     }
 
@@ -139,11 +143,40 @@ impl IClassApi {
 
         let api = Self::new(false)?;
 
+        Self::authenticate_venue_client(api, input).await
+    }
+
+    async fn authenticate_venue_client(api: Self, input: &LoginInput) -> Result<Self> {
+
         api.login_sso_only(input)
             .await
             .map_err(login_diagnostic_error)?;
 
         Ok(api)
+    }
+
+    #[cfg(test)]
+
+    pub(crate) async fn for_venue_fixture(input: &LoginInput, origin: &str) -> Result<Self> {
+
+        let mut api = Self::new(false)?;
+
+        api.client = super::http::client_builder()
+            .no_proxy()
+            .cookie_provider(api.cookie_jar.clone())
+            .build()?;
+
+        api.no_redirect_client = super::http::client_builder()
+            .no_proxy()
+            .cookie_provider(api.cookie_jar.clone())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        api.sso_entry_override = Some(format!("{origin}/login"));
+
+        api.venue_base_override = Some(format!("{origin}/venue-zhjs-server/"));
+
+        Self::authenticate_venue_client(api, input).await
     }
 
     /// Logs in and captures the server clock offset needed by later sign requests.
@@ -213,12 +246,15 @@ impl IClassApi {
             });
         }
 
-        let username = if self.use_vpn {
-
-            input.vpn_username.trim()
-        } else {
+        // A direct venue client still authenticates with the same unified
+        // account. VPN mode normally supplies an explicit username; direct
+        // mode falls back to the student id when it is omitted.
+        let username = if input.vpn_username.trim().is_empty() {
 
             student_id
+        } else {
+
+            input.vpn_username.trim()
         };
 
         if username.is_empty() {
@@ -2794,6 +2830,95 @@ mod tests {
         assert_eq!(detect_captcha_id(json_config).as_deref(), Some("captcha_2"));
 
         assert_eq!(detect_captcha_id(image_tag).as_deref(), Some("captcha-3"));
+    }
+
+    #[tokio::test]
+
+    async fn venue_fixture_uses_direct_sso_and_cgyy_cookie_without_iclass() {
+
+        use crate::model::LoginInput;
+        use tokio::net::TcpListener;
+        use tokio::task::JoinHandle;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+
+        let server: JoinHandle<()> = tokio::spawn(async move {
+
+            loop {
+
+                let Ok((mut stream, _)) = listener.accept().await else {
+
+                    return;
+                };
+
+                tokio::spawn(async move {
+
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                    let mut request = [0_u8; 4096];
+
+                    let size = stream.read(&mut request).await.unwrap_or(0);
+
+                    let text = String::from_utf8_lossy(&request[..size]);
+
+                    let response = if text.starts_with("GET /login") {
+
+                        let body = r#"<form id="fm1" action="/login" method="post"><input type="hidden" name="execution" value="fixture"><input name="username"><input name="password" type="password"><input type="submit" name="submit" value="登录"></form>"#;
+
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \
+                             {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    } else if text.starts_with("POST /login") {
+
+                        "HTTP/1.1 302 Found\r\nLocation: /sso/callback\r\nSet-Cookie: SSO=ok; \
+                         Path=/\r\nContent-Length: 0\r\n\r\n"
+                            .to_string()
+                    } else if text.starts_with("GET /sso/callback") {
+
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string()
+                    } else if text.starts_with("GET /venue-zhjs-server/sso/manageLogin") {
+
+                        "HTTP/1.1 302 Found\r\nLocation: \
+                         /venue-zhjs-server/sso/landing\r\nSet-Cookie: \
+                         sso_buaa_zhjs_token=fixture; Path=/\r\nContent-Length: 0\r\n\r\n"
+                            .to_string()
+                    } else if text.starts_with("GET /venue-zhjs-server/sso/landing") {
+
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string()
+                    } else if text.starts_with("POST /venue-zhjs-server/api/login") {
+
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         62\r\n\r\n{\"code\":0,\"data\":{\"token\":{\"access_token\":\"fixture\"}}}"
+                            .to_string()
+                    } else {
+
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let input = LoginInput {
+            student_id: "23371544".into(),
+            vpn_password: "secret".into(),
+            ..Default::default()
+        };
+
+        let result = super::IClassApi::for_venue_fixture(&input, &origin).await;
+
+        server.abort();
+
+        assert!(
+            result.is_ok(),
+            "fixture venue SSO must complete: {result:?}"
+        );
     }
 
     #[test]

@@ -130,6 +130,20 @@ pub struct ReservationRequest {
 }
 
 impl IClassApi {
+    fn venue_url(&self, raw: &str) -> String {
+
+        #[cfg(test)]
+        if let Some(base) = &self.venue_base_override {
+
+            if let Some(path) = raw.strip_prefix(BASE_URL) {
+
+                return format!("{base}{path}");
+            }
+        }
+
+        cgyy_url(self.use_vpn, raw)
+    }
+
     /// Sends a signed request to the CGYY service.
     ///
     /// How:
@@ -167,10 +181,7 @@ impl IClassApi {
         extra: &[(&str, &str)],
     ) -> Result<Value> {
 
-        let url = cgyy_url(
-            self.use_vpn,
-            &format!("{BASE_URL}{}", path.trim_start_matches('/')),
-        );
+        let url = self.venue_url(&format!("{BASE_URL}{}", path.trim_start_matches('/')));
 
         let timestamp = chrono::Utc::now().timestamp_millis();
 
@@ -211,7 +222,7 @@ impl IClassApi {
 
         request = request
             .header("Accept", "application/json, text/plain, */*")
-            .header("Referer", cgyy_url(self.use_vpn, REFERRER))
+            .header("Referer", self.venue_url(REFERRER))
             .header("app-key", APP_KEY)
             .header("timestamp", timestamp.to_string())
             .header("sign", signature);
@@ -283,17 +294,9 @@ impl IClassApi {
 
     pub async fn cgyy_login(&self) -> Result<String> {
 
-        // The SSO handshake must use the same connection mode as the session
-        // that authenticated it.
-        //
-        // Why:
-        // In direct mode the session cookies live on `cgyy.buaa.edu.cn` itself,
-        // so the handshake goes straight there. In VPN mode the unified-auth
-        // session was established through `d.buaa.edu.cn`, and the cookies
-        // that prove it live on that host; a direct handshake would be
-        // anonymous and the service would never issue `sso_buaa_zhjs_token`.
-        // The rewritten URL is therefore required in VPN mode and nowhere else.
-        let manage_url = cgyy_url(self.use_vpn, &format!("{BASE_URL}sso/manageLogin"));
+        // CLI and TUI construct this client via for_venue. Its direct SSO
+        // cookies must not be substituted with a WebVPN/iClass session.
+        let manage_url = self.venue_url(&format!("{BASE_URL}sso/manageLogin"));
 
         let _ = self
             .client
@@ -308,7 +311,7 @@ impl IClassApi {
 
             use reqwest::cookie::CookieStore;
 
-            let base = reqwest::Url::parse(&cgyy_url(self.use_vpn, BASE_URL))?;
+            let base = reqwest::Url::parse(&self.venue_url(BASE_URL))?;
 
             self.session_cookie_jar()
                 .cookies(&base)

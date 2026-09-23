@@ -69,6 +69,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if app.pending_write().is_some() {
 
         render_confirm_popup(frame, app);
+    } else if app.venue.form.is_some() {
+
+        render_venue_form(frame, app);
     } else if app.active_tab == WorkspaceTab::Schedule && app.schedule.show_task_detail {
 
         render_task_detail_popup(frame, app);
@@ -89,8 +92,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// given by accident.
 ///
 /// How:
-/// Names the action and its consequence, and defaults to cancelling: only `y`
-/// or `enter` proceeds, while `n`, `esc` and `q` all decline.
+/// Only an explicit `y` proceeds; Enter selects the default cancel action.
 
 fn render_confirm_popup(frame: &mut Frame, app: &App) {
 
@@ -112,7 +114,7 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
 
     frame.render_widget(block, area);
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
@@ -129,12 +131,94 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("y / enter", theme::label_style()),
+            Span::styled("y", theme::label_style()),
             Span::styled(" 确认    ", theme::muted_style()),
-            Span::styled("n / esc / q", theme::label_style()),
+            Span::styled("enter / n / esc / q", theme::label_style()),
             Span::styled(" 取消", theme::muted_style()),
         ]),
     ];
+
+    if let Some((request, room)) = &app.venue.pending_reservation {
+
+        lines.insert(
+            4,
+            Line::from(format!(
+                "  {room}  {}  {}  {} 人",
+                request.date, request.theme, request.joiner_num
+            )),
+        );
+
+        lines.insert(
+            5,
+            Line::from(format!(
+                "  时段编号：{}",
+                request
+                    .time_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        );
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_venue_form(frame: &mut Frame, app: &App) {
+
+    let Some(form) = &app.venue.form else {
+
+        return;
+    };
+
+    let area = centered_rect(78, 65, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(" 研讨室预约信息 ")
+        .border_style(theme::label_style());
+
+    let inner = block.inner(area);
+
+    frame.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from("保存信息不会提交预约；选择时段后仍需单独确认。"),
+        Line::from(""),
+    ];
+
+    for (i, label) in ["联系电话", "活动主题", "预约日期", "参加人数"]
+        .iter()
+        .enumerate()
+    {
+
+        let line = Line::from(format!(
+            "{} {label}：{}",
+            if i == form.selected { "›" } else { " " },
+            form.fields[i]
+        ));
+
+        lines.push(if i == form.selected {
+
+            line.style(theme::selection_style())
+        } else {
+
+            line
+        });
+    }
+
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(
+        "Tab / ↑↓ 切换  Ctrl+U 清空  Enter 保存  Esc 放弃",
+    ));
+
+    if let Some(error) = &form.error {
+
+        lines.push(Line::styled(error, Style::default().fg(theme::ERROR)));
+    }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -1359,6 +1443,47 @@ fn render_venue(frame: &mut Frame, area: Rect, app: &App) {
 
     let [body, footer] = course_layout_pair(area);
 
+    if app.venue.show_orders {
+
+        let items = if app.venue.orders.is_empty() {
+
+            vec![empty_row(false, app.tick, "", "暂无研讨室预约记录")]
+        } else {
+
+            app.venue
+                .orders
+                .iter()
+                .map(|order| {
+
+                    ListItem::new(format!(
+                        " {}  {}  {}  {}",
+                        order.id,
+                        order.space_name.as_deref().unwrap_or("未知房间"),
+                        order.reservation_date.as_deref().unwrap_or(""),
+                        order.status_text.as_deref().unwrap_or("")
+                    ))
+                })
+                .collect()
+        };
+
+        render_selectable_rows(
+            frame,
+            body,
+            app,
+            items,
+            app.venue.orders.len(),
+            app.venue.selected,
+        );
+
+        render_key_hint(
+            frame,
+            footer,
+            "↑↓ / 滚轮 选记录  x 取消预约（需确认）  O 刷新  b 返回",
+        );
+
+        return;
+    }
+
     let Some(day) = app.venue.day.as_ref() else {
 
         let items = if app.venue.sites.is_empty() {
@@ -1404,14 +1529,19 @@ fn render_venue(frame: &mut Frame, area: Rect, app: &App) {
                 .collect()
         };
 
-        record_list_rows(app, body, 0, app.venue.sites.len());
-
-        frame.render_widget(List::new(items), body);
+        render_selectable_rows(
+            frame,
+            body,
+            app,
+            items,
+            app.venue.sites.len(),
+            app.venue.selected,
+        );
 
         render_key_hint(
             frame,
             footer,
-            "j/k 选房间  enter 看时段  r 刷新  O 我的预约  x 取消预约",
+            "↑↓ / 滚轮 选楼层  enter 看房间时段  e 预约信息  r 刷新  O 我的预约",
         );
 
         return;
@@ -1422,7 +1552,7 @@ fn render_venue(frame: &mut Frame, area: Rect, app: &App) {
     render_key_hint(
         frame,
         footer,
-        "j/k 选时段  enter 选中/取消  s 预约  b 返回房间列表",
+        "↑↓ / 滚轮 选时段  ←→ 选房间  enter 选中  e 编辑  s 预约  b 返回",
     );
 }
 
@@ -1433,7 +1563,7 @@ fn render_venue_day(frame: &mut Frame, area: Rect, app: &App, day: &crate::cgyy:
     let [summary_area, list_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
 
-    let room = day.spaces.first();
+    let room = day.spaces.get(app.venue.selected_space);
 
     render_view_summary(
         frame,
@@ -1533,9 +1663,14 @@ fn render_venue_day(frame: &mut Frame, area: Rect, app: &App, day: &crate::cgyy:
         })
         .collect();
 
-    record_list_rows(app, list_area, 0, day.time_slots.len());
-
-    frame.render_widget(List::new(items), list_area);
+    render_selectable_rows(
+        frame,
+        list_area,
+        app,
+        items,
+        day.time_slots.len(),
+        app.venue.selected_slot,
+    );
 }
 
 /// Renders the library seat tab.
@@ -1599,9 +1734,14 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
                 .collect()
         };
 
-        record_list_rows(app, body, 0, app.seat.seats.len());
-
-        frame.render_widget(List::new(items), body);
+        render_selectable_rows(
+            frame,
+            body,
+            app,
+            items,
+            app.seat.seats.len(),
+            app.seat.selected_seat,
+        );
 
         render_key_hint(frame, footer, "j/k 选座位  enter 预约（需确认）  b 返回");
 
@@ -1653,9 +1793,14 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, body, 0, app.seat.libraries.len());
-
-    frame.render_widget(List::new(items), body);
+    render_selectable_rows(
+        frame,
+        body,
+        app,
+        items,
+        app.seat.libraries.len(),
+        app.seat.selected,
+    );
 
     render_key_hint(
         frame,
@@ -1801,9 +1946,14 @@ fn render_clockin(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    record_list_rows(app, list_area, 0, overview.items.len());
-
-    frame.render_widget(List::new(items), list_area);
+    render_selectable_rows(
+        frame,
+        list_area,
+        app,
+        items,
+        overview.items.len(),
+        overview.selected,
+    );
 
     render_key_hint(
         frame,
@@ -1953,9 +2103,14 @@ fn render_eval(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, body, 0, app.eval.tasks.len());
-
-    frame.render_widget(List::new(items), body);
+    render_selectable_rows(
+        frame,
+        body,
+        app,
+        items,
+        app.eval.tasks.len(),
+        app.eval.selected,
+    );
 
     render_key_hint(
         frame,
@@ -2131,6 +2286,32 @@ fn record_list_rows(app: &App, body: Rect, offset: usize, count: usize) {
             },
         );
     }
+}
+
+/// Selection, viewport and click targets are derived from the same ListState.
+
+fn render_selectable_rows(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    items: Vec<ListItem<'_>>,
+    count: usize,
+    selected: usize,
+) {
+
+    app.list_page_size.set(area.height.max(1) as usize);
+
+    let mut state = app.list_state.borrow_mut();
+
+    state.select((count > 0).then_some(selected.min(count.saturating_sub(1))));
+
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme::selection_style()),
+        area,
+        &mut state,
+    );
+
+    record_list_rows(app, area, state.offset(), count);
 }
 
 /// Key hint row at the bottom of a content view.
@@ -2478,9 +2659,12 @@ fn render_today_courses(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, list_area, 0, entries.len());
+    let selected = entries
+        .iter()
+        .position(|(id, _)| *id == app.schedule.selected_entry)
+        .unwrap_or(0);
 
-    frame.render_widget(List::new(items), list_area);
+    render_selectable_rows(frame, list_area, app, items, entries.len(), selected);
 
     render_key_hint(
         frame,
@@ -2551,11 +2735,20 @@ fn render_exams(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, list_area, 0, app.schedule.exams.len());
+    render_selectable_rows(
+        frame,
+        list_area,
+        app,
+        items,
+        app.schedule.exams.len(),
+        app.schedule.selected_entry,
+    );
 
-    frame.render_widget(List::new(items), list_area);
-
-    render_key_hint(frame, footer, "r 刷新");
+    render_key_hint(
+        frame,
+        footer,
+        "↑↓ / j/k 移动  滚轮滚动  PgUp/PgDn 翻页  Home/End 首尾  r 刷新",
+    );
 }
 
 fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
@@ -2708,11 +2901,20 @@ fn render_grades(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, list_area, 0, app.schedule.grades.len());
+    render_selectable_rows(
+        frame,
+        list_area,
+        app,
+        items,
+        app.schedule.grades.len(),
+        app.schedule.selected_entry,
+    );
 
-    frame.render_widget(List::new(items), list_area);
-
-    render_key_hint(frame, footer, "r 刷新当前学期  A 加载全部学期");
+    render_key_hint(
+        frame,
+        footer,
+        "↑↓ / j/k 移动  滚轮滚动  PgUp/PgDn 翻页  r 刷新  A 全部学期",
+    );
 }
 
 fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {
@@ -2775,11 +2977,20 @@ fn render_classrooms(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, list_area, 0, app.schedule.classrooms.len());
+    render_selectable_rows(
+        frame,
+        list_area,
+        app,
+        items,
+        app.schedule.classrooms.len(),
+        app.schedule.selected_entry,
+    );
 
-    frame.render_widget(List::new(items), list_area);
-
-    render_key_hint(frame, footer, "r 刷新");
+    render_key_hint(
+        frame,
+        footer,
+        "↑↓ / j/k 移动  滚轮滚动  PgUp/PgDn 翻页  Home/End 首尾  r 刷新",
+    );
 }
 
 fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
@@ -2887,9 +3098,14 @@ fn render_tasks(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    record_list_rows(app, list_area, 0, app.schedule.tasks.len());
-
-    frame.render_widget(List::new(items), list_area);
+    render_selectable_rows(
+        frame,
+        list_area,
+        app,
+        items,
+        app.schedule.tasks.len(),
+        app.schedule.selected_entry,
+    );
 
     render_key_hint(frame, footer, "j/k 选作业  o 查看详情  r 刷新");
 }

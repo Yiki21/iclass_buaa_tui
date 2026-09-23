@@ -543,13 +543,34 @@ fn parse_grade_term(term_code: &str) -> Result<(String, String)> {
     Ok((year.to_string(), semester.to_string()))
 }
 
+pub(crate) fn exam_day(raw: &str) -> Option<chrono::NaiveDate> {
+
+    let raw = raw.trim();
+
+    chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .ok()
+        .or_else(|| {
+
+            chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|time| time.date())
+        })
+        .or_else(|| {
+
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|time| time.date_naive())
+        })
+}
+
 fn parse_exam(row: &Value) -> ExamItem {
 
     ExamItem {
         course_name:      string_field(row, &["courseName", "kcmc"])
             .unwrap_or_else(|| "未命名课程".to_string()),
         course_no:        string_field(row, &["courseNo", "kch"]),
-        exam_date:        string_field(row, &["examDate", "ksrq"]),
+        exam_date:        string_field(row, &["examDate", "ksrq"])
+            .map(|raw| exam_day(&raw).map_or(raw, |date| date.to_string())),
         start_time:       string_field(row, &["startTime", "kssj"]),
         end_time:         string_field(row, &["endTime", "jssj"]),
         time_description: string_field(row, &["examTimeDescription", "kssjms"]),
