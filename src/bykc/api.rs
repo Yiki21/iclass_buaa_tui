@@ -9,7 +9,10 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 use crate::constants::BYKC_PAGE_SIZE;
+use crate::failure::{Failure, FailureKind, Operation, classify};
 use crate::model::LoginInput;
+use std::time::Duration;
+use tokio::time::sleep;
 
 use super::helpers::{
     activate_bykc_session, bykc_base_url, calculate_course_status, decrypt_response,
@@ -24,6 +27,10 @@ use super::raw::{
 use super::types::{
     BykcCategoryStatistics, BykcChosenCourse, BykcCourse, BykcCourseDetail, BykcStatistics,
 };
+
+const MAX_BYKC_PAGES: usize = 100;
+
+const MAX_READ_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
@@ -93,6 +100,9 @@ impl BykcApi {
         let client = reqwest::Client::builder()
             .cookie_provider(cookie_jar.clone())
             .default_headers(headers)
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(30))
             .build()
             .context("failed to build bykc reqwest client")?;
 
@@ -118,27 +128,22 @@ impl BykcApi {
 
         let total_pages = first_page.total_pages.max(1) as usize;
 
-        let mut page_results = vec![(1usize, first_page)];
+        if total_pages > MAX_BYKC_PAGES {
 
-        let mut tasks = Vec::with_capacity(total_pages.saturating_sub(1));
-
-        for page_number in 2..=total_pages {
-
-            let api = self.clone();
-
-            tasks.push(tokio::spawn(async move {
-
-                let result = api
-                    .query_student_semester_course_by_page(page_number, BYKC_PAGE_SIZE)
-                    .await?;
-
-                Ok::<(usize, BykcCoursePageResult), anyhow::Error>((page_number, result))
-            }));
+            bail!("博雅课程分页数量超过上限 ({MAX_BYKC_PAGES})");
         }
 
-        for task in tasks {
+        let mut page_results = vec![(1usize, first_page)];
 
-            page_results.push(task.await.context("博雅课程分页任务执行失败")??);
+        // Keep the upstream load bounded. A sequential read also avoids
+        // creating one task per untrusted `totalPages` value.
+        for page_number in 2..=total_pages {
+
+            let result = self
+                .query_student_semester_course_by_page(page_number, BYKC_PAGE_SIZE)
+                .await?;
+
+            page_results.push((page_number, result));
         }
 
         page_results.sort_by_key(|(page_number, _)| *page_number);
@@ -372,7 +377,7 @@ impl BykcApi {
         let request = format!(r#"{{"courseId":{course_id}}}"#);
 
         let response: BykcApiResponse<BykcCourseActionResult> =
-            self.call_api("choseCourse", &request).await?;
+            self.call_write_api("choseCourse", &request).await?;
 
         if !response.is_success() {
 
@@ -395,7 +400,7 @@ impl BykcApi {
         let request = format!(r#"{{"id":{course_id}}}"#);
 
         let response: BykcApiResponse<BykcCourseActionResult> =
-            self.call_api("delChosenCourse", &request).await?;
+            self.call_write_api("delChosenCourse", &request).await?;
 
         if !response.is_success() {
 
@@ -461,7 +466,8 @@ impl BykcApi {
             r#"{{"courseId":{course_id},"signLat":{lat},"signLng":{lng},"signType":{sign_type}}}"#
         );
 
-        let response: BykcApiResponse<Value> = self.call_api("signCourseByUser", &request).await?;
+        let response: BykcApiResponse<Value> =
+            self.call_write_api("signCourseByUser", &request).await?;
 
         if !response.is_success() {
 
@@ -696,31 +702,83 @@ impl BykcApi {
         T: for<'de> Deserialize<'de>,
     {
 
-        let raw = self.call_api_raw(api_name, request_json).await?;
+        let raw = self
+            .call_api_raw(api_name, request_json, Operation::Read)
+            .await?;
 
         serde_json::from_str(&raw)
             .with_context(|| format!("BYKC 响应 JSON 解析失败: {api_name}: {raw}"))
     }
 
-    /// Calls a BYKC API and retries once after refreshing the auth token.
+    async fn call_write_api<T>(&self, api_name: &str, request_json: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
 
-    async fn call_api_raw(&self, api_name: &str, request_json: &str) -> Result<String> {
+        let raw = self
+            .call_api_raw(api_name, request_json, Operation::Write)
+            .await?;
+
+        serde_json::from_str(&raw)
+            .with_context(|| format!("BYKC 响应 JSON 解析失败: {api_name}: {raw}"))
+    }
+
+    /// Reads may retry bounded transient failures. Writes only retry an
+    /// explicit session-expiry response, whose rejection is known to precede
+    /// business execution. Any transport/5xx failure is an unknown outcome.
+
+    async fn call_api_raw(
+        &self,
+        api_name: &str,
+        request_json: &str,
+        operation: Operation,
+    ) -> Result<String> {
 
         self.ensure_login(false).await?;
 
-        match self.do_call_api_raw(api_name, request_json).await {
-            Ok(value) => Ok(value),
-            Err(error) => {
+        let attempts = if operation == Operation::Read {
 
-                *self.auth_token.lock().expect("token mutex poisoned") = None;
+            MAX_READ_ATTEMPTS
+        } else {
 
-                self.ensure_login(true).await?;
+            2
+        };
 
-                self.do_call_api_raw(api_name, request_json)
-                    .await
-                    .with_context(|| format!("{error}"))
+        let mut last_error = None;
+
+        for attempt in 0..attempts {
+
+            match self.do_call_api_raw(api_name, request_json).await {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+
+                    let classification = classify(&error, operation);
+
+                    let can_retry = classification.retryable && attempt + 1 < attempts;
+
+                    if can_retry {
+
+                        if classification.kind.is_auth_expiry() {
+
+                            *self.auth_token.lock().expect("token mutex poisoned") = None;
+
+                            self.ensure_login(true).await?;
+                        } else {
+
+                            sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                        }
+
+                        last_error = Some(error);
+
+                        continue;
+                    }
+
+                    return Err(error);
+                }
             }
         }
+
+        Err(last_error.expect("retry loop always has an error"))
     }
 
     /// Sends one encrypted BYKC request and returns the decrypted response body.
@@ -766,6 +824,38 @@ impl BykcApi {
         let status = response.status();
 
         let body = response.text().await.context("读取 BYKC 响应失败")?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+
+            return Err(anyhow::Error::new(Failure::new(
+                FailureKind::AuthExpired,
+                "博雅会话已失效 (HTTP 401)",
+            )));
+        }
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+
+            return Err(anyhow::Error::new(Failure::new(
+                FailureKind::RateLimited,
+                "博雅请求触发限流 (HTTP 429)",
+            )));
+        }
+
+        if status == reqwest::StatusCode::LOCKED {
+
+            return Err(anyhow::Error::new(Failure::new(
+                FailureKind::AccountLocked,
+                "博雅账号暂时锁定 (HTTP 423)",
+            )));
+        }
+
+        if status.is_server_error() {
+
+            return Err(anyhow::Error::new(Failure::new(
+                FailureKind::Http5xx,
+                format!("BYKC 服务返回异常 HTTP 状态: {status}"),
+            )));
+        }
 
         if !status.is_success() {
 

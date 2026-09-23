@@ -14,6 +14,8 @@
 
 use serde::Serialize;
 
+use crate::failure::{self, Operation};
+
 /// A stable failure code plus whether retrying could help.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -31,111 +33,11 @@ pub struct ErrorCode {
 
 pub fn classify(message: &str) -> ErrorCode {
 
-    let lower = message.to_ascii_lowercase();
-
-    let contains = |needle: &str| lower.contains(needle) || message.contains(needle);
-
-    // Authentication: the fix is to log in again, not to retry.
-    if contains("登录")
-        || contains("unauthor")
-        || contains("sso")
-        || contains("ticket")
-        || contains("access_token")
-        || contains("凭据")
-    {
-
-        return ErrorCode {
-            code:      "not_authenticated",
-            retryable: false,
-        };
-    }
-
-    // Configuration: the user must change something.
-    if contains("配置文件") || contains("权限") || contains("config") {
-
-        return ErrorCode {
-            code:      "config_invalid",
-            retryable: false,
-        };
-    }
-
-    // Bad arguments: the command line itself is wrong.
-    if contains("格式必须")
-        || contains("无效")
-        || contains("必须大于")
-        || contains("至少")
-        || contains("需要 --yes")
-    {
-
-        return ErrorCode {
-            code:      "invalid_argument",
-            retryable: false,
-        };
-    }
-
-    // Rate limiting and transient upstream trouble: retrying is reasonable.
-    if contains("429") || contains("限流") || contains("too many") {
-
-        return ErrorCode {
-            code:      "rate_limited",
-            retryable: true,
-        };
-    }
-
-    if contains("超时") || contains("timed out") || contains("timeout") {
-
-        return ErrorCode {
-            code:      "upstream_timeout",
-            retryable: true,
-        };
-    }
-
-    // The account or resource is in a state the caller must resolve.
-    if contains("423") || contains("locked") || contains("锁定") {
-
-        return ErrorCode {
-            code:      "account_locked",
-            retryable: true,
-        };
-    }
-
-    if contains("已满") || contains("不可预约") || contains("已被占用") {
-
-        return ErrorCode {
-            code:      "resource_unavailable",
-            retryable: false,
-        };
-    }
-
-    if contains("401") || contains("403") {
-
-        return ErrorCode {
-            code:      "not_authenticated",
-            retryable: false,
-        };
-    }
-
-    // Transport failures from the HTTP layer.
-    if contains("连接") || contains("connect") || contains("dns") || contains("解析") {
-
-        return ErrorCode {
-            code:      "network_error",
-            retryable: true,
-        };
-    }
-
-    // Upstream answered, but not with something usable.
-    if contains("http 5") || contains("502") || contains("503") || contains("bad gateway") {
-
-        return ErrorCode {
-            code:      "upstream_error",
-            retryable: true,
-        };
-    }
+    let classified = failure::classify_text(message, Operation::Read);
 
     ErrorCode {
-        code:      "unknown",
-        retryable: false,
+        code:      classified.code(),
+        retryable: classified.retryable && !classified.kind.is_auth_expiry(),
     }
 }
 
