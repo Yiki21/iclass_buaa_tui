@@ -26,21 +26,37 @@ pub(crate) async fn authenticated_api(
     debug_login: bool,
 ) -> Result<IClassApi> {
 
-    let api = IClassApi::new(config.use_vpn)?;
+    // Always a direct session.
+    //
+    // Why:
+    // The seminar-room service and the unified-auth SSO are both reachable
+    // directly, and the service reads its token from a cookie issued on its own
+    // host. A WebVPN session stores the SSO cookies under the gateway host
+    // instead, so the handshake there is anonymous and no token is ever
+    // issued. Using the configured mode would therefore break this command
+    // whenever that mode is WebVPN.
+    let api = IClassApi::new(false)?;
 
-    match api.login_with_diagnostic(&config.login_input()).await {
-        Ok(_session) => Ok(api),
+    // Stop after the unified-auth phase.
+    //
+    // Why:
+    // The seminar-room service authenticates off the SSO session and never
+    // touches iClass, but iClass is campus-only and is the phase that fails
+    // when the machine is off campus or behind a proxy. Running the full login
+    // would report a login failure even though the session this command needs
+    // was already established. `cgyy_login` still fails cleanly if the session
+    // turns out not to be valid.
+    if let Err(diagnostic) = api.login_sso_only(&config.login_input()).await {
 
-        Err(diagnostic) => {
+        if debug_login {
 
-            if debug_login {
-
-                eprintln!("{}", serde_json::to_string_pretty(&diagnostic)?);
-            }
-
-            bail!(diagnostic.summary);
+            eprintln!("{}", serde_json::to_string_pretty(&diagnostic)?);
         }
+
+        bail!(diagnostic.summary);
     }
+
+    Ok(api)
 }
 
 /// Reports a seminar-room failure with the advice that actually applies.

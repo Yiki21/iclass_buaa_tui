@@ -38,6 +38,14 @@ pub struct IClassApi {
     pub(crate) cookie_jar:         Arc<reqwest::cookie::Jar>,
 }
 
+/// Outcome of the unified-auth phase on its own.
+
+enum SsoPhase {
+    SessionEstablished,
+
+    Captcha(LoginCaptchaChallenge),
+}
+
 #[derive(Clone, Debug)]
 
 struct LoginFormState {
@@ -176,8 +184,75 @@ impl IClassApi {
             });
         }
 
+        match self
+            .authenticate_sso_as(username, &input.vpn_password)
+            .await?
+        {
+            SsoPhase::SessionEstablished => {}
+
+            SsoPhase::Captcha(challenge) => return Ok(LoginStart::Captcha(challenge)),
+        }
+
+        self.finish_login_session(input)
+            .await
+            .map(LoginStart::Complete)
+    }
+
+    /// Runs the unified-auth phase, leaving an SSO session in the cookie jar.
+    ///
+    /// Why this is its own step:
+    /// The full login continues into iClass, which is campus-only. Services
+    /// that authenticate purely off the SSO session — the seminar-room service
+    /// is one — must not be made to depend on that later phase, which fails
+    /// whenever the machine is off campus or behind a proxy even though the
+    /// session they need was established successfully.
+
+    async fn authenticate_sso(
+        &self,
+        input: &LoginInput,
+    ) -> std::result::Result<SsoPhase, LoginDiagnostic> {
+
+        let student_id = input.student_id.trim();
+
+        let username = if self.use_vpn {
+
+            input.vpn_username.trim()
+        } else {
+
+            student_id
+        };
+
+        // An empty password must not be treated as a completed session: that
+        // would report success while holding no session and surface later as an
+        // opaque auth failure. `start_login` rejected it before reaching here.
+        if input.vpn_password.is_empty() {
+
+            return Err(LoginDiagnostic {
+                kind:        LoginFailureKind::Validation,
+                stage:       "input".to_string(),
+                summary:     "统一认证密码不能为空".to_string(),
+                error_chain: vec!["统一认证密码不能为空".to_string()],
+                final_url:   None,
+                http_status: None,
+                page_hint:   None,
+                suggestions: vec!["请输入统一认证密码后重试".to_string()],
+            });
+        }
+
+        self.authenticate_sso_as(username, &input.vpn_password)
+            .await
+    }
+
+    /// Performs the form fetch and submission for one username/password pair.
+
+    async fn authenticate_sso_as(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> std::result::Result<SsoPhase, LoginDiagnostic> {
+
         let form_state = self
-            .fetch_login_form_state(username, &input.vpn_password)
+            .fetch_login_form_state(username, password)
             .await
             .map_err(|error| diagnose_login_error("sso_login_page", error, None, None, None))?;
 
@@ -188,7 +263,7 @@ impl IClassApi {
                 .await
                 .map_err(|error| diagnose_login_error("sso_captcha", error, None, None, None))?;
 
-            return Ok(LoginStart::Captcha(LoginCaptchaChallenge {
+            return Ok(SsoPhase::Captcha(LoginCaptchaChallenge {
                 login_url: form_state.login_url,
                 action_url: form_state.action_url,
                 form: form_state.form,
@@ -207,9 +282,7 @@ impl IClassApi {
         .await
         .map_err(|error| diagnose_login_error("sso_login_submit", error, None, None, None))?;
 
-        self.finish_login_session(input)
-            .await
-            .map(LoginStart::Complete)
+        Ok(SsoPhase::SessionEstablished)
     }
 
     pub async fn login_with_diagnostic(
@@ -235,6 +308,47 @@ impl IClassApi {
                         "TUI 中可继续输入验证码".to_string(),
                         "CLI 请先在浏览器完成一次登录".to_string(),
                     ],
+                })
+            }
+        }
+    }
+
+    /// Logs in far enough to hold a unified-auth session, then stops.
+    ///
+    /// Why:
+    /// Some services authenticate purely off the SSO session and never touch
+    /// iClass. The seminar-room service is one: its login only needs the
+    /// unified-auth cookies, and it is reachable directly.
+    ///
+    /// The full login continues into iClass, which is campus-only. When that
+    /// phase fails the caller sees a login error even though the SSO session —
+    /// everything the seminar-room service needs — was established first. This
+    /// stops after the SSO phase so that session can be used on its own.
+    ///
+    /// A captcha challenge is reported as success here because the SSO form was
+    /// reached, but no session exists yet; callers that need a real session must
+    /// still handle it. In practice the venue commands run where the form is
+    /// reachable, and `cgyy_login` fails cleanly if the session is absent.
+
+    pub async fn login_sso_only(
+        &self,
+        input: &LoginInput,
+    ) -> std::result::Result<(), LoginDiagnostic> {
+
+        match self.authenticate_sso(input).await? {
+            SsoPhase::SessionEstablished => Ok(()),
+
+            SsoPhase::Captcha(challenge) => {
+                Err(LoginDiagnostic {
+                    kind:        LoginFailureKind::Captcha,
+                    stage:       "sso_captcha".to_string(),
+                    summary:     "统一认证要求验证码，研讨室命令暂不支持，请先在 TUI 完成一次登录"
+                        .to_string(),
+                    error_chain: vec!["统一认证要求验证码".to_string()],
+                    final_url:   Some(challenge.login_url),
+                    http_status: None,
+                    page_hint:   Some(challenge.page_hint),
+                    suggestions: vec![format!("验证码图片路径: {}", challenge.captcha_path)],
                 })
             }
         }
