@@ -7,6 +7,7 @@ mod cgyy;
 mod cli;
 mod constants;
 mod evaluation;
+mod failure;
 mod iclass;
 mod libbook;
 mod logging;
