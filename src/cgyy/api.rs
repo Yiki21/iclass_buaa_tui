@@ -283,18 +283,17 @@ impl IClassApi {
 
     pub async fn cgyy_login(&self) -> Result<String> {
 
-        // The SSO handshake is always direct, never through WebVPN, and the
-        // cookie is read back at the direct URL.
+        // The SSO handshake must use the same connection mode as the session
+        // that authenticated it.
         //
         // Why:
-        // CGYY and the unified-auth SSO are both reachable from the campus
-        // network without WebVPN, and the service sets `sso_buaa_zhjs_token`
-        // on its own host during the redirect chain. Routing this request
-        // through d.buaa.edu.cn changes the host the cookie is issued for, so
-        // reading it back at the rewritten URL finds nothing and the login
-        // fails with "未获取到研讨室 SSO Token" — which is what happened in VPN
-        // mode. The reference implementation notes the same thing.
-        let manage_url = format!("{BASE_URL}sso/manageLogin");
+        // In direct mode the session cookies live on `cgyy.buaa.edu.cn` itself,
+        // so the handshake goes straight there. In VPN mode the unified-auth
+        // session was established through `d.buaa.edu.cn`, and the cookies
+        // that prove it live on that host; a direct handshake would be
+        // anonymous and the service would never issue `sso_buaa_zhjs_token`.
+        // The rewritten URL is therefore required in VPN mode and nowhere else.
+        let manage_url = cgyy_url(self.use_vpn, &format!("{BASE_URL}sso/manageLogin"));
 
         let _ = self
             .client
@@ -309,7 +308,7 @@ impl IClassApi {
 
             use reqwest::cookie::CookieStore;
 
-            let base = reqwest::Url::parse(BASE_URL)?;
+            let base = reqwest::Url::parse(&cgyy_url(self.use_vpn, BASE_URL))?;
 
             self.session_cookie_jar()
                 .cookies(&base)
@@ -329,7 +328,10 @@ impl IClassApi {
                 .map(|(name, _)| name)
                 .collect();
 
-            eprintln!("研讨室 Cookie 名称: {names:?}");
+            eprintln!(
+                "研讨室 Cookie 名称 ({}): {names:?}",
+                if self.use_vpn { "VPN" } else { "直连" }
+            );
         }
 
         let sso_token = cookie_header

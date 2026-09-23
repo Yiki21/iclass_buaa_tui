@@ -4,3 +4,6 @@ target
 .calude
 BUAA
 iclass_tui_ref
+
+# Local scratch (contains throwaway test credentials; never commit)
+.tmp/
