@@ -202,27 +202,65 @@ pub(crate) fn to_webvpn_url(raw_url: &str) -> String {
         Some(port) => format!("{}-{}", parsed.scheme(), port),
     };
 
-    let mut tail = parsed.path().to_string();
-
-    if let Some(query) = parsed.query() {
-
-        tail.push('?');
-
-        tail.push_str(query);
-    }
-
-    if let Some(fragment) = parsed.fragment() {
-
-        tail.push('#');
-
-        tail.push_str(fragment);
-    }
+    // Use the *encoded* forms and keep the path verbatim.
+    //
+    // Why:
+    // `Url::path()` and `query()` return decoded values, so rebuilding a URL
+    // from them re-encodes the handler's input and can change what the upstream
+    // sees. The path must also keep its exact shape — a trailing slash matters,
+    // and dropping it sends the request somewhere different. Upstream notes the
+    // same class of bug: rebuilding a path segment by segment turned `/web/`
+    // into `/web`, and the service then never accepted the login callback.
+    // `Url::path` already returns the percent-encoded path and preserves a
+    // trailing slash, so it is used verbatim. Rebuilding the path segment by
+    // segment would lose that slash, which upstream hit: `/web/` became `/web`
+    // and the handler matching the exact path stopped responding.
+    //
+    // The query is taken from the raw string rather than `parsed.query()`
+    // because SSO returns the token inside the fragment, where a `?` follows.
+    // Reading the query through the parser's own view is correct for `url`,
+    // but taking it from the raw text before `#` keeps the intent explicit and
+    // holds if the parser's behaviour ever differs.
+    let tail = format!(
+        "{}{}{}",
+        parsed.path(),
+        query_part(raw_url),
+        fragment_part(&parsed)
+    );
 
     format!(
         "https://d.buaa.edu.cn/{}/{encrypted}{tail}",
         protocol,
         encrypted = webvpn_encrypt_host(host)
     )
+}
+
+/// The real query string, taken from before any fragment.
+///
+/// Why:
+/// A fragment can itself contain a `?` and parameters — SSO hands tokens back
+/// that way. Reading the query through the URL parser's view of the fragment
+/// duplicates that token into the request query, where it does not belong.
+
+fn query_part(raw_url: &str) -> String {
+
+    let before_fragment = raw_url.split('#').next().unwrap_or(raw_url);
+
+    match before_fragment.split_once('?') {
+        Some((_, query)) if !query.is_empty() => format!("?{query}"),
+
+        _ => String::new(),
+    }
+}
+
+/// The fragment, including its `#`, when present.
+
+fn fragment_part(parsed: &reqwest::Url) -> String {
+
+    parsed
+        .fragment()
+        .map(|fragment| format!("#{fragment}"))
+        .unwrap_or_default()
 }
 
 fn webvpn_encrypt_host(host: &str) -> String {
@@ -311,6 +349,40 @@ mod tests {
             network_urls(true).my_center,
             "https://d.buaa.edu.cn/https-8346/77726476706e69737468656265737421f9f44d9d342326526b0988e29d51367ba018/?type=jumpMyCenter"
         );
+    }
+
+    #[test]
+
+    fn webvpn_url_does_not_copy_a_fragment_token_into_the_query() {
+
+        // SSO hands the token back inside the fragment, which itself contains a
+        // `?`. The token must stay in the fragment: copying it into the request
+        // query as well is rejected by the service. This pins that behaviour.
+        let rewritten = to_webvpn_url("http://i.buaa.edu.cn/web/#/login?type=0&token=abc123");
+
+        let before_fragment = rewritten.split('#').next().expect("应有路径部分");
+
+        assert!(
+            !before_fragment.contains("token="),
+            "片段里的 token 不应出现在请求查询中: {rewritten}"
+        );
+
+        assert!(
+            rewritten.ends_with("#/login?type=0&token=abc123"),
+            "片段应原样保留: {rewritten}"
+        );
+    }
+
+    #[test]
+
+    fn webvpn_url_keeps_a_trailing_slash() {
+
+        // A trailing slash is meaningful: upstream turned `/web/` into `/web`
+        // and the handler that matched the exact path stopped responding, which
+        // caused a login loop. This pins that a trailing slash survives.
+        let rewritten = to_webvpn_url("http://i.buaa.edu.cn/web/");
+
+        assert!(rewritten.ends_with("/web/"), "尾斜杠必须保留: {rewritten}");
     }
 
     #[test]

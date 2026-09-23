@@ -204,6 +204,15 @@ impl IClassApi {
             .query(&[("termCode", term_code)])
             .header("Accept", "application/json, text/javascript, */*; q=0.01")
             .header("X-Requested-With", "XMLHttpRequest")
+            // The exam endpoint is served from the home sub-app, and upstream
+            // sends that page as the referrer rather than the portal root.
+            .header(
+                "Referer",
+                academic_url(
+                    self.use_vpn,
+                    "https://byxt.buaa.edu.cn/jwapp/sys/homeapp/home/index.html",
+                ),
+            )
             .send()
             .await
             .context("请求考试安排失败")?;
