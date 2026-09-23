@@ -18,3 +18,5 @@ mod crypto;
 pub use api::{Area, AreaDetail, Booking, Library, Seat, TimeSlot};
 #[allow(unused_imports)]
 pub use crypto::{EncryptedReserveBody, encrypt_reserve};
+
+pub(crate) use api::library_intermediate_certificate;

@@ -17,15 +17,6 @@ use super::crypto::{EncryptedReserveBody, encrypt_reserve};
 use crate::constants::to_webvpn_url;
 use crate::iclass::IClassApi;
 
-/// User agent the service expects.
-///
-/// Why:
-/// It answers requests from a browser-like client and appears to reject some
-/// others outright, so the value matches what the site itself is served to.
-
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, \
-                          like Gecko) Chrome/134.0.0.0 Safari/537.36";
-
 const BASE_URL: &str = "https://booking.lib.buaa.edu.cn";
 
 /// Intermediate certificate the library server fails to send.
@@ -137,35 +128,16 @@ pub struct Booking {
     pub status_name: String,
 }
 
+pub(crate) fn library_intermediate_certificate() -> &'static [u8] {
+
+    LIBRARY_INTERMEDIATE_PEM
+}
+
 impl IClassApi {
     /// Sends an authenticated POST to the booking service.
     ///
-    /// How:
     /// The bearer token is prefixed without a space, matching what the service
-    /// expects (`bearer<token>`), and business failures are read from `code`
-    /// rather than from the HTTP status.
-
-    /// A client that additionally trusts the library's missing intermediate.
-    ///
-    /// Why:
-    /// The relaxation is scoped to this host rather than applied globally, so
-    /// no other service is affected by the library's broken chain.
-
-    fn libbook_client(&self) -> Result<reqwest::Client> {
-
-        let certificate = reqwest::Certificate::from_pem(LIBRARY_INTERMEDIATE_PEM)
-            .context("内置的图书馆中间证书无法解析")?;
-
-        reqwest::Client::builder()
-            // The shared cookie jar is required: the CAS handshake deposits the
-            // session cookies the login POST must present, and a fresh jar
-            // would arrive without them.
-            .cookie_provider(self.session_cookie_jar())
-            .user_agent(USER_AGENT)
-            .add_root_certificate(certificate)
-            .build()
-            .context("构建图书馆专用 HTTP 客户端失败")
-    }
+    /// expects (`bearer<token>`).
 
     async fn libbook_post(&self, path: &str, body: Value, token: Option<&str>) -> Result<Value> {
 
@@ -175,7 +147,7 @@ impl IClassApi {
         // without these headers the login answers `{"code":1,"message":
         // "操作失败"}` even with a valid ticket.
         let mut request = self
-            .libbook_client()?
+            .library_client()
             .post(&url)
             .header("Accept", "application/json, text/plain, */*")
             .header("X-Requested-With", "XMLHttpRequest")
@@ -197,38 +169,29 @@ impl IClassApi {
 
         let body_text = response.text().await.context("读取图书馆响应失败")?;
 
-        let value: Value = serde_json::from_str(&body_text).with_context(|| {
+        let result = validate_library_response(status, &body_text, path);
 
-            let preview: String = body_text.chars().take(120).collect();
+        if result.is_err() && token.is_some() {
 
-            format!("图书馆返回了非 JSON 响应: {preview}")
-        })?;
-
-        // 401 or an explicit login error means the token must be renewed.
-        if status == 401 {
-
-            bail!("图书馆登录状态已失效，请重新登录");
+            *self.libbook_token.lock().await = None;
         }
 
-        if let Some(code) = value.get("code").and_then(Value::as_i64)
-            && !matches!(code, 0 | 1)
-        {
-
-            let message = value
-                .get("message")
-                .or_else(|| value.get("msg"))
-                .and_then(Value::as_str)
-                .unwrap_or("图书馆接口请求失败");
-
-            bail!("{message}");
-        }
-
-        Ok(value)
+        result
     }
 
     /// Exchanges the SSO session for a library bearer token.
 
     pub async fn libbook_login(&self) -> Result<String> {
+
+        // Holding this per-API lock coalesces concurrent token refreshes.
+        let mut cached = self.libbook_token.lock().await;
+
+        if let Some(token) = cached.as_ref().and_then(crate::iclass::CachedToken::valid) {
+
+            return Ok(token);
+        }
+
+        *cached = None;
 
         let ticket = self.libbook_cas_ticket().await?;
 
@@ -239,26 +202,27 @@ impl IClassApi {
 
         // The ticket arrives percent-encoded from the redirect; the endpoint
         // expects the decoded value.
-        let decoded = percent_decode(&ticket);
+        let decoded = ticket;
 
         let response = self
             .libbook_post("login/user", json!({ "cas": decoded }), None)
             .await
             .context("图书馆登录失败")?;
 
-        if std::env::var_os("ICLASS_LIBBOOK_DEBUG").is_some() {
-
-            let full = serde_json::to_string(&response).unwrap_or_default();
-
-            eprintln!("图书馆登录响应: {}", &full[..full.len().min(600)]);
-        }
-
-        response
+        let token = response
             .pointer("/data/member/token")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("图书馆登录成功但未返回 token"))
+            .ok_or_else(|| anyhow!("图书馆登录成功但未返回 token"))?;
+
+        if std::env::var_os("ICLASS_LIBBOOK_DEBUG").is_some() {
+
+            eprintln!("图书馆登录响应字段: token_present=true");
+        }
+
+        *cached = Some(crate::iclass::CachedToken::new(token.to_string()));
+
+        Ok(token.to_string())
     }
 
     /// Walks the CAS chain and returns the ticket from the redirect URL.
@@ -280,6 +244,13 @@ impl IClassApi {
                 .send()
                 .await
                 .context("图书馆 CAS 跳转失败")?;
+
+            let status = response.status();
+
+            if !status.is_success() && !status.is_redirection() {
+
+                bail!("图书馆 CAS 请求失败: HTTP {status}");
+            }
 
             let url = response.url().to_string();
 
@@ -306,6 +277,11 @@ impl IClassApi {
                     summarize_cas_page(&body)
                 );
             };
+
+            if !status.is_redirection() {
+
+                bail!("图书馆 CAS 返回非跳转响应，未取得 ticket");
+            }
 
             current = reqwest::Url::parse(&url)
                 .and_then(|base| base.join(location))
@@ -593,6 +569,79 @@ impl IClassApi {
     }
 }
 
+fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Value> {
+
+    if status == 401 || status == 403 {
+
+        bail!("图书馆登录状态已失效，请重新登录");
+    }
+
+    if !(200..300).contains(&status) {
+
+        bail!("图书馆请求失败: HTTP {status}");
+    }
+
+    let value: Value = serde_json::from_str(body)
+        .with_context(|| format!("图书馆返回了非 JSON 响应: bytes={}", body.len()))?;
+
+    let code = value.get("code").and_then(flexible_i64);
+
+    let message = value
+        .get("message")
+        .or_else(|| value.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if value.get("success") == Some(&Value::Bool(false))
+        || value.get("success").and_then(Value::as_str) == Some("false")
+        || message.contains("失败")
+        || code.is_some_and(|code| !matches!(code, 0 | 1))
+    {
+
+        bail!("图书馆接口明确报告失败（code={code:?}）");
+    }
+
+    let has_rows = |keys: &[&str]| keys.iter().any(|key| data_list(&value, key).is_some());
+
+    let valid = match path {
+        "login/user" => {
+            value
+                .pointer("/data/member/token")
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.trim().is_empty())
+        }
+        "space/pcTopFor" => has_rows(&["list"]),
+        "space/pick" => has_rows(&["area", "list"]),
+        "Space/map" => {
+            value
+                .pointer("/data/timeSlots")
+                .is_some_and(Value::is_array)
+        }
+        "Space/seat" | "member/seat" => has_rows(&["list"]),
+        // An actual booking identifier is affirmative evidence. Cancellation
+        // has no verified success envelope yet, so do not claim completion.
+        "space/confirm" => {
+            value
+                .get("data")
+                .and_then(parse_booking)
+                .is_some_and(|b| !b.id.is_empty())
+        }
+        _ => false,
+    };
+
+    if !valid {
+
+        if matches!(path, "space/confirm" | "space/cancel") {
+
+            bail!("图书馆写入结果未知，请查询预约记录确认，勿直接重试");
+        }
+
+        bail!("图书馆响应缺少预期数据，不能确认请求成功");
+    }
+
+    Ok(value)
+}
+
 fn libbook_url(use_vpn: bool, raw: &str) -> String {
 
     if use_vpn {
@@ -602,44 +651,6 @@ fn libbook_url(use_vpn: bool, raw: &str) -> String {
 
         raw.to_string()
     }
-}
-
-/// Decodes percent escapes, leaving other characters alone.
-///
-/// Why:
-/// The ticket comes back percent-encoded in the redirect URL. Posting the
-/// encoded form makes the service reject an otherwise valid ticket.
-
-fn percent_decode(value: &str) -> String {
-
-    let bytes = value.as_bytes();
-
-    let mut output = Vec::with_capacity(bytes.len());
-
-    let mut index = 0;
-
-    while index < bytes.len() {
-
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-
-            let hex = &value[index + 1..index + 3];
-
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
-
-                output.push(byte);
-
-                index += 3;
-
-                continue;
-            }
-        }
-
-        output.push(bytes[index]);
-
-        index += 1;
-    }
-
-    String::from_utf8_lossy(&output).into_owned()
 }
 
 /// Pulls the CAS ticket out of a URL.
@@ -684,9 +695,7 @@ fn summarize_cas_page(body: &str) -> String {
 
     if clues.is_empty() {
 
-        let preview: String = body.chars().take(80).collect();
-
-        return format!("无法识别（{}）", preview.replace('\n', " "));
+        return format!("无法识别（bytes={}）", body.len());
     }
 
     clues.join(", ")
@@ -701,37 +710,16 @@ fn extract_cas_ticket(url: &str) -> Option<String> {
         .find(|(key, _)| key == "cas" || key == "ticket")
         .map(|(_, value)| value.to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| {
-
-            // Fall back to a plain text search, but only for a query-style
-            // parameter: the SSO service URL itself contains `login%2Fcas`, so
-            // a bare `cas=` substring match returns that path fragment as if it
-            // were a ticket, and the login then fails with an opaque
-            // "操作失败".
-            ["?cas=", "&cas=", "?ticket=", "&ticket="]
-                .iter()
-                .find_map(|marker| {
-
-                    let rest = url.split(marker).nth(1)?;
-
-                    let value: String = rest
-                        .chars()
-                        .take_while(|c| !matches!(c, '&' | '#'))
-                        .collect();
-
-                    (!value.is_empty()).then_some(value)
-                })
-        })
 }
 
 fn data_list(response: &Value, key: &str) -> Option<Vec<Value>> {
 
-    response
-        .get("data")?
-        .get(key)?
-        .as_array()
+    let data = response.get("data")?;
+
+    data.get(key)
+        .and_then(Value::as_array)
+        .or_else(|| data.as_array())
         .cloned()
-        .or_else(|| response.get("data").and_then(Value::as_array).cloned())
 }
 
 fn flexible_i64(value: &Value) -> Option<i64> {

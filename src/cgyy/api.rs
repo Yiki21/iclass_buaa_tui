@@ -578,20 +578,13 @@ impl IClassApi {
             .await
             .context("创建预约上下文失败")?;
 
-        let mut last_error = None;
-
-        for _ in 0..3 {
-
-            match self
-                .cgyy_submit_once(token, request, &order_json, &reservation_token)
-                .await
-            {
-                Ok(order) => return Ok(order),
-                Err(error) => last_error = Some(error),
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow!("预约提交失败")))
+        // The submission request changes server state. Once it has been sent,
+        // a timeout or lost response leaves the outcome unknown; replaying it
+        // could create a duplicate reservation. Retry only by asking the user
+        // to inspect orders, never by sending the write again.
+        self.cgyy_submit_once(token, request, &order_json, &reservation_token)
+            .await
+            .map_err(|error| anyhow!("预约结果未知：{}。请查询研讨室订单后再决定是否重试", error))
     }
 
     async fn cgyy_submit_once(

@@ -6,7 +6,7 @@
 //! exactly what would be booked and stops, which makes a mistyped command
 //! harmless.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::cgyy::{DayInfo, ReservationRequest};
 use crate::iclass::IClassApi;
@@ -26,37 +26,42 @@ pub(crate) async fn authenticated_api(
     debug_login: bool,
 ) -> Result<IClassApi> {
 
-    // Always a direct session.
-    //
-    // Why:
-    // The seminar-room service and the unified-auth SSO are both reachable
-    // directly, and the service reads its token from a cookie issued on its own
-    // host. A WebVPN session stores the SSO cookies under the gateway host
-    // instead, so the handshake there is anonymous and no token is ever
-    // issued. Using the configured mode would therefore break this command
-    // whenever that mode is WebVPN.
-    let api = IClassApi::new(false)?;
+    let api = IClassApi::new(config.use_vpn)?;
 
-    // Stop after the unified-auth phase.
-    //
-    // Why:
-    // The seminar-room service authenticates off the SSO session and never
-    // touches iClass, but iClass is campus-only and is the phase that fails
-    // when the machine is off campus or behind a proxy. Running the full login
-    // would report a login failure even though the session this command needs
-    // was already established. `cgyy_login` still fails cleanly if the session
-    // turns out not to be valid.
-    if let Err(diagnostic) = api.login_sso_only(&config.login_input()).await {
+    if let Err(diagnostic) = api.login_with_diagnostic(&config.login_input()).await {
 
         if debug_login {
 
             eprintln!("{}", serde_json::to_string_pretty(&diagnostic)?);
         }
 
-        bail!(diagnostic.summary);
+        let mut error = anyhow::anyhow!(diagnostic.summary);
+
+        for cause in diagnostic.error_chain.into_iter().rev() {
+
+            error = error.context(cause);
+        }
+
+        return Err(error);
     }
 
     Ok(api)
+}
+
+async fn venue_api(config: &AutomationConfig, debug_login: bool) -> Result<IClassApi> {
+
+    match IClassApi::for_venue(&config.login_input()).await {
+        Ok(api) => Ok(api),
+        Err(error) => {
+
+            if debug_login {
+
+                eprintln!("研讨室 SSO 登录失败: {error:#}");
+            }
+
+            Err(error)
+        }
+    }
 }
 
 /// Reports a seminar-room failure with the advice that actually applies.
@@ -73,7 +78,8 @@ fn venue_error(error: anyhow::Error) -> anyhow::Error {
     if text.contains("SSO Token") || text.contains("登录状态已失效") {
 
         return anyhow::anyhow!(
-            "{text}\n研讨室需要有效统一认证会话，请先运行 list-today 完成一次登录。"
+            "{text}\n研讨室需要有效统一认证会话，\
+             请检查当前命令的统一认证配置后重试（进程间不共享会话）。"
         );
     }
 
@@ -89,7 +95,7 @@ pub(crate) async fn venues_command(args: VenueArgs) -> Result<()> {
 
     let config = load_config(args.config.as_deref())?;
 
-    let api = authenticated_api(&config, args.debug_login).await?;
+    let api = venue_api(&config, args.debug_login).await?;
 
     let token = venue_token(&api).await?;
 
@@ -162,7 +168,7 @@ pub(crate) async fn venue_slots_command(args: VenueSlotsArgs) -> Result<()> {
 
     let config = load_config(args.config.as_deref())?;
 
-    let api = authenticated_api(&config, args.debug_login).await?;
+    let api = venue_api(&config, args.debug_login).await?;
 
     let token = venue_token(&api).await?;
 
@@ -189,7 +195,7 @@ pub(crate) async fn venue_reserve_command(args: VenueReserveArgs) -> Result<()> 
 
     let config = load_config(args.config.as_deref())?;
 
-    let api = authenticated_api(&config, args.debug_login).await?;
+    let api = venue_api(&config, args.debug_login).await?;
 
     let token = venue_token(&api).await?;
 
@@ -297,7 +303,7 @@ pub(crate) async fn venue_orders_command(args: VenueOrdersArgs) -> Result<()> {
 
     let config = load_config(args.config.as_deref())?;
 
-    let api = authenticated_api(&config, args.debug_login).await?;
+    let api = venue_api(&config, args.debug_login).await?;
 
     let token = venue_token(&api).await?;
 

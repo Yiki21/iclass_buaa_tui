@@ -36,6 +36,12 @@ pub struct IClassApi {
     /// own. Building it with a fresh jar left its CAS request unauthenticated,
     /// so no token ever came back.
     pub(crate) cookie_jar:         Arc<reqwest::cookie::Jar>,
+    /// Reused client for the library service, with its scoped intermediate
+    /// certificate and the same cookie jar as the authentication clients.
+    pub(crate) libbook_client:     reqwest::Client,
+    pub(crate) libbook_token:      Arc<tokio::sync::Mutex<Option<super::CachedToken>>>,
+    #[cfg(test)]
+    sso_entry_override:            Option<String>,
 }
 
 /// Outcome of the unified-auth phase on its own.
@@ -46,7 +52,7 @@ enum SsoPhase {
     Captcha(LoginCaptchaChallenge),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 
 struct LoginFormState {
     login_url:           String,
@@ -90,32 +96,54 @@ impl IClassApi {
 
         let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
 
-        let client = reqwest::Client::builder()
+        let client = super::http::client_builder()
             .cookie_provider(cookie_jar.clone())
             .default_headers(headers.clone())
             .build()
             .context("failed to build reqwest client")?;
 
-        let no_redirect_client = reqwest::Client::builder()
+        let no_redirect_client = super::http::client_builder()
             .cookie_provider(cookie_jar.clone())
-            .default_headers(headers)
+            .default_headers(headers.clone())
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build no-redirect reqwest client")?;
+
+        let certificate =
+            reqwest::Certificate::from_pem(crate::libbook::library_intermediate_certificate())
+                .context("内置的图书馆中间证书无法解析")?;
+
+        let libbook_client = super::http::client_builder()
+            .cookie_provider(cookie_jar.clone())
+            .default_headers(headers)
+            .add_root_certificate(certificate)
+            .build()
+            .context("failed to build library reqwest client")?;
 
         Ok(Self {
             client,
             no_redirect_client,
             use_vpn,
             cookie_jar,
+            libbook_client,
+            libbook_token: Arc::new(tokio::sync::Mutex::new(None)),
+            #[cfg(test)]
+            sso_entry_override: None,
         })
     }
 
-    /// Shares this API's authenticated cookie session with another client.
+    /// Builds a direct client for the seminar-room service and authenticates
+    /// only through SSO. It deliberately does not call any iClass endpoint.
 
-    pub(crate) fn session_cookie_jar(&self) -> Arc<reqwest::cookie::Jar> {
+    pub async fn for_venue(input: &LoginInput) -> Result<Self> {
 
-        self.cookie_jar.clone()
+        let api = Self::new(false)?;
+
+        api.login_sso_only(input)
+            .await
+            .map_err(login_diagnostic_error)?;
+
+        Ok(api)
     }
 
     /// Logs in and captures the server clock offset needed by later sign requests.
@@ -124,13 +152,50 @@ impl IClassApi {
 
         self.login_with_diagnostic(input)
             .await
-            .map_err(|diagnostic| anyhow!(diagnostic.summary))
+            .map_err(login_diagnostic_error)
+    }
+
+    pub(crate) fn session_cookie_jar(&self) -> Arc<reqwest::cookie::Jar> {
+
+        self.cookie_jar.clone()
+    }
+
+    pub(crate) fn library_client(&self) -> reqwest::Client {
+
+        self.libbook_client.clone()
     }
 
     pub async fn start_login(
         &self,
         input: &LoginInput,
     ) -> std::result::Result<LoginStart, LoginDiagnostic> {
+
+        *self.libbook_token.lock().await = None;
+
+        match self.authenticate_sso(input).await? {
+            SsoPhase::SessionEstablished => {}
+
+            SsoPhase::Captcha(challenge) => return Ok(LoginStart::Captcha(challenge)),
+        }
+
+        self.finish_login_session(input)
+            .await
+            .map(LoginStart::Complete)
+    }
+
+    /// Runs the unified-auth phase, leaving an SSO session in the cookie jar.
+    ///
+    /// Why this is its own step:
+    /// The full login continues into iClass, which is campus-only. Services
+    /// that authenticate purely off the SSO session — the seminar-room service
+    /// is one — must not be made to depend on that later phase, which fails
+    /// whenever the machine is off campus or behind a proxy even though the
+    /// session they need was established successfully.
+
+    async fn authenticate_sso(
+        &self,
+        input: &LoginInput,
+    ) -> std::result::Result<SsoPhase, LoginDiagnostic> {
 
         let student_id = input.student_id.trim();
 
@@ -170,61 +235,6 @@ impl IClassApi {
             });
         }
 
-        if input.vpn_password.is_empty() {
-
-            return Err(LoginDiagnostic {
-                kind:        LoginFailureKind::Validation,
-                stage:       "input".to_string(),
-                summary:     "统一认证密码不能为空".to_string(),
-                error_chain: vec!["统一认证密码不能为空".to_string()],
-                final_url:   None,
-                http_status: None,
-                page_hint:   None,
-                suggestions: vec!["请输入统一认证密码后重试".to_string()],
-            });
-        }
-
-        match self
-            .authenticate_sso_as(username, &input.vpn_password)
-            .await?
-        {
-            SsoPhase::SessionEstablished => {}
-
-            SsoPhase::Captcha(challenge) => return Ok(LoginStart::Captcha(challenge)),
-        }
-
-        self.finish_login_session(input)
-            .await
-            .map(LoginStart::Complete)
-    }
-
-    /// Runs the unified-auth phase, leaving an SSO session in the cookie jar.
-    ///
-    /// Why this is its own step:
-    /// The full login continues into iClass, which is campus-only. Services
-    /// that authenticate purely off the SSO session — the seminar-room service
-    /// is one — must not be made to depend on that later phase, which fails
-    /// whenever the machine is off campus or behind a proxy even though the
-    /// session they need was established successfully.
-
-    async fn authenticate_sso(
-        &self,
-        input: &LoginInput,
-    ) -> std::result::Result<SsoPhase, LoginDiagnostic> {
-
-        let student_id = input.student_id.trim();
-
-        let username = if self.use_vpn {
-
-            input.vpn_username.trim()
-        } else {
-
-            student_id
-        };
-
-        // An empty password must not be treated as a completed session: that
-        // would report success while holding no session and surface later as an
-        // opaque auth failure. `start_login` rejected it before reaching here.
         if input.vpn_password.is_empty() {
 
             return Err(LoginDiagnostic {
@@ -300,13 +310,13 @@ impl IClassApi {
                                   请改用浏览器登录"
                         .to_string(),
                     error_chain: vec!["当前 VPN 登录需要验证码".to_string()],
-                    final_url:   Some(challenge.login_url),
+                    final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
                     http_status: None,
                     page_hint:   Some(challenge.page_hint),
                     suggestions: vec![
                         format!("验证码图片路径: {}", challenge.captcha_path),
                         "TUI 中可继续输入验证码".to_string(),
-                        "CLI 请先在浏览器完成一次登录".to_string(),
+                        "CLI 不支持验证码；浏览器或其他进程的会话不会共享".to_string(),
                     ],
                 })
             }
@@ -325,10 +335,7 @@ impl IClassApi {
     /// everything the seminar-room service needs — was established first. This
     /// stops after the SSO phase so that session can be used on its own.
     ///
-    /// A captcha challenge is reported as success here because the SSO form was
-    /// reached, but no session exists yet; callers that need a real session must
-    /// still handle it. In practice the venue commands run where the form is
-    /// reachable, and `cgyy_login` fails cleanly if the session is absent.
+    /// A captcha challenge is an error: reaching a form is not authentication.
 
     pub async fn login_sso_only(
         &self,
@@ -342,10 +349,11 @@ impl IClassApi {
                 Err(LoginDiagnostic {
                     kind:        LoginFailureKind::Captcha,
                     stage:       "sso_captcha".to_string(),
-                    summary:     "统一认证要求验证码，研讨室命令暂不支持，请先在 TUI 完成一次登录"
+                    summary:     "统一认证要求验证码，当前研讨室会话未建立；\
+                                  其他进程的登录不会共享会话"
                         .to_string(),
                     error_chain: vec!["统一认证要求验证码".to_string()],
-                    final_url:   Some(challenge.login_url),
+                    final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
                     http_status: None,
                     page_hint:   Some(challenge.page_hint),
                     suggestions: vec![format!("验证码图片路径: {}", challenge.captcha_path)],
@@ -370,7 +378,7 @@ impl IClassApi {
                 stage:       "vpn_captcha".to_string(),
                 summary:     "验证码不能为空".to_string(),
                 error_chain: vec!["验证码不能为空".to_string()],
-                final_url:   Some(challenge.login_url.clone()),
+                final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
                 http_status: None,
                 page_hint:   Some(challenge.page_hint.clone()),
                 suggestions: vec!["输入验证码后重试".to_string()],
@@ -723,7 +731,7 @@ impl IClassApi {
 
         if timestamp.is_empty() {
 
-            bail!("iClass 签到服务器时间响应格式异常: {data}");
+            bail!("iClass 签到服务器时间响应格式异常");
         }
 
         Ok(timestamp)
@@ -788,6 +796,9 @@ impl IClassApi {
 
             sso_login_entry(false)
         };
+
+        #[cfg(test)]
+        let login_entry = self.sso_entry_override.clone().unwrap_or(login_entry);
 
         let response = self
             .client
@@ -883,7 +894,7 @@ impl IClassApi {
 
         for _ in 0..16 {
 
-            while current_response.status().is_redirection() {
+            if current_response.status().is_redirection() {
 
                 let current_url = current_response.url().to_string();
 
@@ -900,7 +911,10 @@ impl IClassApi {
                     .get(&next_url)
                     .send()
                     .await
-                    .with_context(|| format!("跟随 SSO 登录跳转失败: {next_url}"))?;
+                    .map_err(reqwest::Error::without_url)
+                    .context("跟随 SSO 登录跳转失败")?;
+
+                continue;
             }
 
             let http_status = current_response.status();
@@ -1165,7 +1179,15 @@ impl IClassApi {
             .await
             .context("读取验证码图片失败")?;
 
-        let path = std::env::temp_dir().join(format!("iclass-buaa-tui-captcha-{captcha_id}.jpg"));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join("auth-captchas")
+            .join(format!("iclass-buaa-tui-captcha-{captcha_id}.jpg"));
+
+        if let Some(parent) = path.parent() {
+
+            fs::create_dir_all(parent).context("创建项目内验证码缓存目录失败")?;
+        }
 
         fs::write(&path, bytes)
             .with_context(|| format!("写入验证码图片失败: {}", path.display()))?;
@@ -1600,6 +1622,18 @@ fn format_anyhow_chain(error: &anyhow::Error) -> String {
     })
 }
 
+fn login_diagnostic_error(diagnostic: LoginDiagnostic) -> anyhow::Error {
+
+    let mut error = anyhow!(diagnostic.summary);
+
+    for cause in diagnostic.error_chain.into_iter().rev() {
+
+        error = error.context(cause);
+    }
+
+    error
+}
+
 fn diagnose_login_error(
     stage: &str,
     error: anyhow::Error,
@@ -1608,7 +1642,10 @@ fn diagnose_login_error(
     page_hint: Option<String>,
 ) -> LoginDiagnostic {
 
-    let error_chain = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+    let error_chain = error
+        .chain()
+        .map(|cause| super::http::diagnostic_text(&cause.to_string()))
+        .collect::<Vec<_>>();
 
     let top = error_chain
         .first()
@@ -1652,7 +1689,7 @@ fn diagnose_login_error(
         stage: stage.to_string(),
         summary,
         error_chain,
-        final_url,
+        final_url: final_url.map(|url| super::http::diagnostic_url(&url)),
         http_status,
         page_hint,
         suggestions: login_suggestions(kind),
@@ -1765,7 +1802,7 @@ fn login_suggestions(kind: LoginFailureKind) -> Vec<String> {
 
             vec![
                 "当前登录需要验证码".to_string(),
-                "先在浏览器完成一次 WebVPN / SSO 登录后再重试".to_string(),
+                "请在当前 TUI 登录流程输入验证码；其他进程的会话不会共享".to_string(),
             ]
         }
         LoginFailureKind::Credentials => {
@@ -2380,12 +2417,6 @@ fn append_captcha_fields(
 
 fn summarize_login_page(body: &str) -> String {
 
-    let title = Html::parse_document(body)
-        .select(&Selector::parse("title").expect("valid title selector"))
-        .next()
-        .map(|node| node.text().collect::<String>().trim().to_string())
-        .filter(|value| !value.is_empty());
-
     let markers = [
         ("captcha", needs_vpn_captcha(body)),
         ("bad_credentials", looks_like_bad_vpn_credentials(body)),
@@ -2403,21 +2434,7 @@ fn summarize_login_page(body: &str) -> String {
     .collect::<Vec<_>>()
     .join(",");
 
-    format!(
-        "title={}, markers={}, body_prefix={}",
-        title.unwrap_or_else(|| "<none>".to_string()),
-        if markers.is_empty() {
-
-            "<none>"
-        } else {
-
-            &markers
-        },
-        body.chars()
-            .take(120)
-            .collect::<String>()
-            .replace(char::is_whitespace, " ")
-    )
+    format!("markers={markers}, bytes={}", body.len())
 }
 
 fn vpn_login_error(final_url: &str, body: &str) -> Result<()> {
@@ -2451,8 +2468,8 @@ async fn parse_json(response: reqwest::Response) -> Result<Value> {
     serde_json::from_str(&body).with_context(|| {
 
         format!(
-            "响应不是合法 JSON，HTTP 状态: {status}, body: {}",
-            body.chars().take(200).collect::<String>()
+            "响应不是合法 JSON，HTTP 状态: {status}, bytes={}",
+            body.len()
         )
     })
 }
@@ -2472,7 +2489,10 @@ fn ensure_status_ok(data: &Value) -> Result<()> {
         return Ok(());
     }
 
-    bail!("iClass API 返回错误: {}", data);
+    bail!(
+        "iClass API 返回错误: STATUS={}",
+        status.as_deref().unwrap_or("missing")
+    );
 }
 
 /// Reports whether iClass signalled "no data" rather than a real failure.
@@ -2971,7 +2991,7 @@ mod tests {
 
         let summary = summarize_login_page(body);
 
-        assert!(summary.contains("北京航空航天大学统一身份认证"));
+        assert!(summary.contains("bytes="));
 
         assert!(summary.contains("captcha"));
 
@@ -2986,7 +3006,7 @@ mod tests {
 
         let summary = summarize_login_page(body);
 
-        assert!(summary.contains("统一身份认证 - 登录失败"));
+        assert!(summary.contains("bytes="));
 
         assert!(summary.contains("bad_credentials"));
 
