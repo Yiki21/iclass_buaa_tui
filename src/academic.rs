@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::constants::{
     BUAA_CLASSROOM_QUERY_URL, BUAA_CLASSROOM_REFERRER, BUAA_CLASSROOM_SYNC_URL, BUAA_SCORE_URL,
-    BYXT_EXAMS_URL, to_webvpn_url,
+    BYXT_EXAMS_URL, BYXT_HOME_URL, to_webvpn_url,
 };
 use crate::iclass::IClassApi;
 
@@ -171,6 +171,32 @@ pub struct ClassroomRoom {
 
 impl IClassApi {
     pub async fn get_exams(&self, term_code: &str) -> Result<Vec<ExamItem>> {
+
+        // Visit the portal before querying it.
+        //
+        // Why:
+        // BYXT issues its own session cookie only once its entry page has been
+        // requested through the SSO chain; the exam endpoint answers a bare 401
+        // until then. The grades path already did this, which is why grades
+        // worked while exams did not.
+        let home = self
+            .client
+            .get(academic_url(self.use_vpn, BYXT_HOME_URL))
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .send()
+            .await
+            .context("打开本科教务门户失败")?;
+
+        let home_status = home.status().as_u16();
+
+        let home_url = home.url().to_string();
+
+        let home_body = home.text().await.context("读取本科教务门户页面失败")?;
+
+        ensure_academic_response(home_status, &home_url, &home_body, "考试安排")?;
 
         let response = self
             .client
