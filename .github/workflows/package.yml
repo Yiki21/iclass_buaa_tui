@@ -10,7 +10,12 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Quality gate
+    uses: ./.github/workflows/ci.yml
+
   build-macos:
+    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +59,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
+    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +100,7 @@ jobs:
           if-no-files-found: error
 
   build-deb:
+    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -140,6 +147,7 @@ jobs:
           if-no-files-found: error
 
   build-rpm:
+    needs: quality
     strategy:
       fail-fast: false
       matrix:

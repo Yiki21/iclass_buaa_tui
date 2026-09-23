@@ -89,15 +89,15 @@ them. Do not call it without an explicit human instruction, and read
 ## Order of operations
 
 1. `doctor --json` — reachability of each upstream service, before anything else.
-2. `list-today --json` — establishes a session, which everything else reuses.
+2. `list-today --json` — verifies authentication for that process. Each CLI invocation creates its own in-memory cookie jar; a previous command does not establish a session for a later process.
 3. Reads: `today`, `exams`, `grades --all`, `tasks`, `venues`, `seats`, `clockin`, `eval`.
 4. Writes, last, and only with an explicit instruction.
 
 ## Things that are not obvious
 
-- Most commands log in on their own, so a session failure surfaces as
-  `not_authenticated` mid-run rather than at the start. One `list-today` first
-  avoids that.
+- Most commands log in on their own. A successful `list-today` does not share
+  cookies with a later command, so it is a diagnostic step rather than a
+  cross-process login bootstrap.
 - `clockin-submit` requires `--photo` pointing at a real image; the service
   rejects a submission without one.
 - The TUI is a separate mode and is not scriptable. Do not launch the binary

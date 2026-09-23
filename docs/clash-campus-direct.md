@@ -13,7 +13,7 @@ ERR  研讨室加载失败: 未获取到研讨室 SSO Token
 
 ## 最快的判断方法（实测）
 
-**关掉 TUN，问题立刻全部消失。** 这是唯一一次改动就让所有校内服务恢复的操作：
+**关掉 TUN，问题立刻全部消失。** 这是本机当时的诊断对照，说明故障发生在代理的 DNS/流量接管链路；它不是所有网络和所有 Mihomo 配置的通用修复。
 
 ```bash
 # mihomo 的控制接口，PATCH 一下即可，不用重启
@@ -30,7 +30,7 @@ curl -sS --unix-socket "$SOCK" -X PATCH \
 | `cgyy.buaa.edu.cn` | `000` | `302` |
 | `sso.buaa.edu.cn` | `000` | `302` / `200` |
 
-**根因不是路由，是 DNS。** TUN 开启时 `fake-ip-filter` 没能拦住校内域名，于是它们被解析成 fake-IP：
+**这次故障同时涉及 DNS 和 TUN 接管。** TUN 开启时 `fake-ip-filter` 没能拦住校内域名，于是它们被解析成 fake-IP：
 
 ```
 # 系统解析器（实测）
@@ -45,10 +45,10 @@ ygdk.buaa.edu.cn -> 198.18.9.29     # fake-IP
 
 改 `~/.config/mihomo-party/mihomo.yaml` 或 `work/config.yaml` **都不持久**。实测：`controlDns` 被改回 `false`、`route-exclude-address` 被重置，即使没有更新订阅。mihomo-party 的 GUI 状态才是权威，它会在运行时重新生成配置。
 
-持久做法只有两个：
+持久配置应通过 Mihomo-party 的 GUI 覆写或规则设置完成，具体取决于当前 profile。直接编辑生成的文件不可靠：
 
-1. 在 GUI 里启用 `~/.config/mihomo-party/override/buaa-direct-dns.js`（JS 覆写，注册在 `override.yaml`），或
-2. **直接关掉 TUN / 改用规则模式**——实测最省事，且不需要理解 override 机制。
+1. 用 GUI 的当前生效 profile 配置 `route-exclude-address`、`nameserver-policy` 和 fake-ip 过滤规则，并重载核心。
+2. 需要诊断时可以临时关闭 TUN；确认服务恢复后，再根据路由和 DNS 结果决定是保留规则模式、使用系统 DNS，还是重新配置 TUN。不要让程序自动改写代理配置。
 
 ## 原因
 
@@ -78,7 +78,7 @@ ip route get 10.20.11.166
 
 ## 修复
 
-### 方案一：把校内网段排除出 TUN（最彻底）
+### 方案一：把校内网段排除出 TUN
 
 在 mihomo 配置里设置：
 
@@ -90,7 +90,7 @@ tun:
     - 192.168.0.0/16
 ```
 
-`route-exclude-address` 只在核心启动时生效，改完需要**重启核心**，热重载不够。
+`route-exclude-address` 的行为取决于 Mihomo 核心和 GUI profile，改完应按当前客户端要求重载或重启核心，再用 `ip route get` 验证。
 
 mihomo-party 用户：在「覆写」里放一个 JS 覆写（`override/*.js`），或直接在 TUN 设置面板里填「路由排除地址」。覆写的好处是订阅更新时不会被覆盖。
 
@@ -133,7 +133,7 @@ dns:
 ```bash
 # 1. 路由不再走代理
 ip route get 10.20.11.166
-# 期望：via 10.135.0.1 dev wlp0s20f3（不是 dev Mihomo）
+# 结果应与当前网络拓扑一致。校园网直连通常不是 dev Mihomo，但 VPN/代理网络可能有不同的合法路由。
 
 # 2. 各服务连通性
 iclass_buaa_tui doctor
@@ -144,5 +144,5 @@ iclass_buaa_tui doctor
 
 ## 备注
 
-- 方案一是根治；方案二、三只是缓解，因为只要流量还进隧道，代理自身的出站路径仍可能出问题。
+- 没有一个方案能脱离当前网络拓扑直接称为“根治”。同时检查域名解析、路由设备和 TLS 连接，避免只看其中一项。
 - 本项目的 `doctor` 命令会给出每条上游的解析地址与状态，是排查这类问题最快的入口。
