@@ -11,6 +11,45 @@ ERR  研讨室加载失败: 未获取到研讨室 SSO Token
 
 而普通外网（`google.com`）正常。
 
+## 最快的判断方法（实测）
+
+**关掉 TUN，问题立刻全部消失。** 这是唯一一次改动就让所有校内服务恢复的操作：
+
+```bash
+# mihomo 的控制接口，PATCH 一下即可，不用重启
+SOCK=$(ss -lxnp | grep -o '/tmp/mihomo-party-[0-9-]\+\.sock' | head -1)
+curl -sS --unix-socket "$SOCK" -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"tun":{"enable":false}}' http://localhost/configs
+```
+
+关闭后立即验证：
+
+| 主机 | 开 TUN | 关 TUN |
+| --- | --- | --- |
+| `cgyy.buaa.edu.cn` | `000` | `302` |
+| `sso.buaa.edu.cn` | `000` | `302` / `200` |
+
+**根因不是路由，是 DNS。** TUN 开启时 `fake-ip-filter` 没能拦住校内域名，于是它们被解析成 fake-IP：
+
+```
+# 系统解析器（实测）
+cgyy.buaa.edu.cn -> 198.18.9.34     # fake-IP，不可路由
+sso.buaa.edu.cn  -> 198.18.4.40     # fake-IP
+ygdk.buaa.edu.cn -> 198.18.9.29     # fake-IP
+```
+
+`198.18.0.0/16` 是 TUN 的虚拟段，校内根本没有这些地址。所以「把 `10.0.0.0/8` 排除出 TUN」只解决了一半问题——域名先被解析成 fake-IP，就永远轮不到那条路由规则生效。这也解释了为什么**手工钉住正确 IP 仍然失败**。
+
+## 最容易走错的一步
+
+改 `~/.config/mihomo-party/mihomo.yaml` 或 `work/config.yaml` **都不持久**。实测：`controlDns` 被改回 `false`、`route-exclude-address` 被重置，即使没有更新订阅。mihomo-party 的 GUI 状态才是权威，它会在运行时重新生成配置。
+
+持久做法只有两个：
+
+1. 在 GUI 里启用 `~/.config/mihomo-party/override/buaa-direct-dns.js`（JS 覆写，注册在 `override.yaml`），或
+2. **直接关掉 TUN / 改用规则模式**——实测最省事，且不需要理解 override 机制。
+
 ## 原因
 
 校内服务用的是**校内地址**，而代理把整个 `10.0.0.0/8` 也接管了：
