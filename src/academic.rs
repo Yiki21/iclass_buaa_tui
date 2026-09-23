@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::constants::{
     BUAA_CLASSROOM_QUERY_URL, BUAA_CLASSROOM_REFERRER, BUAA_CLASSROOM_SYNC_URL, BUAA_SCORE_URL,
-    BYXT_EXAMS_URL, BYXT_HOME_URL, to_webvpn_url,
+    BYXT_EXAMS_URL, BYXT_ROOT_URL, to_webvpn_url,
 };
 use crate::iclass::IClassApi;
 
@@ -170,33 +170,42 @@ pub struct ClassroomRoom {
 }
 
 impl IClassApi {
-    pub async fn get_exams(&self, term_code: &str) -> Result<Vec<ExamItem>> {
+    /// Visits the BYXT portal root so it issues its session cookie.
+    ///
+    /// Why:
+    /// Every BYXT endpoint answers 401 until the portal itself has been
+    /// visited through the SSO chain. Failures are ignored on purpose: this
+    /// runs before a call that reports the real problem, so a portal that is
+    /// genuinely unreachable should surface there rather than as an activation
+    /// error.
 
-        // Visit the portal before querying it.
-        //
-        // Why:
-        // BYXT issues its own session cookie only once its entry page has been
-        // requested through the SSO chain; the exam endpoint answers a bare 401
-        // until then. The grades path already did this, which is why grades
-        // worked while exams did not.
-        let home = self
+    pub(crate) async fn activate_byxt_portal(&self) {
+
+        let _ = self
             .client
-            .get(academic_url(self.use_vpn, BYXT_HOME_URL))
+            .get(academic_url(self.use_vpn, BYXT_ROOT_URL))
             .header(
                 "Accept",
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             )
             .send()
-            .await
-            .context("打开本科教务门户失败")?;
+            .await;
+    }
 
-        let home_status = home.status().as_u16();
+    pub async fn get_exams(&self, term_code: &str) -> Result<Vec<ExamItem>> {
 
-        let home_url = home.url().to_string();
-
-        let home_body = home.text().await.context("读取本科教务门户页面失败")?;
-
-        ensure_academic_response(home_status, &home_url, &home_body, "考试安排")?;
+        // Establish the BYXT session before querying it.
+        //
+        // Why:
+        // BYXT issues its own session cookie only once it has been visited
+        // through the SSO chain; the exam endpoint answers a bare 401 until
+        // then. The grades path already did this, which is why grades worked
+        // while exams did not.
+        //
+        // The entry must be the portal root, not `/jwapp/sys/homeapp/index.html`:
+        // that page answers 404 when requested directly and is only valid as a
+        // Referer.
+        self.activate_byxt_portal().await;
 
         let response = self
             .client
@@ -489,6 +498,18 @@ fn ensure_academic_response(status: u16, final_url: &str, body: &str, stage: &st
     }
 
     if !(200..300).contains(&status) {
+
+        // A non-2xx body often names the actual problem (unknown endpoint, bad
+        // parameter, wrong referrer) while the status alone says nothing.
+        if std::env::var_os("ICLASS_ACADEMIC_DEBUG").is_some() {
+
+            let preview: String = body.chars().take(300).collect();
+
+            eprintln!(
+                "{stage} HTTP {status} @ {final_url} body: {}",
+                preview.replace('\n', " ")
+            );
+        }
 
         bail!("{stage}失败：HTTP {status}");
     }
