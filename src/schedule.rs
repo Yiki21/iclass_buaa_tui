@@ -1175,16 +1175,7 @@ pub fn save_cached_schedule(account: &str, schedule: SemesterSchedule) -> Result
 
 pub fn schedule_cache_path(account: &str) -> Result<PathBuf> {
 
-    let base = if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-
-        PathBuf::from(path)
-    } else if let Some(path) = std::env::var_os("HOME") {
-
-        PathBuf::from(path).join(".config")
-    } else {
-
-        bail!("找不到配置目录");
-    };
+    let base = crate::paths::config_dir()?;
 
     let digest = Sha1::digest(account.as_bytes());
 
@@ -1193,10 +1184,7 @@ pub fn schedule_cache_path(account: &str) -> Result<PathBuf> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
 
-    Ok(base
-        .join("iclass-buaa")
-        .join("schedules")
-        .join(format!("{name}.json")))
+    Ok(base.join("schedules").join(format!("{name}.json")))
 }
 
 pub fn cached_semester<'a>(

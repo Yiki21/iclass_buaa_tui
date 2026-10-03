@@ -43,12 +43,21 @@ cargo install --path .
 
 ### 1. 写配置
 
-登录只从配置文件读取凭据，命令行不接收密码。按 XDG 顺序查找，取第一个存在的：
+登录只从配置文件读取凭据，命令行不接收密码。取第一个存在的文件：
 
-- `$XDG_CONFIG_HOME/iclass-buaa/config.toml`
-- `~/.config/iclass-buaa/config.toml`
-- `$XDG_CONFIG_DIRS/iclass-buaa/config.toml`
+Windows：
+
+- `%APPDATA%\iclass-buaa\config.toml`
+- `%XDG_CONFIG_HOME%\iclass-buaa\config.toml`
+- `%USERPROFILE%\.config\iclass-buaa\config.toml`
+
+Linux 与 macOS：
+
+- `$XDG_CONFIG_HOME/iclass-buaa/config.toml`，默认 `~/.config/iclass-buaa/config.toml`
+- `$XDG_CONFIG_DIRS/iclass-buaa/config.toml`，默认 `/etc/xdg`
 - `/etc/iclass-buaa/config.toml`
+
+Windows 上 `HOME` 通常不设，程序不再依赖它：配置放 `%APPDATA%`，日志等本机状态放 `%LOCALAPPDATA%\iclass-buaa\events.jsonl`。Linux 与 macOS 的日志仍在 `$XDG_STATE_HOME/iclass-buaa/events.jsonl`，默认 `~/.local/state/iclass-buaa/events.jsonl`。
 
 ```toml
 student_id = "2337xxxx"

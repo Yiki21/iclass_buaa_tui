@@ -1,7 +1,7 @@
 //! Minimal JSONL event logger shared by the TUI and CLI.
 
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -30,7 +30,12 @@ static LOGGER: OnceLock<Mutex<LoggerConfig>> = OnceLock::new();
 
 pub fn init(level: LogLevel, path: Option<PathBuf>) -> Result<PathBuf> {
 
-    let path = path.unwrap_or(default_log_path()?);
+    // Resolve the default only when no path was given, so `--log-file` works
+    // even where no per-user directory can be found.
+    let path = match path {
+        Some(path) => path,
+        None => default_log_path()?,
+    };
 
     if let Some(parent) = path.parent() {
 
@@ -58,14 +63,9 @@ pub fn init(level: LogLevel, path: Option<PathBuf>) -> Result<PathBuf> {
 
 pub fn default_log_path() -> Result<PathBuf> {
 
-    if let Some(state_home) = env::var_os("XDG_STATE_HOME") {
-
-        return Ok(PathBuf::from(state_home).join("iclass-buaa/events.jsonl"));
-    }
-
-    let home = env::var_os("HOME").ok_or_else(|| anyhow!("HOME 未设置，无法定位日志目录"))?;
-
-    Ok(PathBuf::from(home).join(".local/state/iclass-buaa/events.jsonl"))
+    crate::paths::state_dir()
+        .map(|dir| dir.join("events.jsonl"))
+        .context("无法定位日志目录")
 }
 
 pub fn path() -> Option<PathBuf> {

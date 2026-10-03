@@ -1,5 +1,17 @@
 # ChangeLog
 
+## Unreleased
+
+### 修复
+
+- **Windows 上任意子命令报「HOME 未设置」后退出**（#18）：Windows 默认不设 `HOME`，此前日志、配置、课表缓存、planner 锁和 TUI 记住的登录都从 `HOME` 推路径。现在由 `etcetera` 定位目录：Windows 用 `%APPDATA%`（配置）和 `%LOCALAPPDATA%`（日志、锁），Linux 与 macOS 仍按 XDG，路径不变。Windows 上原来为绕过问题放在 `%XDG_CONFIG_HOME%` 或 `%HOME%\.config` 的配置仍能找到。
+- `--log-file` 此前也绕不过这个问题：指定了日志路径，程序仍会先计算默认路径并因缺 `HOME` 失败。现在只在没给 `--log-file` 时才计算默认路径。
+
+### 验证
+
+- `cargo test --locked`：182 passed，含一个去掉 `HOME` 与 `XDG_*` 后运行子命令的集成测试（在修复前会以 `HOME 未设置` 失败）。
+- Windows 目标交叉编译后在本机 Wine 下运行：`HOME` 清空时子命令正常，日志写到 `%LOCALAPPDATA%\iclass-buaa\events.jsonl`，配置能从 `%APPDATA%` 与 `%USERPROFILE%\.config` 两处找到。
+
 ## 0.9.2
 
 ### 修复

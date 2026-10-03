@@ -6862,30 +6862,9 @@ fn run_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<(),
 
 fn remembered_login_path() -> Result<PathBuf, String> {
 
-    Ok(user_config_dir()?
-        .join("iclass-buaa")
-        .join("tui-login.toml"))
-}
-
-fn user_config_dir() -> Result<PathBuf, String> {
-
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-
-        return Ok(PathBuf::from(base));
-    }
-
-    #[cfg(windows)]
-    {
-
-        if let Some(base) = std::env::var_os("APPDATA") {
-
-            return Ok(PathBuf::from(base));
-        }
-    }
-
-    let home = std::env::var_os("HOME").ok_or_else(|| "找不到 HOME 目录".to_string())?;
-
-    Ok(PathBuf::from(home).join(".config"))
+    crate::paths::config_dir()
+        .map(|dir| dir.join("tui-login.toml"))
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn load_remembered_login() -> Result<Option<RememberedLogin>, String> {

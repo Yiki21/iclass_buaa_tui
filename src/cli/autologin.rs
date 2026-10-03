@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use super::args::{AutologinStatusArgs, InstallAutologinArgs, UninstallAutologinArgs};
 use super::config::{
@@ -602,35 +602,25 @@ fn print_windows_autologin_status(output_dir: &Path, unit_prefix: &str) -> Resul
 
 fn default_linux_autologin_dir() -> Result<PathBuf> {
 
-    let home =
-        env::var_os("HOME").ok_or_else(|| anyhow!("HOME 未设置，无法定位 systemd user 目录"))?;
-
-    Ok(PathBuf::from(home).join(".config/systemd/user"))
+    // Kept at `~/.config` even when the shell sets `XDG_CONFIG_HOME`: the
+    // systemd user manager does not necessarily see that variable, and then it
+    // only scans `~/.config/systemd/user`.
+    Ok(crate::paths::home_dir()?.join(".config/systemd/user"))
 }
 
 #[cfg(target_os = "macos")]
 
 fn default_macos_launch_agents_dir() -> Result<PathBuf> {
 
-    let home = env::var_os("HOME")
-        .ok_or_else(|| anyhow!("HOME 未设置，无法定位 launchd LaunchAgents 目录"))?;
-
-    Ok(PathBuf::from(home).join("Library/LaunchAgents"))
+    // launchd only reads `~/Library/LaunchAgents`, regardless of XDG.
+    Ok(crate::paths::home_dir()?.join("Library/LaunchAgents"))
 }
 
 #[cfg(target_os = "windows")]
 
 fn default_windows_autologin_dir() -> Result<PathBuf> {
 
-    if let Some(appdata) = env::var_os("APPDATA") {
-
-        return Ok(PathBuf::from(appdata).join("iclass-buaa"));
-    }
-
-    let profile = env::var_os("USERPROFILE")
-        .ok_or_else(|| anyhow!("APPDATA 和 USERPROFILE 都未设置，无法定位计划任务目录"))?;
-
-    Ok(PathBuf::from(profile).join("AppData/Roaming/iclass-buaa"))
+    crate::paths::config_dir()
 }
 
 #[cfg(target_os = "linux")]

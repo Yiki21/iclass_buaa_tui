@@ -79,16 +79,7 @@ struct PlannerLock {
 impl PlannerLock {
     fn acquire(account: &str) -> Result<Self> {
 
-        let base = if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
-
-            PathBuf::from(path)
-        } else if let Some(path) = std::env::var_os("HOME") {
-
-            PathBuf::from(path).join(".local/state")
-        } else {
-
-            bail!("找不到 planner 状态目录");
-        };
+        let base = crate::paths::state_dir()?;
 
         let digest = Sha1::digest(account.as_bytes());
 
@@ -97,7 +88,7 @@ impl PlannerLock {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
 
-        let path = base.join("iclass-buaa").join(format!("planner-{key}.lock"));
+        let path = base.join(format!("planner-{key}.lock"));
 
         fs::create_dir_all(path.parent().unwrap_or(&base))?;
 

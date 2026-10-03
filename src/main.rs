@@ -13,6 +13,7 @@ mod libbook;
 mod logging;
 mod model;
 mod notify;
+mod paths;
 mod schedule;
 mod tasks;
 mod theme;

@@ -1,7 +1,7 @@
 //! CLI configuration loading, validation, and scheduler time parsing.
 
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -13,7 +13,7 @@ use crate::model::LoginInput;
 
 use super::core::SignSource;
 
-const APP_CONFIG_RELATIVE_PATH: &str = "iclass-buaa/config.toml";
+const CONFIG_FILE_NAME: &str = "config.toml";
 
 /// Automation settings loaded from the CLI config file.
 #[derive(Debug, Clone, Deserialize)]
@@ -100,7 +100,7 @@ pub(crate) fn resolve_config_path(path: Option<&Path>) -> Result<PathBuf> {
             .with_context(|| format!("找不到配置文件: {}", path.display()));
     }
 
-    let candidates = candidate_config_paths()?;
+    let candidates = crate::paths::config_file_candidates(CONFIG_FILE_NAME);
 
     if let Some(found) = candidates.iter().find(|path| path.is_file()) {
 
@@ -141,72 +141,6 @@ pub(crate) fn validate_planner_interval_minutes(value: u32) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn candidate_config_paths() -> Result<Vec<PathBuf>> {
-
-    let mut paths = Vec::new();
-
-    if let Some(path) = user_xdg_config_path() {
-
-        push_unique(&mut paths, path);
-    }
-
-    if let Some(path) = home_config_path()? {
-
-        push_unique(&mut paths, path);
-    }
-
-    for path in system_xdg_config_paths() {
-
-        push_unique(&mut paths, path);
-    }
-
-    push_unique(
-        &mut paths,
-        PathBuf::from("/etc").join(APP_CONFIG_RELATIVE_PATH),
-    );
-
-    Ok(paths)
-}
-
-fn user_xdg_config_path() -> Option<PathBuf> {
-
-    env::var_os("XDG_CONFIG_HOME").map(|base| PathBuf::from(base).join(APP_CONFIG_RELATIVE_PATH))
-}
-
-fn home_config_path() -> Result<Option<PathBuf>> {
-
-    let Some(home) = env::var_os("HOME") else {
-
-        return Ok(None);
-    };
-
-    Ok(Some(
-        PathBuf::from(home)
-            .join(".config")
-            .join(APP_CONFIG_RELATIVE_PATH),
-    ))
-}
-
-fn system_xdg_config_paths() -> Vec<PathBuf> {
-
-    let raw = env::var_os("XDG_CONFIG_DIRS")
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/etc/xdg".to_string());
-
-    raw.split(':')
-        .filter(|segment| !segment.trim().is_empty())
-        .map(|segment| PathBuf::from(segment).join(APP_CONFIG_RELATIVE_PATH))
-        .collect()
-}
-
-fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
-
-    if !paths.iter().any(|existing| existing == &path) {
-
-        paths.push(path);
-    }
 }
 
 fn ensure_config_permissions(path: &Path, config: &AutomationConfig) -> Result<()> {
