@@ -993,6 +993,9 @@ pub struct SeatState {
     pub bookings:        Vec<crate::libbook::Booking>,
     pub bookings_loaded: bool,
     pub date:            String,
+    /// Showing the area list of the selected library.
+    pub show_areas:      bool,
+    /// Showing the seats of the selected area; takes precedence over areas.
     pub show_seats:      bool,
     pub pending:         Option<PendingWrite>,
 }
@@ -1894,6 +1897,9 @@ impl App {
                 if self.seat.show_seats {
 
                     self.seat.seats.len()
+                } else if self.seat.show_areas {
+
+                    self.seat.areas.len()
                 } else {
 
                     self.seat.libraries.len()
@@ -1952,6 +1958,9 @@ impl App {
                 if self.seat.show_seats {
 
                     self.seat.selected_seat = index;
+                } else if self.seat.show_areas {
+
+                    self.seat.selected_area = index;
                 } else {
 
                     self.seat.selected = index;
@@ -2115,17 +2124,7 @@ impl App {
                         clamp_step(self.venue.selected, self.venue.sites.len(), delta);
                 }
             }
-            WorkspaceTab::Seat => {
-                if self.seat.show_seats {
-
-                    self.seat.selected_seat =
-                        clamp_step(self.seat.selected_seat, self.seat.seats.len(), delta);
-                } else {
-
-                    self.seat.selected =
-                        clamp_step(self.seat.selected, self.seat.libraries.len(), delta);
-                }
-            }
+            WorkspaceTab::Seat => self.move_seat_selection(delta),
             WorkspaceTab::Clockin => {
                 if let Some(overview) = self.clockin.overview.as_mut() {
 
@@ -2683,14 +2682,16 @@ impl App {
 
                         self.seat.selected_area = 0;
 
-                        // With areas known, load the first one's seats so the
-                        // tab is immediately useful.
-                        if let Some(area) = self.seat.areas.first() {
+                        // A library holds many areas with very different
+                        // availability; the user picks one rather than being
+                        // dropped into whichever the service lists first.
+                        self.seat.show_areas = true;
 
-                            let area_id = area.id.clone();
+                        self.seat.show_seats = false;
 
-                            self.load_seat_detail(area_id, tx.clone());
-                        }
+                        self.seat.detail = None;
+
+                        self.seat.seats.clear();
 
                         self.success(format!("已载入 {count} 个阅览区"));
                     }
@@ -3155,47 +3156,40 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.seat.show_seats {
-
-                    let len = self.seat.seats.len();
-
-                    self.seat.selected_seat = clamp_step(self.seat.selected_seat, len, -1);
-                } else {
-
-                    let len = self.seat.libraries.len();
-
-                    self.seat.selected = clamp_step(self.seat.selected, len, -1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.seat.show_seats {
-
-                    let len = self.seat.seats.len();
-
-                    self.seat.selected_seat = clamp_step(self.seat.selected_seat, len, 1);
-                } else {
-
-                    let len = self.seat.libraries.len();
-
-                    self.seat.selected = clamp_step(self.seat.selected, len, 1);
-                }
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.move_seat_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_seat_selection(1),
             KeyCode::Char('r') => self.refresh_seat(tx),
             KeyCode::Enter | KeyCode::Char('o') => {
                 if self.seat.show_seats {
 
                     self.request_seat_book();
+                } else if self.seat.show_areas {
+
+                    match self.seat.areas.get(self.seat.selected_area) {
+                        Some(area) => {
+
+                            let area_id = area.id.clone();
+
+                            self.load_seat_detail(area_id, tx.clone());
+                        }
+                        None => self.warn("该图书馆没有可预约的阅览区"),
+                    }
                 } else {
 
                     self.load_seat_areas(tx);
                 }
             }
+            // One level up: seats -> areas -> libraries.
             KeyCode::Char('b') => {
+                if self.seat.show_seats {
 
-                self.seat.show_seats = false;
+                    self.seat.show_seats = false;
 
-                self.seat.seats.clear();
+                    self.seat.seats.clear();
+                } else {
+
+                    self.seat.show_areas = false;
+                }
             }
             KeyCode::Char('B') => self.load_seat_bookings(tx),
             KeyCode::Char('x') => self.request_seat_cancel(),
@@ -3381,6 +3375,24 @@ impl App {
         let id = order.id;
 
         self.venue.pending = Some(PendingWrite::VenueCancel(id));
+    }
+
+    /// Moves the selection in whichever seat-tab list is showing.
+
+    fn move_seat_selection(&mut self, delta: isize) {
+
+        let seat = &mut self.seat;
+
+        if seat.show_seats {
+
+            seat.selected_seat = clamp_step(seat.selected_seat, seat.seats.len(), delta);
+        } else if seat.show_areas {
+
+            seat.selected_area = clamp_step(seat.selected_area, seat.areas.len(), delta);
+        } else {
+
+            seat.selected = clamp_step(seat.selected, seat.libraries.len(), delta);
+        }
     }
 
     fn request_seat_book(&mut self) {
@@ -6948,6 +6960,47 @@ mod tests {
 
     use super::{App, AsyncEvent, BykcSyncSuccess, EventLevel, MAX_EVENT_LOG_ENTRIES};
     use crate::bykc::BykcCourse;
+
+    #[test]
+
+    fn seat_areas_are_listed_instead_of_opening_the_first() {
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        let area = |id: &str, free: i64| {
+
+            crate::libbook::Area {
+                id:        id.to_string(),
+                name:      format!("阅览区{id}"),
+                free_num:  free,
+                total_num: 200,
+            }
+        };
+
+        app.handle_async(
+            AsyncEvent::SeatAreas(Ok(vec![area("8", 27), area("16", 188)])),
+            &tx,
+        );
+
+        // The library opens onto its area list, not the first area's seats.
+        assert!(app.seat.show_areas);
+
+        assert!(!app.seat.show_seats);
+
+        assert!(app.seat.detail.is_none());
+
+        app.handle_seat_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &tx);
+
+        assert_eq!(app.seat.selected_area, 1);
+
+        app.handle_seat_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &tx);
+
+        assert!(!app.seat.show_areas);
+    }
 
     #[test]
 

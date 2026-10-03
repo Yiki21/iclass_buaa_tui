@@ -1237,12 +1237,54 @@ fn seat_status_line(app: &App) -> Line<'static> {
             .filter(|seat| seat.is_available)
             .count();
 
+        // Name the area so its count is not read as the whole library's.
+        let area_name = app
+            .seat
+            .detail
+            .as_ref()
+            .map(|detail| detail.name.clone())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+
+                app.seat
+                    .areas
+                    .get(app.seat.selected_area)
+                    .map(|area| area.name.clone())
+            })
+            .unwrap_or_default();
+
+        let segment = app
+            .seat
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.time_slots.first())
+            .map(|slot| format!("  {}", slot.label))
+            .unwrap_or_default();
+
         spans.push(Span::styled(
-            format!("{} 个座位，{available} 可选", app.seat.seats.len()),
+            format!(
+                "{area_name}{segment}  ·  {} 个座位，{available} 可选",
+                app.seat.seats.len()
+            ),
             theme::text_style(),
         ));
 
         spans.push(Span::styled("  enter 预约  b 返回", theme::muted_style()));
+    } else if app.seat.show_areas {
+
+        let library = app
+            .seat
+            .libraries
+            .get(app.seat.selected)
+            .map(|library| library.name.clone())
+            .unwrap_or_default();
+
+        spans.push(Span::styled(
+            format!("{library}  ·  {} 个阅览区", app.seat.areas.len()),
+            theme::text_style(),
+        ));
+
+        spans.push(Span::styled("  enter 看座位  b 返回", theme::muted_style()));
     } else {
 
         spans.push(Span::styled(
@@ -1743,7 +1785,18 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
             app.seat.selected_seat,
         );
 
-        render_key_hint(frame, footer, "j/k 选座位  enter 预约（需确认）  b 返回");
+        render_key_hint(
+            frame,
+            footer,
+            "j/k 选座位  enter 预约（需确认）  b 返回阅览区",
+        );
+
+        return;
+    }
+
+    if app.seat.show_areas {
+
+        render_seat_areas(frame, body, footer, app);
 
         return;
     }
@@ -1805,8 +1858,73 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
     render_key_hint(
         frame,
         footer,
-        "j/k 选图书馆  enter 看阅览区与座位  r 刷新  B 我的预约  x 取消预约",
+        "j/k 选图书馆  enter 看阅览区  r 刷新  B 我的预约  x 取消预约",
     );
+}
+
+/// Renders the areas of the selected library with their free counts.
+///
+/// Why a separate level:
+/// A library's free count is the sum over many areas. Jumping straight into
+/// the first area made a library with 1901 free seats look like 27.
+
+fn render_seat_areas(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
+
+    let items: Vec<ListItem> = if app.seat.areas.is_empty() {
+
+        vec![empty_row(
+            false,
+            app.tick,
+            "",
+            "该图书馆没有可预约的阅览区，按 b 返回",
+        )]
+    } else {
+
+        app.seat
+            .areas
+            .iter()
+            .enumerate()
+            .map(|(index, area)| {
+
+                let line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(area.name.clone(), theme::text_style()),
+                    Span::styled(
+                        format!("  {}/{}", area.free_num, area.total_num),
+                        if area.free_num > 0 {
+
+                            Style::default().fg(theme::OK)
+                        } else {
+
+                            Style::default().fg(theme::ERROR)
+                        },
+                    ),
+                    Span::styled(" 空闲", theme::muted_style()),
+                ]);
+
+                let item = ListItem::new(line);
+
+                if index == app.seat.selected_area {
+
+                    item.style(theme::selection_style())
+                } else {
+
+                    item
+                }
+            })
+            .collect()
+    };
+
+    render_selectable_rows(
+        frame,
+        body,
+        app,
+        items,
+        app.seat.areas.len(),
+        app.seat.selected_area,
+    );
+
+    render_key_hint(frame, footer, "j/k 选阅览区  enter 看座位  b 返回图书馆");
 }
 
 /// Renders the clock-in tab.
