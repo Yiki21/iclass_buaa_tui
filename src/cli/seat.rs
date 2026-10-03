@@ -283,7 +283,7 @@ pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
     }
 
     let booking = api
-        .libbook_reserve(&token, &seat.id, &segment.id, &args.date)
+        .libbook_reserve(&token, &seat.id, &seat.no, &segment.id, &args.date)
         .await
         .map_err(seat_error)
         .context("预约座位失败")?;

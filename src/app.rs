@@ -4681,9 +4681,20 @@ impl App {
 
                     session
                         .api
-                        .libbook_reserve(&token, &seat_id, &segment_id, &date)
+                        .libbook_reserve(&token, &seat_id, &seat_no, &segment_id, &date)
                         .await
-                        .map(|_| format!("已预约座位 {seat_no}"))
+                        .map(|booking| {
+                            if booking.begin_time.is_empty() {
+
+                                format!("已预约座位 {seat_no}")
+                            } else {
+
+                                format!(
+                                    "已预约座位 {seat_no}（{}-{}）",
+                                    booking.begin_time, booking.end_time
+                                )
+                            }
+                        })
                         .map_err(format_anyhow_error)
                 }
             },

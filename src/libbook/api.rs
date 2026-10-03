@@ -460,12 +460,15 @@ impl IClassApi {
     ///
     /// How:
     /// The payload is encrypted with a key derived from the reservation date,
-    /// then posted as `aesjson`.
+    /// then posted as `aesjson`. A successful reply may omit the booking, so
+    /// when it carries no id the booking list is read back and the new
+    /// reservation is found by seat number and day.
 
     pub async fn libbook_reserve(
         &self,
         token: &str,
         seat_id: &str,
+        seat_no: &str,
         segment: &str,
         day: &str,
     ) -> Result<Booking> {
@@ -487,7 +490,25 @@ impl IClassApi {
             .await
             .context("预约座位失败")?;
 
-        Ok(reserved_booking(&response).unwrap_or_default())
+        if let Some(booking) = reserved_booking(&response).filter(|b| !b.id.is_empty()) {
+
+            return Ok(booking);
+        }
+
+        // The service said yes without naming the booking. Read it back; the
+        // write already happened, so a failed read must not look like a
+        // refusal that invites a retry.
+        let bookings = self
+            .libbook_bookings(token, 1, 20)
+            .await
+            .context("图书馆已接受预约，但读取预约记录失败，请稍后查看预约记录，勿直接重试")?;
+
+        find_new_booking(&bookings, seat_no, day).ok_or_else(|| {
+
+            anyhow!(
+                "图书馆已接受预约，但预约记录中未找到座位 {seat_no}，请查看预约记录，勿直接重试"
+            )
+        })
     }
 
     /// Cancels a seat reservation.
@@ -526,11 +547,32 @@ fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Valu
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    let is_write = matches!(path, "space/confirm" | "space/cancel");
+
+    // Words the service uses to refuse a write while still answering code 1;
+    // the reference client treats the same list as failure.
+    const WRITE_REFUSALS: [&str; 8] = [
+        "不可",
+        "已被",
+        "不能取消",
+        "无法取消",
+        "已取消",
+        "用户取消",
+        "已结束",
+        "已完成",
+    ];
+
     if value.get("success") == Some(&Value::Bool(false))
         || value.get("success").and_then(Value::as_str) == Some("false")
         || message.contains("失败")
+        || (is_write && WRITE_REFUSALS.iter().any(|word| message.contains(word)))
         || code.is_some_and(|code| !matches!(code, 0 | 1))
     {
+
+        if is_write && !message.is_empty() {
+
+            bail!("图书馆拒绝了请求：{message}");
+        }
 
         bail!("图书馆接口明确报告失败（code={code:?}）");
     }
@@ -558,9 +600,12 @@ fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Valu
         }
         "Space/seat" => has_rows(&["list"]),
         "member/seat" => has_rows(&["list", "data"]),
-        // An actual booking identifier is affirmative evidence. Cancellation
-        // has no verified success envelope yet, so do not claim completion.
-        "space/confirm" => reserved_booking(&value).is_some_and(|b| !b.id.is_empty()),
+        // The confirm reply does not reliably carry the booking: a successful
+        // reservation can answer with only `code`/`message`. A business-success
+        // envelope with an affirmative code passes here; the caller then proves
+        // the booking exists by reading it back when no id came with it.
+        // Cancellation has no verified success envelope yet.
+        "space/confirm" => code.is_some() || reserved_booking(&value).is_some(),
         _ => false,
     };
 
@@ -846,6 +891,27 @@ fn parse_seat(row: &Value) -> Option<Seat> {
 /// Upstream nests it as `data.bookInfo` (or `data.booking`); a flat `data`
 /// row is accepted as a fallback.
 
+/// Finds the reservation just made among the caller's bookings.
+///
+/// Why seat number and day:
+/// The confirm reply may carry no id, and the seat id sent is not echoed in
+/// the list. Seat number plus day identifies one seat on one date; the day is
+/// compared on its date part because the list may add a time.
+
+fn find_new_booking(bookings: &[Booking], seat_no: &str, day: &str) -> Option<Booking> {
+
+    let seat_no = seat_no.trim();
+
+    bookings
+        .iter()
+        .find(|booking| {
+
+            booking.seat_no.trim() == seat_no
+                && (booking.day.is_empty() || booking.day.starts_with(day))
+        })
+        .cloned()
+}
+
 fn reserved_booking(response: &Value) -> Option<Booking> {
 
     let data = response.get("data")?;
@@ -878,9 +944,68 @@ fn parse_booking(row: &Value) -> Option<Booking> {
 mod tests {
 
     use super::{
-        data_list, extract_cas_token, field_i64, parse_area_detail, parse_booking, parse_seat,
-        reserved_booking, validate_library_response,
+        Booking, data_list, extract_cas_token, field_i64, find_new_booking, parse_area_detail,
+        parse_booking, parse_seat, reserved_booking, validate_library_response,
     };
+
+    #[test]
+
+    fn reservation_success_without_booking_is_accepted() {
+
+        // A real successful confirm reply that names no booking must not be
+        // reported as an unknown write.
+        for body in [
+            r#"{"code":1,"message":"预约成功"}"#,
+            r#"{"code":1,"message":"操作成功","data":[]}"#,
+            r#"{"code":0,"msg":"ok","data":null}"#,
+        ] {
+
+            let value = validate_library_response(200, body, "space/confirm")
+                .unwrap_or_else(|error| panic!("{body}: {error:#}"));
+
+            assert!(reserved_booking(&value).is_none_or(|b| b.id.is_empty()));
+        }
+    }
+
+    #[test]
+
+    fn reservation_refusal_reports_the_service_message() {
+
+        let body = r#"{"code":1,"message":"该座位已被预约"}"#;
+
+        let error = validate_library_response(200, body, "space/confirm").unwrap_err();
+
+        assert!(format!("{error:#}").contains("该座位已被预约"));
+    }
+
+    #[test]
+
+    fn finds_the_new_booking_by_seat_and_day() {
+
+        let booking = |id: &str, no: &str, day: &str| {
+
+            Booking {
+                id: id.to_string(),
+                seat_no: no.to_string(),
+                day: day.to_string(),
+                ..Booking::default()
+            }
+        };
+
+        let bookings = [
+            booking("1", "495", "2026-10-02"),
+            booking("2", "494", "2026-10-03"),
+            booking("3", "495", "2026-10-03 08:00"),
+        ];
+
+        assert_eq!(
+            find_new_booking(&bookings, "495", "2026-10-03").map(|b| b.id),
+            Some("3".to_string())
+        );
+
+        assert!(find_new_booking(&bookings, "496", "2026-10-03").is_none());
+    }
+
     use serde_json::json;
 
     #[test]
