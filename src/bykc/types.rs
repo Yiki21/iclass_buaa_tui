@@ -2,7 +2,7 @@
 
 /// Lightweight course record shown in the BYKC course list.
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcCourse {
     pub id: i64,
@@ -26,7 +26,7 @@ pub struct BykcCourse {
 
 /// Full course detail used by the bottom detail panel and sign actions.
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcCourseDetail {
     pub id: i64,
@@ -57,7 +57,7 @@ pub struct BykcCourseDetail {
 
 /// Chosen-course record shown in the "已选课程" view.
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcChosenCourse {
     pub id:                     i64,
@@ -83,7 +83,7 @@ pub struct BykcChosenCourse {
 
 /// BYKC course completion statistics shown in the workspace header.
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcStatistics {
     pub total_valid_count: i32,
@@ -92,7 +92,7 @@ pub struct BykcStatistics {
 
 /// One BYKC category/sub-category completion row.
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcCategoryStatistics {
     pub category_name:  String,
@@ -103,7 +103,7 @@ pub struct BykcCategoryStatistics {
 }
 
 /// Attendance time window and allowed sign points from BYKC.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcSignConfig {
     pub sign_start_date:     String,
@@ -114,7 +114,7 @@ pub struct BykcSignConfig {
 }
 
 /// BYKC sign-point definition used to construct a valid check-in location.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 
 pub struct BykcSignPoint {
     pub lat:    f64,

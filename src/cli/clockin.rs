@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use chrono::TimeZone;
 
 use crate::iclass::IClassApi;
-use crate::ygdk::YgdkSession;
+use crate::ygdk::{ClockinPhoto, YgdkSession};
 
 use super::args::{ClockinArgs, ClockinSubmitArgs};
 use super::config::load_config;
@@ -289,6 +289,8 @@ pub(crate) async fn clockin_submit_command(args: ClockinSubmitArgs) -> Result<()
         return Ok(());
     }
 
+    let photo = ClockinPhoto::from_path(&args.photo)?;
+
     let result = api
         .ygdk_clockin(
             &session,
@@ -297,7 +299,7 @@ pub(crate) async fn clockin_submit_command(args: ClockinSubmitArgs) -> Result<()
             start,
             end,
             &args.place,
-            &args.photo,
+            &photo,
         )
         .await
         .map_err(clockin_error)

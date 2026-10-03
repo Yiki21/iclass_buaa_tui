@@ -275,6 +275,15 @@ CLI 可以直接被脚本或 LLM 工具循环调用。三条要点：
 2. **写操作没有 `--yes` 就不会执行**，而且**退出码仍是 0**。判断是否真的写入要看 `--json` 里的 `submitted` 字段，不能只看退出码。
 3. **失败有稳定错误码**：带 `--json` 时失败会往 stderr 输出 `{ error, command, retryable, code }`。按 `retryable` 决定是否退避重试；`not_authenticated` 要重新登录，`resource_unavailable` 要换一个，都不是重试能解决的。
 
+配套的 Agent Skills 内置在二进制里，版本与命令始终一致：
+
+```bash
+iclass_buaa_tui skills list                                   # 列出 6 个 skill
+iclass_buaa_tui skills install --target ~/.claude/skills --yes # 装到任意 agent 的 skills 目录
+```
+
+入口是 `buaa-campus`（通用规则与路由），其余按领域拆分：`buaa-academics`、`buaa-attendance`、`buaa-bykc`、`buaa-booking`、`buaa-clockin-eval`。源文件在 `skills/`。
+
 完整的调用约定见 [AGENTS.md](AGENTS.md)。
 
 ## Todo

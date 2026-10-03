@@ -1,5 +1,24 @@
 # ChangeLog
 
+## 0.9.0
+
+### 修复
+
+- **图书馆座位解析对齐真实上游**：图书馆列表读取 `free_num`/`total_num`（此前读 camelCase，始终显示 `0/0 空闲`）；阅览区详情按 `data.date.list[].times` 解析日期与时段，不再报「图书馆响应缺少预期数据」；座位状态读取 `status_name`；预约记录兼容 `data.data` 列表；预约结果读取 `data.bookInfo`。
+- 图书馆 CAS 登录走完服务回调，使用服务签发的 `cas` 而不是 SSO `ticket`。
+
+### 新增
+
+- 博雅课程 CLI：`bykc-courses`、`bykc-chosen`、`bykc-show`、`bykc-stats`，以及需 `--yes` 的 `bykc-enroll`、`bykc-withdraw`。
+- `seat-map`：列出阅览区某日某时段的座位，`--free` 只看可约座位；`seats --library` 列出馆内阅览区。
+- 内置 Agent Skills：`skills list/show/install`，与二进制版本一致。
+- 阳光打卡 TUI 支持一键随机时段打卡（确认框会先列出时段与生成的图片）。
+
+### 验证
+
+- `cargo test`：172 passed。
+- 真实服务只读验证：`seats`、`seats --library 9`、`seat-map --area 8 --free`、`seat-orders` 均返回正确数据；未执行任何预约或写操作。
+
 ## 0.8.2
 
 修复发布构建在 GitHub runner 上使用本机专用 linker 参数失败的问题：移除 `.cargo/config.toml` 中的 `--ld-path=wild` 和 `-Zshare-generics`，统一使用 runner 默认 linker；质量门禁与发布构建固定使用 `nightly-2026-09-21`。

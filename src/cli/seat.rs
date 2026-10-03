@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::iclass::IClassApi;
 
-use super::args::{SeatArgs, SeatBookArgs, SeatOrdersArgs};
+use super::args::{SeatArgs, SeatBookArgs, SeatMapArgs, SeatOrdersArgs};
 use super::config::load_config;
 use super::venue::authenticated_api;
 
@@ -55,7 +55,28 @@ pub(crate) async fn seats_command(args: SeatArgs) -> Result<()> {
 
     if args.json {
 
-        println!("{}", serde_json::to_string_pretty(&libraries)?);
+        // With --library the areas are part of the answer; without them a
+        // JSON caller has no way to learn the --area id `seat-map` needs.
+        let areas = match args.library.as_deref() {
+            Some(library_id) => {
+                Some(
+                    api.libbook_areas(&token, library_id, &date)
+                        .await
+                        .map_err(seat_error)?,
+                )
+            }
+            None => None,
+        };
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "date": date,
+                "libraries": libraries,
+                "library": args.library,
+                "areas": areas,
+            }))?
+        );
 
         return Ok(());
     }
@@ -102,6 +123,72 @@ pub(crate) async fn seats_command(args: SeatArgs) -> Result<()> {
                 area.id, area.name, area.free_num, area.total_num
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Lists the seats of one area for a date and segment.
+///
+/// Why:
+/// `seat-book` needs a seat id, and nothing else in the CLI lists them.
+
+pub(crate) async fn seat_map_command(args: SeatMapArgs) -> Result<()> {
+
+    let config = load_config(args.config.as_deref())?;
+
+    let api = authenticated_api(&config, args.debug_login).await?;
+
+    let token = seat_token(&api).await?;
+
+    let date = resolve_date(args.date)?;
+
+    let detail = api
+        .libbook_area_detail(&token, &args.area)
+        .await
+        .map_err(seat_error)?;
+
+    let segment = resolve_segment(&detail.time_slots, args.segment.as_deref())?;
+
+    let seats: Vec<_> = api
+        .libbook_seats(&token, &args.area, &date, &segment.start, &segment.end)
+        .await
+        .map_err(seat_error)?
+        .into_iter()
+        .filter(|seat| !args.free || seat.is_available)
+        .collect();
+
+    if args.json {
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "area_id": args.area,
+                "area": detail.name,
+                "date": date,
+                "segment": segment,
+                "segments": detail.time_slots,
+                "available_dates": detail.available_dates,
+                "seats": seats,
+            }))?
+        );
+
+        return Ok(());
+    }
+
+    println!("阅览区\t{}", detail.name);
+
+    println!("日期\t{date}");
+
+    println!("时段\t{}\t{}-{}", segment.id, segment.start, segment.end);
+
+    println!();
+
+    println!("seat_id\t座位号\t状态");
+
+    for seat in &seats {
+
+        println!("{}\t{}\t{}", seat.id, seat.no, seat.status_name);
     }
 
     Ok(())

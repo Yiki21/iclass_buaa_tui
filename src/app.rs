@@ -99,10 +99,14 @@ pub struct EvaluationCompletion {
 #[derive(Clone, Debug, Default)]
 
 pub struct ClockinOverview {
-    pub classifies: Vec<crate::ygdk::Classify>,
-    pub selected:   usize,
-    pub count:      crate::ygdk::Count,
-    pub items:      Vec<crate::ygdk::Item>,
+    pub classifies:    Vec<crate::ygdk::Classify>,
+    /// Index into `classifies`.
+    pub selected:      usize,
+    /// Index into `items`. Kept apart from `selected` so moving through the
+    /// item list cannot silently change which category is shown or submitted.
+    pub selected_item: usize,
+    pub count:         crate::ygdk::Count,
+    pub items:         Vec<crate::ygdk::Item>,
 }
 
 #[derive(Clone, Debug)]
@@ -1060,7 +1064,10 @@ impl PendingWrite {
             Self::VenueCancel(_) => "确认取消这条研讨室预约？",
             Self::SeatBook => "确认预约这个座位？预约成功后会占用真实座位。",
             Self::SeatCancel(_) => "确认取消这条座位预约？",
-            Self::ClockinSubmit => "确认提交这次打卡？会写入一条真实体育记录。",
+            Self::ClockinSubmit => {
+                "确认随机打卡？将为所选项目写入一条真实体育记录（近三天 08-22 \
+                 点内随机一小时，地点操场）。"
+            }
             Self::EvalSubmitAll => "确认提交全部未评课程的评教？将以你的名义作答，且无法撤销。",
             Self::EvalSubmitOne(_) => "确认提交这门课的评教？将以你的名义作答，且无法撤销。",
         }
@@ -1076,7 +1083,7 @@ impl PendingWrite {
         match self {
             Self::VenueReserve | Self::SeatBook => "此操作不可撤销；如需撤回请在列表里取消。",
             Self::VenueCancel(_) | Self::SeatCancel(_) => "取消后该时段会释放给其他人。",
-            Self::ClockinSubmit => "打卡记录无法删除。",
+            Self::ClockinSubmit => "打卡记录无法删除；照片为自动生成的纯色占位图。",
             Self::EvalSubmitAll | Self::EvalSubmitOne(_) => {
                 "评教结果不可撤销；提交前请确认题目与选项。"
             }
@@ -1953,7 +1960,7 @@ impl App {
             WorkspaceTab::Clockin => {
                 if let Some(overview) = self.clockin.overview.as_mut() {
 
-                    overview.selected = index;
+                    overview.selected_item = index;
                 }
             }
             WorkspaceTab::Eval => self.eval.selected = index,
@@ -2124,7 +2131,7 @@ impl App {
 
                     let len = overview.items.len();
 
-                    overview.selected = clamp_step(overview.selected, len, delta);
+                    overview.selected_item = clamp_step(overview.selected_item, len, delta);
                 }
             }
             WorkspaceTab::Eval => {
@@ -2752,6 +2759,8 @@ impl App {
 
                                 existing.selected = overview.selected;
 
+                                existing.selected_item = 0;
+
                                 existing.count = overview.count;
 
                                 existing.items = overview.items;
@@ -3206,7 +3215,7 @@ impl App {
 
                     let len = overview.items.len();
 
-                    overview.selected = clamp_step(overview.selected, len, -1);
+                    overview.selected_item = clamp_step(overview.selected_item, len, -1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -3215,7 +3224,7 @@ impl App {
 
                     let len = overview.items.len();
 
-                    overview.selected = clamp_step(overview.selected, len, 1);
+                    overview.selected_item = clamp_step(overview.selected_item, len, 1);
                 }
             }
             KeyCode::Char('r') => self.refresh_clockin(tx),
@@ -3416,8 +3425,8 @@ impl App {
             return;
         }
 
-        // A clock-in needs a photo, which the TUI cannot pick. The CLI is the
-        // place for that, and the dialog says so rather than pretending.
+        // The dialog states the random window and generated image before
+        // anything is sent; a choice of photo or time stays with the CLI.
         self.clockin.pending = Some(PendingWrite::ClockinSubmit);
     }
 
@@ -4751,6 +4760,7 @@ impl App {
                     Ok(ClockinOverview {
                         classifies,
                         selected: 0,
+                        selected_item: 0,
                         count,
                         items,
                     })
@@ -4807,6 +4817,7 @@ impl App {
                     Ok(ClockinOverview {
                         classifies: Vec::new(),
                         selected: next,
+                        selected_item: 0,
                         count,
                         items,
                     })
@@ -4862,9 +4873,86 @@ impl App {
     /// The service requires an attached photo. Rather than silently failing,
     /// the tab says what is missing and points at the CLI, which accepts one.
 
-    fn submit_clockin(&mut self, _tx: &UnboundedSender<AsyncEvent>) {
+    /// Submits a random clock-in for the selected item.
+    ///
+    /// Why random:
+    /// This mirrors the reference app's one-tap clock-in: an hour-long window
+    /// drawn from the plausible hours of today and the two days before, at the
+    /// default place, with a generated image because the TUI cannot pick a
+    /// photo. The confirmation dialog states all of this before anything is
+    /// sent.
 
-        self.warn("打卡需要上传照片，请用 CLI：iclass_buaa_tui clockin-submit --photo <文件>");
+    fn submit_clockin(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(overview) = self.clockin.overview.as_ref() else {
+
+            self.warn("请先按 r 载入打卡类别");
+
+            return;
+        };
+
+        let Some(classify) = overview.classifies.get(overview.selected) else {
+
+            self.warn("没有可用的打卡类别");
+
+            return;
+        };
+
+        let Some(item) = overview.items.get(overview.selected_item).cloned() else {
+
+            self.warn("该类别没有可打卡项目");
+
+            return;
+        };
+
+        let classify_id = classify.id;
+
+        let tx = tx.clone();
+
+        self.write_in_flight = self.spawn_authenticated_write(
+            move |session| {
+
+                async move {
+
+                    let photo =
+                        crate::ygdk::ClockinPhoto::generated().map_err(format_anyhow_error)?;
+
+                    let zone = chrono::FixedOffset::east_opt(8 * 3600).expect("东八区偏移有效");
+
+                    let span = crate::ygdk::random_span(chrono::Utc::now().with_timezone(&zone));
+
+                    let ygdk = session
+                        .api
+                        .ygdk_login()
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    let result = session
+                        .api
+                        .ygdk_clockin(
+                            &ygdk,
+                            classify_id,
+                            &item,
+                            span.start,
+                            span.end,
+                            crate::ygdk::DEFAULT_PLACE,
+                            &photo,
+                        )
+                        .await
+                        .map_err(format_anyhow_error)?;
+
+                    Ok(format!(
+                        "已打卡 {} {} ~ {}，本学期 {} 次",
+                        item.name,
+                        span.start.format("%m-%d %H:%M"),
+                        span.end.format("%H:%M"),
+                        result.term_count
+                    ))
+                }
+            },
+            tx,
+            AsyncEvent::Write,
+        );
     }
 
     /// Loads the courses awaiting evaluation.

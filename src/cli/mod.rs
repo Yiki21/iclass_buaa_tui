@@ -2,6 +2,7 @@
 
 mod args;
 mod autologin;
+mod bykc;
 mod clockin;
 mod config;
 mod core;
@@ -10,6 +11,7 @@ mod eval;
 mod planner;
 mod schema;
 mod seat;
+mod skills;
 mod venue;
 
 use std::env;
@@ -59,6 +61,7 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::VenueReserve(args) => venue::venue_reserve_command(args).await,
         CommandKind::VenueOrders(args) => venue::venue_orders_command(args).await,
         CommandKind::Seats(args) => seat::seats_command(args).await,
+        CommandKind::SeatMap(args) => seat::seat_map_command(args).await,
         CommandKind::SeatBook(args) => seat::seat_book_command(args).await,
         CommandKind::SeatOrders(args) => seat::seat_orders_command(args).await,
         CommandKind::Clockin(args) => clockin::clockin_command(args).await,
@@ -66,6 +69,13 @@ pub async fn run_cli() -> Result<()> {
         CommandKind::Schema => schema::schema_command(),
         CommandKind::Eval(args) => eval::eval_command(args).await,
         CommandKind::EvalSubmit(args) => eval::eval_submit_command(args).await,
+        CommandKind::BykcCourses(args) => bykc::bykc_courses_command(args).await,
+        CommandKind::BykcChosen(args) => bykc::bykc_chosen_command(args).await,
+        CommandKind::BykcDetail(args) => bykc::bykc_detail_command(args).await,
+        CommandKind::BykcStats(args) => bykc::bykc_stats_command(args).await,
+        CommandKind::BykcSelect(args) => bykc::bykc_select_command(args).await,
+        CommandKind::BykcDeselect(args) => bykc::bykc_deselect_command(args).await,
+        CommandKind::Skills(args) => skills::skills_command(args),
         CommandKind::Today(args) => planner::today_command(args).await,
         CommandKind::Exams(args) => planner::exams_command(args).await,
         CommandKind::Grades(args) => planner::grades_command(args).await,
@@ -110,6 +120,7 @@ fn command_name(command: &CommandKind) -> String {
         CommandKind::VenueReserve(_) => "venue-reserve",
         CommandKind::VenueOrders(_) => "venue-orders",
         CommandKind::Seats(_) => "seats",
+        CommandKind::SeatMap(_) => "seat-map",
         CommandKind::SeatBook(_) => "seat-book",
         CommandKind::SeatOrders(_) => "seat-orders",
         CommandKind::Clockin(_) => "clockin",
@@ -117,6 +128,13 @@ fn command_name(command: &CommandKind) -> String {
         CommandKind::Eval(_) => "eval",
         CommandKind::EvalSubmit(_) => "eval-submit",
         CommandKind::Schema => "schema",
+        CommandKind::BykcCourses(_) => "bykc-courses",
+        CommandKind::BykcChosen(_) => "bykc-chosen",
+        CommandKind::BykcDetail(_) => "bykc-detail",
+        CommandKind::BykcStats(_) => "bykc-stats",
+        CommandKind::BykcSelect(_) => "bykc-select",
+        CommandKind::BykcDeselect(_) => "bykc-deselect",
+        CommandKind::Skills(_) => "skills",
         CommandKind::Today(_) => "today",
         CommandKind::Exams(_) => "exams",
         CommandKind::Grades(_) => "grades",

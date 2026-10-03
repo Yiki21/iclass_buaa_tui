@@ -12,6 +12,8 @@
 //! before use.
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::TimeZone;
+use rand::prelude::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,6 +21,41 @@ use crate::constants::to_webvpn_url;
 use crate::iclass::IClassApi;
 
 const BASE_URL: &str = "https://ygdk.buaa.edu.cn/api/Front";
+
+/// How many days back a random clock-in may reach.
+///
+/// Why three:
+/// The reference implementation draws from today and the two preceding days,
+/// so aiming for the same window keeps a submitted record indistinguishable
+/// from one made through the app. A wider reach would push records into a
+/// window the service's own history no longer treats as plausible.
+
+const RANDOM_DAY_RANGE_DAYS: u32 = 3;
+
+/// Earliest hour a random clock-in may start at, in Beijing time.
+
+const RANDOM_EARLIEST_HOUR: u32 = 8;
+
+/// Latest hour a random clock-in's window may end at, in Beijing time.
+///
+/// Why:
+/// The service treats a late-evening record as implausible, and the reference
+/// implementation stops at 22:00. Ending later would make the record look
+/// unlike a real one.
+
+const RANDOM_LATEST_END_HOUR: u32 = 22;
+
+/// Length of a randomly generated window.
+///
+/// Why fixed at one hour:
+/// The reference implementation uses exactly one hour for every generated
+/// window; this only mirrors that, it is not a service requirement.
+
+const RANDOM_WINDOW_MINUTES: i64 = 60;
+
+/// Place recorded with a one-tap clock-in, matching the reference app.
+
+pub const DEFAULT_PLACE: &str = "操场";
 
 /// OAuth entry point that redirects back with a `code`.
 
@@ -113,6 +150,158 @@ pub struct ClockinResult {
     pub record_id:  Option<i64>,
     pub term_count: i64,
     pub message:    String,
+}
+
+/// The image to attach to a clock-in.
+///
+/// Why:
+/// The service requires a photo on every record. Holding the bytes here rather
+/// than a path lets a caller pass either a file the user chose or an image the
+/// program produced, without the submission path caring which it got.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+
+pub struct ClockinPhoto {
+    pub bytes:     Vec<u8>,
+    pub file_name: String,
+}
+
+impl ClockinPhoto {
+    /// Reads a photo from disk.
+
+    pub fn from_path(path: &std::path::Path) -> Result<Self> {
+
+        let bytes =
+            std::fs::read(path).with_context(|| format!("读取打卡照片失败: {}", path.display()))?;
+
+        if bytes.is_empty() {
+
+            bail!("打卡照片是空文件: {}", path.display());
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("clockin.jpg")
+            .to_string();
+
+        Ok(Self { bytes, file_name })
+    }
+
+    /// Builds a blank PNG to stand in for a photo nobody supplied.
+    ///
+    /// Why:
+    /// The service rejects a clock-in with no image, so a caller that wants a
+    /// one-step "just check in" needs some image to send. This one is
+    /// deliberately unremarkable: a solid-colour frame, no embedded text or
+    /// metadata suggesting a real photograph.
+    ///
+    /// What this is not:
+    /// It is not a photo, and the caller must say so before submitting. A
+    /// record carrying this image is one a reviewer can reject on sight.
+
+    pub fn generated() -> Result<Self> {
+
+        let (width, height) = (640u32, 480u32);
+
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([0x1a, 0x1a, 0x1a]));
+
+        let mut bytes = Vec::new();
+
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .context("生成打卡占位图片失败")?;
+
+        Ok(Self {
+            bytes,
+            file_name: "clockin_auto.png".to_string(),
+        })
+    }
+}
+
+/// A randomly chosen clock-in window.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+
+pub struct RandomSpan {
+    pub start: chrono::DateTime<chrono::FixedOffset>,
+    pub end:   chrono::DateTime<chrono::FixedOffset>,
+}
+
+/// Picks a plausible past window, aligned to the hour.
+///
+/// Why:
+/// A record submitted for "right now" is one the user did not actually make.
+/// Choosing a past hour inside the plausible range produces the same shape of
+/// record as one submitted through the app at the time.
+///
+/// How:
+/// Candidates are the hour-long windows beginning on the hour, between 08:00
+/// and the 22:00 cutoff, over today and the two preceding days. Today only
+/// contributes windows that have already finished, so a submission never claims
+/// a window still in progress. One candidate is then drawn uniformly.
+
+pub fn random_span(now: chrono::DateTime<chrono::FixedOffset>) -> RandomSpan {
+
+    let mut candidates: Vec<chrono::DateTime<chrono::FixedOffset>> = Vec::new();
+
+    let window = chrono::Duration::minutes(RANDOM_WINDOW_MINUTES);
+
+    let midnight = now.date_naive().and_hms_opt(0, 0, 0).expect("午夜时刻有效");
+
+    // The offset is fixed for Beijing time, so the conversion cannot be
+    // ambiguous; falling back to `now` keeps the function total.
+    let today_start = now
+        .offset()
+        .from_local_datetime(&midnight)
+        .single()
+        .unwrap_or(now);
+
+    for offset in 0..RANDOM_DAY_RANGE_DAYS {
+
+        let days_back = i64::from(offset);
+
+        let date_start = today_start - chrono::Duration::days(days_back);
+
+        let latest_end = if days_back == 0 {
+
+            // Today's window has to have finished, so "end" cannot be later
+            // than now.
+            now.min(date_start + chrono::Duration::hours(i64::from(RANDOM_LATEST_END_HOUR)))
+        } else {
+
+            date_start + chrono::Duration::hours(i64::from(RANDOM_LATEST_END_HOUR))
+        };
+
+        let latest_start = latest_end - window;
+
+        let earliest_start = date_start + chrono::Duration::hours(i64::from(RANDOM_EARLIEST_HOUR));
+
+        let mut start = earliest_start;
+
+        while start <= latest_start {
+
+            candidates.push(start);
+
+            start += window;
+        }
+    }
+
+    let start = candidates
+        .choose(&mut rand::rng())
+        .copied()
+        // Today may contribute nothing (before 09:00), but the two earlier days
+        // always contribute 08:00..21:00, so this is unreachable; falling back
+        // to an already-ended window keeps the function total.
+        .unwrap_or(now - window);
+
+    RandomSpan {
+        start,
+        end: start + window,
+    }
 }
 
 impl IClassApi {
@@ -411,7 +600,8 @@ impl IClassApi {
     ///
     /// How:
     /// The photo is uploaded first to obtain a server-side file name, which the
-    /// clock-in form references.
+    /// clock-in form references. The bytes are taken rather than a path so the
+    /// same call serves a user-supplied photo and a generated stand-in.
 
     pub async fn ygdk_clockin(
         &self,
@@ -421,7 +611,7 @@ impl IClassApi {
         start: chrono::DateTime<chrono::FixedOffset>,
         end: chrono::DateTime<chrono::FixedOffset>,
         place: &str,
-        photo: &std::path::Path,
+        photo: &ClockinPhoto,
     ) -> Result<ClockinResult> {
 
         let image_name = self.ygdk_upload_photo(session, photo).await?;
@@ -461,21 +651,14 @@ impl IClassApi {
     async fn ygdk_upload_photo(
         &self,
         session: &YgdkSession,
-        photo: &std::path::Path,
+        photo: &ClockinPhoto,
     ) -> Result<String> {
 
-        let bytes = std::fs::read(photo)
-            .with_context(|| format!("读取打卡照片失败: {}", photo.display()))?;
-
-        let file_name = photo
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("clockin.jpg")
-            .to_string();
+        let file_name = photo.file_name.clone();
 
         let mime = mime_for(&file_name);
 
-        let part = reqwest::multipart::Part::bytes(bytes)
+        let part = reqwest::multipart::Part::bytes(photo.bytes.clone())
             .file_name(file_name)
             .mime_str(mime)
             .context("构造照片上传请求失败")?;
@@ -690,7 +873,68 @@ fn flexible_i64(value: &Value) -> Option<i64> {
 
 mod tests {
 
+    use super::{ClockinPhoto, random_span};
     use super::{Count, decode_url_component, extract_oauth_code, format_span, mime_for, unwrap};
+    use chrono::{TimeZone, Timelike};
+
+    fn beijing(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::DateTime<chrono::FixedOffset> {
+
+        chrono::FixedOffset::east_opt(8 * 3600)
+            .expect("东八区偏移有效")
+            .with_ymd_and_hms(y, m, d, h, min, 0)
+            .single()
+            .expect("时刻有效")
+    }
+
+    #[test]
+
+    fn random_span_stays_in_plausible_past_hours() {
+
+        // Cover early morning (today contributes nothing), midday, and late
+        // evening (today is capped at 22:00).
+        for now in [
+            beijing(2026, 3, 10, 7, 30),
+            beijing(2026, 3, 10, 13, 20),
+            beijing(2026, 3, 10, 23, 50),
+        ] {
+
+            let earliest_day = (now - chrono::Duration::days(2)).date_naive();
+
+            for _ in 0..500 {
+
+                let span = random_span(now);
+
+                assert_eq!(span.end - span.start, chrono::Duration::hours(1));
+
+                assert!(span.end <= now, "窗口不能晚于当前: {span:?} now={now}");
+
+                assert_eq!(span.start.minute(), 0, "应对齐整点");
+
+                assert!(span.start.hour() >= 8, "不早于 08:00: {span:?}");
+
+                assert!(
+                    span.end.hour() <= 22 && span.start.date_naive() == span.end.date_naive(),
+                    "不晚于 22:00: {span:?}"
+                );
+
+                assert!(
+                    span.start.date_naive() >= earliest_day,
+                    "只覆盖近三天: {span:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+
+    fn generated_photo_is_a_png() {
+
+        let photo = ClockinPhoto::generated().expect("应能生成占位图");
+
+        assert!(photo.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        assert!(photo.file_name.ends_with(".png"));
+    }
 
     #[test]
 

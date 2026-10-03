@@ -60,19 +60,24 @@ fn classify(name: &str) -> Effect {
     match name {
         // Pure reads.
         "list-today" | "doctor" | "notify" | "venues" | "venue-slots" | "venue-orders"
-        | "seats" | "seat-orders" | "clockin" | "eval" | "today" | "exams" | "grades"
-        | "classrooms" | "tasks" | "schedule-export" | "schedule-diff" | "schema"
-        | "autologin-status" => Effect::Read,
+        | "seats" | "seat-map" | "seat-orders" | "clockin" | "eval" | "today" | "exams"
+        | "grades" | "classrooms" | "tasks" | "schedule-export" | "schedule-diff" | "schema"
+        | "autologin-status" | "bykc-courses" | "bykc-chosen" | "bykc-detail" | "bykc-stats"
+        | "skills list" | "skills show" => Effect::Read,
 
         // Can be undone through the tool: a reservation or booking is
-        // cancellable with —x or --cancel.
-        "venue-reserve" | "seat-book" | "sign" | "plan" => Effect::Write,
+        // cancellable with —x or --cancel, and a BYKC enrollment with
+        // bykc-deselect (until the course's cancel deadline).
+        "venue-reserve" | "seat-book" | "sign" | "plan" | "bykc-select" | "bykc-deselect" => {
+            Effect::Write
+        }
 
         // Nothing undoes these.
         "clockin-submit" | "eval-submit" => Effect::WriteIrreversible,
 
-        // Scheduler installation is reversible but touches the host system.
-        "install-autologin" | "uninstall-autologin" => Effect::Write,
+        // Scheduler installation is reversible but touches the host system,
+        // and so does writing skill files into an agent's skills directory.
+        "install-autologin" | "uninstall-autologin" | "skills install" => Effect::Write,
 
         _ => Effect::Read,
     }
@@ -87,10 +92,33 @@ pub(crate) fn schema_json() -> Result<Value> {
     let mut commands = Vec::new();
 
     // clap's introspection gives the subcommands; the classification is layered
-    // on from `classify`.
+    // on from `classify`. A command group such as `skills` is flattened into
+    // one entry per leaf (`skills install`), since the leaves differ in effect.
+    let mut leaves = Vec::new();
+
     for subcommand in command.get_subcommands() {
 
-        let name = subcommand.get_name().to_string();
+        let nested: Vec<_> = subcommand
+            .get_subcommands()
+            .filter(|child| child.get_name() != "help")
+            .collect();
+
+        if nested.is_empty() {
+
+            leaves.push((subcommand.get_name().to_string(), subcommand));
+        } else {
+
+            for child in nested {
+
+                leaves.push((
+                    format!("{} {}", subcommand.get_name(), child.get_name()),
+                    child,
+                ));
+            }
+        }
+    }
+
+    for (name, subcommand) in leaves {
 
         // clap includes the implicit `help` subcommand; it is not part of the
         // tool's own surface.
@@ -142,9 +170,9 @@ pub(crate) fn schema_json() -> Result<Value> {
     Ok(json!({
         "tool": "iclass_buaa_tui",
         "version": env!("CARGO_PKG_VERSION"),
-        "summary": "北航课程与校园服务终端工具：课表、成绩、作业、签到、研讨室、图书馆、打卡、评教。",
+        "summary": "北航课程与校园服务终端工具：课表、成绩、作业、签到、博雅课程、研讨室、图书馆、打卡、评教。",
         "conventions": {
-            "json": "除了 schema 本身，所有命令都支持 --json 输出结构化结果。",
+            "json": "supports_json=true 的命令接受 --json 输出结构化结果；失败时 stderr 输出带 code/retryable 的错误报告。",
             "confirmation": "标为写操作的命令在没有确认标志时只做预览，输出 submitted=false；加上确认标志才会真正执行。",
             "exit_codes": {
                 "0": "成功",
@@ -220,6 +248,61 @@ mod tests {
         assert_eq!(classify("clockin-submit"), Effect::WriteIrreversible);
 
         assert_eq!(classify("eval-submit"), Effect::WriteIrreversible);
+
+        assert_eq!(classify("bykc-courses"), Effect::Read);
+
+        assert_eq!(classify("bykc-select"), Effect::Write);
+
+        assert_eq!(classify("bykc-deselect"), Effect::Write);
+
+        assert_eq!(classify("skills show"), Effect::Read);
+
+        assert_eq!(classify("skills install"), Effect::Write);
+    }
+
+    #[test]
+
+    fn command_groups_are_flattened_into_leaves() {
+
+        let schema = schema_json().expect("应能生成 schema");
+
+        let names: Vec<&str> = schema["commands"]
+            .as_array()
+            .expect("应有 commands 数组")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect();
+
+        for expected in [
+            "skills list",
+            "skills show",
+            "skills install",
+            "bykc-select",
+        ] {
+
+            assert!(names.contains(&expected), "schema 缺少 {expected}");
+        }
+
+        assert!(!names.contains(&"skills"), "命令组本身不应作为条目");
+    }
+
+    #[test]
+
+    fn every_write_has_a_confirmation_flag() {
+
+        let schema = schema_json().expect("应能生成 schema");
+
+        for entry in schema["commands"].as_array().expect("应有 commands 数组") {
+
+            if entry["effect"] != "read" {
+
+                assert_eq!(
+                    entry["confirmation_flag"], "--yes",
+                    "写命令 {} 缺少 --yes",
+                    entry["name"]
+                );
+            }
+        }
     }
 
     #[test]

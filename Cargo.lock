@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "iclass_buaa_tui"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "aes",
  "anyhow",

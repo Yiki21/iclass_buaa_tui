@@ -1936,7 +1936,7 @@ fn render_clockin(frame: &mut Frame, area: Rect, app: &App) {
 
             let entry = ListItem::new(line);
 
-            if index == overview.selected {
+            if index == overview.selected_item {
 
                 entry.style(theme::selection_style())
             } else {
@@ -1952,13 +1952,13 @@ fn render_clockin(frame: &mut Frame, area: Rect, app: &App) {
         app,
         items,
         overview.items.len(),
-        overview.selected,
+        overview.selected_item,
     );
 
     render_key_hint(
         frame,
         footer,
-        "j/k 选项目  h/l 切类别  t 查看记录  s 打卡（需 CLI 上传照片）",
+        "j/k 选项目  h/l 切类别  t 查看记录  s 随机打卡",
     );
 }
 

@@ -225,11 +225,17 @@ impl IClassApi {
         Ok(token.to_string())
     }
 
-    /// Walks the CAS chain and returns the ticket from the redirect URL.
+    /// Walks the CAS chain and returns the service-issued `cas` token.
     ///
-    /// Why:
-    /// The service authenticates by ticket, not by password. Following the
-    /// redirect chain with the shared session is what produces one.
+    /// Why the chain has to be walked to the end:
+    /// The shared SSO session answers the first hop with a redirect carrying a
+    /// *service ticket* (`?ticket=ST-...`). That value is not what the login
+    /// endpoint accepts: it has to be presented back to the service's own
+    /// callback (`/v4/login/cas`), which validates it against SSO and then
+    /// redirects to the frontend with its own `?cas=`. Posting the service
+    /// ticket to `login/user` instead is answered with
+    /// `{"code":1,"message":"操作失败"}`, which reads like an auth failure
+    /// rather than a missed hop.
 
     async fn libbook_cas_ticket(&self) -> Result<String> {
 
@@ -252,18 +258,31 @@ impl IClassApi {
                 bail!("图书馆 CAS 请求失败: HTTP {status}");
             }
 
+            // Only `cas` counts here: a `ticket` is the SSO service ticket, an
+            // intermediate value rather than a credential.
             let url = response.url().to_string();
 
-            if let Some(ticket) = extract_cas_ticket(&url) {
+            if let Some(ticket) = extract_cas_token(&url) {
 
                 return Ok(ticket);
             }
 
-            let Some(location) = response
+            // The fragment is not transmitted in HTTP, but it appears in the
+            // Location header value and can be parsed there.
+            let location_header = response
                 .headers()
                 .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-            else {
+                .and_then(|value| value.to_str().ok());
+
+            if let Some(location_value) = location_header {
+
+                if let Some(ticket) = extract_cas_token(location_value) {
+
+                    return Ok(ticket);
+                }
+            }
+
+            let Some(location) = location_header else {
 
                 // Report what the SSO page actually is: a login form here means
                 // the shared session is not authenticated for this service,
@@ -287,11 +306,6 @@ impl IClassApi {
                 .and_then(|base| base.join(location))
                 .map(|next| next.to_string())
                 .context("解析图书馆 CAS 跳转失败")?;
-
-            if let Some(ticket) = extract_cas_ticket(&current) {
-
-                return Ok(ticket);
-            }
         }
 
         bail!("图书馆 CAS 跳转次数过多，未取得 ticket")
@@ -317,8 +331,8 @@ impl IClassApi {
                         .get("name")
                         .and_then(flexible_string)
                         .unwrap_or_default(),
-                    free_num:  row.get("freeNum").and_then(flexible_i64).unwrap_or(0),
-                    total_num: row.get("totalNum").and_then(flexible_i64).unwrap_or(0),
+                    free_num:  field_i64(row, &["free_num", "freeNum"]),
+                    total_num: field_i64(row, &["total_num", "totalNum"]),
                 })
             })
             .collect())
@@ -362,8 +376,8 @@ impl IClassApi {
                         .or_else(|| row.get("areaName"))
                         .and_then(flexible_string)
                         .unwrap_or_default(),
-                    free_num:  row.get("freeNum").and_then(flexible_i64).unwrap_or(0),
-                    total_num: row.get("totalNum").and_then(flexible_i64).unwrap_or(0),
+                    free_num:  field_i64(row, &["free_num", "freeNum"]),
+                    total_num: field_i64(row, &["total_num", "totalNum"]),
                 })
             })
             .collect())
@@ -377,57 +391,7 @@ impl IClassApi {
             .libbook_post("Space/map", json!({ "id": area_id }), Some(token))
             .await?;
 
-        let data = response.get("data").cloned().unwrap_or(Value::Null);
-
-        let available_dates = data
-            .get("availableDates")
-            .and_then(Value::as_array)
-            .map(|rows| {
-
-                rows.iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let time_slots = data
-            .get("timeSlots")
-            .and_then(Value::as_array)
-            .map(|rows| {
-
-                rows.iter()
-                    .filter_map(|row| {
-
-                        let start = row
-                            .get("start")
-                            .and_then(flexible_string)
-                            .unwrap_or_default();
-
-                        let end = row.get("end").and_then(flexible_string).unwrap_or_default();
-
-                        Some(TimeSlot {
-                            id: row.get("id").and_then(flexible_string)?,
-                            label: row
-                                .get("label")
-                                .and_then(flexible_string)
-                                .unwrap_or_else(|| format!("{start}-{end}")),
-                            start,
-                            end,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(AreaDetail {
-            id: area_id.to_string(),
-            name: data
-                .get("name")
-                .and_then(flexible_string)
-                .unwrap_or_default(),
-            available_dates,
-            time_slots,
-        })
+        Ok(parse_area_detail(area_id, &response))
     }
 
     /// Lists seats in an area for a segment, with availability.
@@ -459,35 +423,7 @@ impl IClassApi {
 
         let rows = data_list(&response, "list").unwrap_or_default();
 
-        Ok(rows
-            .iter()
-            .filter_map(|row| {
-
-                let status = row
-                    .get("status")
-                    .and_then(flexible_string)
-                    .unwrap_or_default();
-
-                Some(Seat {
-                    id:           row.get("id").and_then(flexible_string)?,
-                    name:         row
-                        .get("name")
-                        .and_then(flexible_string)
-                        .unwrap_or_default(),
-                    no:           row.get("no").and_then(flexible_string).unwrap_or_default(),
-                    status_name:  row
-                        .get("statusName")
-                        .and_then(flexible_string)
-                        .unwrap_or_default(),
-                    // The service encodes availability as "1"; the explicit
-                    // flag is preferred when present.
-                    is_available: row
-                        .get("isAvailable")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(status == "1"),
-                })
-            })
-            .collect())
+        Ok(rows.iter().filter_map(parse_seat).collect())
     }
 
     /// Lists the caller's seat reservations.
@@ -507,8 +443,9 @@ impl IClassApi {
             )
             .await?;
 
-        // The list may sit under `data.list` or be the whole `data`.
+        // The list may sit under `data.list`, `data.data`, or be the whole `data`.
         let rows = data_list(&response, "list")
+            .or_else(|| data_list(&response, "data"))
             .or_else(|| response.get("data").and_then(Value::as_array).cloned())
             .unwrap_or_default();
 
@@ -550,10 +487,7 @@ impl IClassApi {
             .await
             .context("预约座位失败")?;
 
-        Ok(response
-            .get("data")
-            .and_then(parse_booking)
-            .unwrap_or_default())
+        Ok(reserved_booking(&response).unwrap_or_default())
     }
 
     /// Cancels a seat reservation.
@@ -612,20 +546,21 @@ fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Valu
         }
         "space/pcTopFor" => has_rows(&["list"]),
         "space/pick" => has_rows(&["area", "list"]),
+        // Upstream nests segments as `data.date.list[].times`; the flat
+        // `data.timeSlots` form is kept for older responses.
         "Space/map" => {
             value
-                .pointer("/data/timeSlots")
+                .pointer("/data/date/list")
                 .is_some_and(Value::is_array)
+                || value
+                    .pointer("/data/timeSlots")
+                    .is_some_and(Value::is_array)
         }
-        "Space/seat" | "member/seat" => has_rows(&["list"]),
+        "Space/seat" => has_rows(&["list"]),
+        "member/seat" => has_rows(&["list", "data"]),
         // An actual booking identifier is affirmative evidence. Cancellation
         // has no verified success envelope yet, so do not claim completion.
-        "space/confirm" => {
-            value
-                .get("data")
-                .and_then(parse_booking)
-                .is_some_and(|b| !b.id.is_empty())
-        }
+        "space/confirm" => reserved_booking(&value).is_some_and(|b| !b.id.is_empty()),
         _ => false,
     };
 
@@ -701,13 +636,48 @@ fn summarize_cas_page(body: &str) -> String {
     clues.join(", ")
 }
 
-fn extract_cas_ticket(url: &str) -> Option<String> {
+/// Pulls the service-issued `cas` token out of a URL.
+///
+/// Why only `cas`:
+/// The booking service does not use the standard `ticket` name for the value
+/// its login endpoint accepts. SSO's `?ticket=ST-...` is a service ticket that
+/// still has to be redeemed at the service's own `/v4/login/cas` callback;
+/// accepting it here ended the walk one hop early and posted a value the login
+/// endpoint rejects with `{"code":1,"message":"操作失败"}`.
+///
+/// Why the fragment is read too:
+/// The callback's final redirect carries the token inside a single-page route
+/// (`.../h5/index.html#/cas/?cas=<token>`), and a fragment is never sent to the
+/// server. `query_pairs` only sees the part before `#`, so the token would be
+/// missed and the walk would end on a page that looks like a dead end.
+
+fn extract_cas_token(url: &str) -> Option<String> {
 
     let parsed = reqwest::Url::parse(url).ok()?;
 
+    token_from_query_pairs(&parsed)
+        .or_else(|| token_from_query_pairs_in_fragment(parsed.fragment().unwrap_or_default()))
+}
+
+fn token_from_query_pairs(parsed: &reqwest::Url) -> Option<String> {
+
     parsed
         .query_pairs()
-        .find(|(key, _)| key == "cas" || key == "ticket")
+        .find(|(key, _)| key == "cas")
+        .map(|(_, value)| value.to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Reads `cas` out of a fragment such as `/cas/?cas=abc`.
+
+fn token_from_query_pairs_in_fragment(fragment: &str) -> Option<String> {
+
+    let query = fragment.split_once('?').map(|(_, rest)| rest)?;
+
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "cas")
         .map(|(_, value)| value.to_string())
         .filter(|value| !value.is_empty())
 }
@@ -737,32 +707,169 @@ fn flexible_string(value: &Value) -> Option<String> {
         .or_else(|| value.as_i64().map(|number| number.to_string()))
 }
 
+/// Reads the first present key as a string.
+///
+/// The service mixes snake_case (`free_num`, `status_name`) and camelCase
+/// across endpoints and versions, so each field lists every spelling seen.
+
+fn field_string(row: &Value, keys: &[&str]) -> String {
+
+    keys.iter()
+        .filter_map(|key| row.get(*key).and_then(flexible_string))
+        .find(|text| !text.is_empty())
+        .unwrap_or_default()
+}
+
+fn field_i64(row: &Value, keys: &[&str]) -> i64 {
+
+    keys.iter()
+        .find_map(|key| row.get(*key).and_then(flexible_i64))
+        .unwrap_or(0)
+}
+
+fn parse_time_slot(row: &Value) -> Option<TimeSlot> {
+
+    let id = row.get("id").and_then(flexible_string)?;
+
+    let start = field_string(row, &["start", "start_time", "beginTime"]);
+
+    let end = field_string(row, &["end", "end_time", "endTime"]);
+
+    let label = field_string(row, &["label"]);
+
+    Some(TimeSlot {
+        id,
+        label: if label.is_empty() {
+
+            format!("{start}-{end}")
+        } else {
+
+            label
+        },
+        start,
+        end,
+    })
+}
+
+/// Parses `Space/map`.
+///
+/// Upstream shape: `data.area{id,name}` and `data.date.list[{day, times[]}]`.
+/// Segments come from the first listed day, matching the UBAA client. The
+/// older flat `data.availableDates` / `data.timeSlots` form is still accepted.
+
+fn parse_area_detail(area_id: &str, response: &Value) -> AreaDetail {
+
+    let data = response.get("data").unwrap_or(&Value::Null);
+
+    let area = data.get("area").filter(|value| value.is_object());
+
+    let days = data
+        .pointer("/date/list")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut available_dates: Vec<String> = days
+        .iter()
+        .map(|day| field_string(day, &["day", "date"]))
+        .filter(|day| !day.is_empty())
+        .collect();
+
+    let mut time_slots: Vec<TimeSlot> = days
+        .first()
+        .and_then(|day| day.get("times"))
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(parse_time_slot).collect())
+        .unwrap_or_default();
+
+    if available_dates.is_empty() {
+
+        available_dates = data
+            .get("availableDates")
+            .and_then(Value::as_array)
+            .map(|rows| rows.iter().filter_map(flexible_string).collect())
+            .unwrap_or_default();
+    }
+
+    if time_slots.is_empty() {
+
+        time_slots = data
+            .get("timeSlots")
+            .and_then(Value::as_array)
+            .map(|rows| rows.iter().filter_map(parse_time_slot).collect())
+            .unwrap_or_default();
+    }
+
+    let id = area
+        .map(|area| field_string(area, &["id"]))
+        .unwrap_or_default();
+
+    let name = area
+        .map(|area| field_string(area, &["name"]))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| field_string(data, &["name"]));
+
+    AreaDetail {
+        id: if id.is_empty() {
+
+            area_id.to_string()
+        } else {
+
+            id
+        },
+        name,
+        available_dates,
+        time_slots,
+    }
+}
+
+fn parse_seat(row: &Value) -> Option<Seat> {
+
+    let status = field_string(row, &["status"]);
+
+    Some(Seat {
+        id:           row.get("id").and_then(flexible_string)?,
+        name:         field_string(row, &["name"]),
+        no:           field_string(row, &["no"]),
+        status_name:  field_string(row, &["status_name", "statusName"]),
+        // The service encodes availability as "1"; the explicit flag is
+        // preferred when present.
+        is_available: row
+            .get("isAvailable")
+            .and_then(Value::as_bool)
+            .unwrap_or(status == "1"),
+    })
+}
+
+/// Reads the booking returned by `space/confirm`.
+///
+/// Upstream nests it as `data.bookInfo` (or `data.booking`); a flat `data`
+/// row is accepted as a fallback.
+
+fn reserved_booking(response: &Value) -> Option<Booking> {
+
+    let data = response.get("data")?;
+
+    data.get("bookInfo")
+        .or_else(|| data.get("booking"))
+        .filter(|value| value.is_object())
+        .and_then(parse_booking)
+        .or_else(|| parse_booking(data))
+}
+
 fn parse_booking(row: &Value) -> Option<Booking> {
 
     Some(Booking {
         id:          row.get("id").and_then(flexible_string)?,
-        area_name:   row
-            .get("areaName")
-            .or_else(|| row.get("nameMerge"))
-            .and_then(flexible_string)
-            .unwrap_or_default(),
-        seat_no:     row
-            .get("seatNo")
-            .and_then(flexible_string)
-            .unwrap_or_default(),
-        day:         row.get("day").and_then(flexible_string).unwrap_or_default(),
-        begin_time:  row
-            .get("beginTime")
-            .and_then(flexible_string)
-            .unwrap_or_default(),
-        end_time:    row
-            .get("endTime")
-            .and_then(flexible_string)
-            .unwrap_or_default(),
-        status_name: row
-            .get("statusName")
-            .and_then(flexible_string)
-            .unwrap_or_default(),
+        area_name:   field_string(
+            row,
+            &["areaName", "nameMerge", "name_merge", "area_name", "name"],
+        ),
+        seat_no:     field_string(row, &["seatNo", "seat_no", "no"]),
+        day:         field_string(row, &["day", "date"]),
+        begin_time:  field_string(row, &["beginTime", "begin_time"]),
+        end_time:    field_string(row, &["endTime", "end_time"]),
+        status_name: field_string(row, &["statusName", "status_name"]),
     })
 }
 
@@ -770,41 +877,62 @@ fn parse_booking(row: &Value) -> Option<Booking> {
 
 mod tests {
 
-    use super::{extract_cas_ticket, parse_booking};
+    use super::{
+        data_list, extract_cas_token, field_i64, parse_area_detail, parse_booking, parse_seat,
+        reserved_booking, validate_library_response,
+    };
     use serde_json::json;
 
     #[test]
 
-    fn reads_the_cas_ticket_from_a_redirect_url() {
+    fn reads_the_cas_token_from_the_service_callback() {
 
         // The booking service names this parameter `cas`, not `ticket`.
-        let url = "https://booking.lib.buaa.edu.cn/v4/login/cas?cas=ST-123-abc";
+        let url = "https://booking.lib.buaa.edu.cn/v4/login/cas?cas=abc123";
 
-        assert_eq!(extract_cas_ticket(url).as_deref(), Some("ST-123-abc"));
+        assert_eq!(extract_cas_token(url).as_deref(), Some("abc123"));
 
-        // The standard name still works, for robustness.
+        // The final redirect is a single-page route carrying the token in the
+        // fragment, which is never transmitted to the server but can be parsed
+        // from the Location header or the reqwest URL.
+        let fragment_url = "https://booking.lib.buaa.edu.cn/h5/index.html#/cas/?cas=def456";
+
         assert_eq!(
-            extract_cas_ticket("https://x/v4/login/cas?ticket=ST-9").as_deref(),
-            Some("ST-9")
+            extract_cas_token(fragment_url).as_deref(),
+            Some("def456"),
+            "fragment 里的 cas 应该被识别"
+        );
+
+        // The SSO service ticket is an intermediate value. Accepting it here
+        // ends the redirect walk one hop early and the login is answered with
+        // an opaque "操作失败".
+        assert!(
+            extract_cas_token("https://x/v4/login/cas?ticket=ST-9").is_none(),
+            "SSO 服务票据不是最终凭证"
         );
 
         // Missing or empty must not be treated as success.
-        assert!(extract_cas_ticket("https://booking.lib.buaa.edu.cn/v4/login/cas").is_none());
+        assert!(extract_cas_token("https://booking.lib.buaa.edu.cn/v4/login/cas").is_none());
 
         assert!(
-            extract_cas_ticket("https://x/?cas=").is_none(),
+            extract_cas_token("https://x/?cas=").is_none(),
             "空 cas 不应视为成功"
+        );
+
+        assert!(
+            extract_cas_token("https://x/h5/#/cas/?cas=").is_none(),
+            "fragment 里的空 cas 也不应视为成功"
         );
 
         // The SSO entry URL embeds the service path, which contains
         // "login/cas"; a loose substring search returns that fragment as the
-        // ticket and the login then fails with an opaque "操作失败".
+        // token and the login then fails with an opaque "操作失败".
         assert!(
-            extract_cas_ticket(
+            extract_cas_token(
                 "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Fbooking.lib.buaa.edu.cn%2Fv4%2Flogin%2Fcas"
             )
             .is_none(),
-            "服务地址不应被当成 ticket"
+            "服务地址不应被当成 cas"
         );
     }
 
@@ -837,5 +965,95 @@ mod tests {
         let booking = parse_booking(&json!({"id": 42})).expect("数字 id 也应可解析");
 
         assert_eq!(booking.id, "42");
+    }
+
+    // Fixture shapes below mirror UBAA's LocalLibBookApiBackendTest, which
+    // records the live service's snake_case and nested envelopes.
+
+    #[test]
+
+    fn library_counts_are_snake_case() {
+
+        let row = json!({"id": "9", "free_num": 12, "total_num": 100});
+
+        assert_eq!(field_i64(&row, &["free_num", "freeNum"]), 12);
+
+        assert_eq!(field_i64(&row, &["total_num", "totalNum"]), 100);
+    }
+
+    #[test]
+
+    fn area_detail_reads_nested_date_list() {
+
+        let body = r#"{"code":1,"data":{
+            "area":{"id":"8","name":"一层西阅学空间"},
+            "date":{"list":[{"day":"2026-05-08",
+                "times":[{"id":"seg-1","start":"08:00","end":"23:00"}]}]}}}"#;
+
+        let value = validate_library_response(200, body, "Space/map")
+            .expect("嵌套 date.list 应被视为有效响应");
+
+        let detail = parse_area_detail("8", &value);
+
+        assert_eq!(detail.name, "一层西阅学空间");
+
+        assert_eq!(detail.available_dates, vec!["2026-05-08"]);
+
+        assert_eq!(detail.time_slots.len(), 1);
+
+        assert_eq!(detail.time_slots[0].id, "seg-1");
+
+        assert_eq!(detail.time_slots[0].label, "08:00-23:00");
+    }
+
+    #[test]
+
+    fn area_detail_without_dates_is_rejected() {
+
+        let body = r#"{"code":1,"data":{"area":{"id":"8"}}}"#;
+
+        assert!(validate_library_response(200, body, "Space/map").is_err());
+    }
+
+    #[test]
+
+    fn seat_reads_snake_case_status() {
+
+        let seat = parse_seat(&json!({"id":"101","no":"101","status":"1","status_name":"空闲"}))
+            .expect("座位应可解析");
+
+        assert!(seat.is_available);
+
+        assert_eq!(seat.status_name, "空闲");
+    }
+
+    #[test]
+
+    fn bookings_list_under_data_data_is_valid() {
+
+        let body = r#"{"code":1,"data":{"data":[{"id":"b1","nameMerge":"一层 / 101","status_name":"已预约"}],"total":1}}"#;
+
+        let value = validate_library_response(200, body, "member/seat").expect("应有效");
+
+        let rows = data_list(&value, "list")
+            .or_else(|| data_list(&value, "data"))
+            .unwrap();
+
+        let booking = parse_booking(&rows[0]).unwrap();
+
+        assert_eq!(booking.area_name, "一层 / 101");
+
+        assert_eq!(booking.status_name, "已预约");
+    }
+
+    #[test]
+
+    fn reservation_reads_book_info() {
+
+        let body = r#"{"code":1,"message":"操作成功","data":{"bookInfo":{"id":"b1","no":"101"}}}"#;
+
+        let value = validate_library_response(200, body, "space/confirm").expect("应有效");
+
+        assert_eq!(reserved_booking(&value).unwrap().id, "b1");
     }
 }

@@ -58,6 +58,22 @@ pub(crate) enum CommandKind {
     Eval(EvalArgs),
     /// Submit course evaluations. Requires --yes; answers are recorded as yours.
     EvalSubmit(EvalSubmitArgs),
+    /// List BYKC (博雅课程) courses open for enrollment.
+    BykcCourses(BykcCoursesArgs),
+    /// List BYKC courses you have chosen this semester.
+    BykcChosen(BykcReadArgs),
+    /// Show one BYKC course in full, including sign windows.
+    BykcDetail(BykcCourseArgs),
+    /// Show BYKC completion statistics per category.
+    BykcStats(BykcReadArgs),
+    /// Enroll in a BYKC course. Requires --yes; this takes a real place.
+    BykcSelect(BykcWriteArgs),
+    /// Withdraw from a BYKC course. Requires --yes.
+    BykcDeselect(BykcWriteArgs),
+    /// Print or install the bundled Agent Skills for LLM callers.
+    Skills(SkillsArgs),
+    /// List the seats of one library area for a date and time segment.
+    SeatMap(SeatMapArgs),
     /// Show today's cached academic courses and next class.
     Today(TodayArgs),
     /// Show exam arrangements for one academic term.
@@ -286,6 +302,32 @@ pub(crate) struct SeatArgs {
     #[arg(long)]
     pub(crate) date:        Option<String>,
     /// Print JSON instead of a human-readable table.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct SeatMapArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Area id from `seats --library`.
+    #[arg(long)]
+    pub(crate) area:        String,
+    /// Date in YYYY-MM-DD format. Defaults to today.
+    #[arg(long)]
+    pub(crate) date:        Option<String>,
+    /// Time segment id. Defaults to the first the service offers.
+    #[arg(long)]
+    pub(crate) segment:     Option<String>,
+    /// Only list seats that can be booked now.
+    #[arg(long)]
+    pub(crate) free:        bool,
+    /// Print JSON instead of tab-separated text.
     #[arg(long)]
     pub(crate) json:        bool,
     /// Print structured login diagnostics on login failure.
@@ -619,6 +661,95 @@ pub(crate) struct UninstallAutologinArgs {
     /// Confirm. Without this the command only reports what it would change.
     #[arg(long)]
     pub(crate) yes:         bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct BykcReadArgs {
+    /// Explicit config file path. Overrides XDG config lookup.
+    #[arg(long)]
+    pub(crate) config:      Option<PathBuf>,
+    /// Print JSON instead of tab-separated text.
+    #[arg(long)]
+    pub(crate) json:        bool,
+    /// Print structured login diagnostics on login failure.
+    #[arg(long)]
+    pub(crate) debug_login: bool,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct BykcCoursesArgs {
+    /// Include courses whose enrollment window is closed or full.
+    #[arg(long)]
+    pub(crate) all:  bool,
+    #[command(flatten)]
+    pub(crate) read: BykcReadArgs,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct BykcCourseArgs {
+    /// BYKC course id from `bykc-courses` or `bykc-chosen` (course_id).
+    #[arg(long)]
+    pub(crate) course: i64,
+    #[command(flatten)]
+    pub(crate) read:   BykcReadArgs,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct BykcWriteArgs {
+    /// BYKC course id from `bykc-courses` or `bykc-chosen` (course_id).
+    #[arg(long)]
+    pub(crate) course: i64,
+    /// Confirm. Without this the command only previews.
+    ///
+    /// Why:
+    /// Enrollment places are finite and selection windows close; a mistyped
+    /// command must not take or release one.
+    #[arg(long)]
+    pub(crate) yes:    bool,
+    #[command(flatten)]
+    pub(crate) read:   BykcReadArgs,
+}
+
+#[derive(Debug, Args)]
+
+pub(crate) struct SkillsArgs {
+    #[command(subcommand)]
+    pub(crate) action: SkillsAction,
+}
+
+#[derive(Debug, Subcommand)]
+
+pub(crate) enum SkillsAction {
+    /// List the bundled skills.
+    List {
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one bundled file, e.g. `buaa-campus` or `buaa-booking/SKILL.md`.
+    Show {
+        /// Skill name, or skill-relative path to a file inside it.
+        name: String,
+    },
+    /// Write the bundled skills into a skills directory.
+    Install {
+        /// Skills directory, e.g. ~/.claude/skills or ~/.agents/skills.
+        #[arg(long)]
+        target: PathBuf,
+        /// Overwrite existing files written by an earlier install.
+        #[arg(long)]
+        force:  bool,
+        /// Confirm. Without this the command only lists what it would write.
+        #[arg(long)]
+        yes:    bool,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json:   bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

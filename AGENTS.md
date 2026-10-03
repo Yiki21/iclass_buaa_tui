@@ -14,6 +14,22 @@ flag that confirms a write, and whether it supports `--json`. Arguments come
 from the parser itself, so they cannot be out of date. Prefer this over
 scraping `--help`.
 
+## Skills
+
+The binary carries Agent Skills (SKILL.md files) that describe each domain's
+workflow: which read gives the id the next write needs, and what to confirm
+with the user first. They match the binary's version.
+
+```
+iclass_buaa_tui skills list --json            # names and descriptions
+iclass_buaa_tui skills show buaa-campus       # print one; start with this router
+iclass_buaa_tui skills install --target ~/.claude/skills --yes
+```
+
+`install` refuses to overwrite a file it did not write, and touches nothing if
+any file conflicts. `--force` updates files from an earlier install. Sources
+live in `skills/`.
+
 ## One rule that will bite you
 
 **Every command that writes does nothing without `--yes`.** Without it the call
@@ -90,7 +106,7 @@ them. Do not call it without an explicit human instruction, and read
 
 1. `doctor --json` — reachability of each upstream service, before anything else.
 2. `list-today --json` — verifies authentication for that process. Each CLI invocation creates its own in-memory cookie jar; a previous command does not establish a session for a later process.
-3. Reads: `today`, `exams`, `grades --all`, `tasks`, `venues`, `seats`, `clockin`, `eval`.
+3. Reads: `today`, `exams`, `grades --all`, `tasks`, `venues`, `seats`, `seat-map`, `clockin`, `eval`.
 4. Writes, last, and only with an explicit instruction.
 
 ## Things that are not obvious
