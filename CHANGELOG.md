@@ -7,6 +7,11 @@
 - **Windows 上任意子命令报「HOME 未设置」后退出**（#18）：Windows 默认不设 `HOME`，此前日志、配置、课表缓存、planner 锁和 TUI 记住的登录都从 `HOME` 推路径。现在由 `etcetera` 定位目录：Windows 用 `%APPDATA%`（配置）和 `%LOCALAPPDATA%`（日志、锁），Linux 与 macOS 仍按 XDG，路径不变。Windows 上原来为绕过问题放在 `%XDG_CONFIG_HOME%` 或 `%HOME%\.config` 的配置仍能找到。
 - `--log-file` 此前也绕不过这个问题：指定了日志路径，程序仍会先计算默认路径并因缺 `HOME` 失败。现在只在没给 `--log-file` 时才计算默认路径。
 
+### 依赖
+
+- `cargo update` 刷新锁文件（176 个 crate，均在 semver 范围内），消掉 `cargo audit` 的三条警告：`lru` 0.16.4 的 unsound 公告 RUSTSEC-2026-0253（ratatui 依赖，升到 0.18.5）、被撤回的 `chacha20` 0.10.0 和 `spin` 0.9.8。`cargo audit` 现在没有任何警告；RSA 的 RUSTSEC-2023-0071 仍按 `.cargo/audit.toml` 忽略，原因不变。
+- `base64` 0.22 → 0.23。只开 `std` 特性，与 0.22 的默认特性相同；0.23 新增并默认打开的 `simd-unsafe` 没有启用，这里只用标量的 `general_purpose::STANDARD`。
+
 ### 验证
 
 - `cargo test --locked`：182 passed，含一个去掉 `HOME` 与 `XDG_*` 后运行子命令的集成测试（在修复前会以 `HOME 未设置` 失败）。
