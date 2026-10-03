@@ -30,7 +30,7 @@
 
 ### 新增
 
-- 博雅课程 CLI：`bykc-courses`、`bykc-chosen`、`bykc-show`、`bykc-stats`，以及需 `--yes` 的 `bykc-enroll`、`bykc-withdraw`。
+- 博雅课程 CLI：`bykc-courses`、`bykc-chosen`、`bykc-detail`、`bykc-stats`，以及需 `--yes` 的 `bykc-select`、`bykc-deselect`。
 - `seat-map`：列出阅览区某日某时段的座位，`--free` 只看可约座位；`seats --library` 列出馆内阅览区。
 - 内置 Agent Skills：`skills list/show/install`，与二进制版本一致。
 - 阳光打卡 TUI 支持一键随机时段打卡（确认框会先列出时段与生成的图片）。
