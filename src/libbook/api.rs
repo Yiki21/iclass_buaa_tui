@@ -104,7 +104,7 @@ pub struct AreaDetail {
 
 /// A seat and whether it can be taken.
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 
 pub struct Seat {
     pub id:           String,
@@ -112,6 +112,12 @@ pub struct Seat {
     pub no:           String,
     pub status_name:  String,
     pub is_available: bool,
+    /// Position on the area's floor plan, as a percentage of its width and
+    /// height (`point_x`, `point_y`). Absent for areas without a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x:            Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y:            Option<f64>,
 }
 
 /// One of the caller's seat reservations.
@@ -122,10 +128,55 @@ pub struct Booking {
     pub id:          String,
     pub area_name:   String,
     pub seat_no:     String,
+    /// Reservation date. The live list leaves `day` empty, so it is taken from
+    /// the date part of `begin_time` when absent.
     pub day:         String,
     pub begin_time:  String,
     pub end_time:    String,
+    /// Raw status code. `6` (用户取消) and `8` (已结束) are final.
+    #[serde(default)]
+    pub status:      String,
     pub status_name: String,
+}
+
+/// Status codes after which a booking can no longer be cancelled.
+
+const FINAL_BOOKING_STATUS: [&str; 2] = ["6", "8"];
+
+/// Status-name words that mark a booking as over.
+
+const FINAL_BOOKING_WORDS: [&str; 5] = ["取消", "结束", "已完成", "过期", "失效"];
+
+impl Booking {
+    /// Why this booking cannot be cancelled, or `None` when it can.
+    ///
+    /// Why mirror the reference client:
+    /// The service answers a cancel of a finished booking with a refusal that
+    /// reads like a failure. Checking first gives the user the real reason and
+    /// keeps a pointless write off the wire. The codes and words are the ones
+    /// UBAA's `cancelBlockedMessage` uses.
+
+    pub fn cancel_blocked(&self) -> Option<&'static str> {
+
+        if self.id.trim().is_empty() {
+
+            return Some("预约记录不存在或已失效，请刷新后重试");
+        }
+
+        let finished = FINAL_BOOKING_STATUS.contains(&self.status.trim())
+            || FINAL_BOOKING_WORDS
+                .iter()
+                .any(|word| self.status_name.contains(word));
+
+        finished.then_some("该预约已结束或已取消，无需取消")
+    }
+
+    /// Whether the booking is still current, which is when it can be cancelled.
+
+    pub fn is_active(&self) -> bool {
+
+        self.cancel_blocked().is_none()
+    }
 }
 
 pub(crate) fn library_intermediate_certificate() -> &'static [u8] {
@@ -511,16 +562,40 @@ impl IClassApi {
         })
     }
 
-    /// Cancels a seat reservation.
+    /// Cancels a seat reservation and returns the booking list read after it.
+    ///
+    /// Why read back:
+    /// The cancel reply is a bare `{"code":1,"message":"取消成功"}`. An
+    /// affirmative envelope is necessary but proves nothing about the booking,
+    /// so the list is read again and the booking must be gone or final. The
+    /// write has already been sent by then, so a failed read says so instead
+    /// of looking like a refusal.
 
-    pub async fn libbook_cancel(&self, token: &str, booking_id: &str) -> Result<()> {
+    pub async fn libbook_cancel(&self, token: &str, booking_id: &str) -> Result<Vec<Booking>> {
 
-        let _ = self
-            .libbook_post("space/cancel", json!({ "id": booking_id }), Some(token))
+        if booking_id.trim().is_empty() {
+
+            bail!("预约记录不存在或已失效，请刷新后重试");
+        }
+
+        self.libbook_post("space/cancel", json!({ "id": booking_id }), Some(token))
             .await
             .context("取消座位预约失败")?;
 
-        Ok(())
+        let bookings = self
+            .libbook_bookings(token, 1, 20)
+            .await
+            .context("图书馆已接受取消，但读取预约记录失败，请刷新预约记录确认")?;
+
+        if let Some(booking) = still_active(&bookings, booking_id) {
+
+            bail!(
+                "图书馆已接受取消，但预约记录仍显示该预约有效（{}），请刷新确认",
+                booking.status_name
+            );
+        }
+
+        Ok(bookings)
     }
 }
 
@@ -604,8 +679,10 @@ fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Valu
         // reservation can answer with only `code`/`message`. A business-success
         // envelope with an affirmative code passes here; the caller then proves
         // the booking exists by reading it back when no id came with it.
-        // Cancellation has no verified success envelope yet.
         "space/confirm" => code.is_some() || reserved_booking(&value).is_some(),
+        // UBAA's fixture is `{"code":1,"message":"取消成功"}`; refusals were
+        // caught above. The caller reads the list back to confirm.
+        "space/cancel" => code.is_some(),
         _ => false,
     };
 
@@ -883,7 +960,27 @@ fn parse_seat(row: &Value) -> Option<Seat> {
             .get("isAvailable")
             .and_then(Value::as_bool)
             .unwrap_or(status == "1"),
+        x:            field_f64(row, &["point_x", "pointX"]),
+        y:            field_f64(row, &["point_y", "pointY"]),
     })
+}
+
+/// Reads the first present key as a finite float.
+///
+/// Coordinates arrive as decimal strings (`"15.98958"`); a missing or null
+/// value means the area has no floor plan, which is not the same as zero.
+
+fn field_f64(row: &Value, keys: &[&str]) -> Option<f64> {
+
+    keys.iter()
+        .filter_map(|key| row.get(*key))
+        .find_map(|value| {
+
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        })
+        .filter(|number| number.is_finite())
 }
 
 /// Reads the booking returned by `space/confirm`.
@@ -897,19 +994,36 @@ fn parse_seat(row: &Value) -> Option<Seat> {
 /// The confirm reply may carry no id, and the seat id sent is not echoed in
 /// the list. Seat number plus day identifies one seat on one date; the day is
 /// compared on its date part because the list may add a time.
+///
+/// Why only active bookings:
+/// The list also holds finished bookings. Booking the same seat number again
+/// would otherwise match last week's ended record and report it as the new
+/// one. A same-seat active booking on another date is the fallback, because
+/// the list's `begin_time` may not be the reserved day.
 
 fn find_new_booking(bookings: &[Booking], seat_no: &str, day: &str) -> Option<Booking> {
 
     let seat_no = seat_no.trim();
 
+    let mut candidates = bookings
+        .iter()
+        .filter(|booking| booking.seat_no.trim() == seat_no && booking.is_active());
+
+    let first = candidates.clone().next();
+
+    candidates
+        .find(|booking| booking.day.is_empty() || booking.day.starts_with(day))
+        .or(first)
+        .cloned()
+}
+
+/// The booking with `id`, if the list still shows it as current.
+
+fn still_active<'a>(bookings: &'a [Booking], id: &str) -> Option<&'a Booking> {
+
     bookings
         .iter()
-        .find(|booking| {
-
-            booking.seat_no.trim() == seat_no
-                && (booking.day.is_empty() || booking.day.starts_with(day))
-        })
-        .cloned()
+        .find(|booking| booking.id == id && booking.is_active())
 }
 
 fn reserved_booking(response: &Value) -> Option<Booking> {
@@ -925,16 +1039,27 @@ fn reserved_booking(response: &Value) -> Option<Booking> {
 
 fn parse_booking(row: &Value) -> Option<Booking> {
 
+    let begin_time = field_string(row, &["beginTime", "begin_time"]);
+
+    let mut day = field_string(row, &["day", "date"]);
+
+    // `2026-10-03 16:34:28` -> `2026-10-03`. The live list leaves `day` blank.
+    if day.is_empty() && begin_time.get(4..5) == Some("-") {
+
+        day = begin_time.chars().take(10).collect();
+    }
+
     Some(Booking {
-        id:          row.get("id").and_then(flexible_string)?,
-        area_name:   field_string(
+        id: row.get("id").and_then(flexible_string)?,
+        area_name: field_string(
             row,
             &["areaName", "nameMerge", "name_merge", "area_name", "name"],
         ),
-        seat_no:     field_string(row, &["seatNo", "seat_no", "no"]),
-        day:         field_string(row, &["day", "date"]),
-        begin_time:  field_string(row, &["beginTime", "begin_time"]),
-        end_time:    field_string(row, &["endTime", "end_time"]),
+        seat_no: field_string(row, &["seatNo", "seat_no", "no"]),
+        day,
+        begin_time,
+        end_time: field_string(row, &["endTime", "end_time"]),
+        status: field_string(row, &["status"]),
         status_name: field_string(row, &["statusName", "status_name"]),
     })
 }
@@ -945,7 +1070,7 @@ mod tests {
 
     use super::{
         Booking, data_list, extract_cas_token, field_i64, find_new_booking, parse_area_detail,
-        parse_booking, parse_seat, reserved_booking, validate_library_response,
+        parse_booking, parse_seat, reserved_booking, still_active, validate_library_response,
     };
 
     #[test]
@@ -1004,6 +1129,138 @@ mod tests {
         );
 
         assert!(find_new_booking(&bookings, "496", "2026-10-03").is_none());
+    }
+
+    #[test]
+
+    fn an_ended_booking_of_the_same_seat_is_not_the_new_one() {
+
+        let ended = Booking {
+            id: "old".to_string(),
+            seat_no: "495".to_string(),
+            day: "2026-10-03".to_string(),
+            status: "8".to_string(),
+            status_name: "已结束".to_string(),
+            ..Booking::default()
+        };
+
+        assert!(find_new_booking(std::slice::from_ref(&ended), "495", "2026-10-03").is_none());
+
+        let fresh = Booking {
+            id: "new".to_string(),
+            status: "1".to_string(),
+            status_name: "已预约".to_string(),
+            ..ended.clone()
+        };
+
+        assert_eq!(
+            find_new_booking(&[ended, fresh], "495", "2026-10-03").map(|b| b.id),
+            Some("new".to_string())
+        );
+    }
+
+    // Status rules mirror UBAA's LibBookBookingStatusTest.
+
+    #[test]
+
+    fn finished_or_cancelled_bookings_cannot_be_cancelled() {
+
+        let booking = |status: &str, name: &str| {
+
+            Booking {
+                id: "b1".to_string(),
+                status: status.to_string(),
+                status_name: name.to_string(),
+                ..Booking::default()
+            }
+        };
+
+        assert!(booking("8", "已结束").cancel_blocked().is_some());
+
+        assert!(booking("6", "用户取消").cancel_blocked().is_some());
+
+        // The name alone is enough when the code is missing.
+        assert!(booking("", "已过期").cancel_blocked().is_some());
+
+        assert_eq!(booking("1", "已预约").cancel_blocked(), None);
+
+        let unnamed = Booking {
+            id: " ".to_string(),
+            ..booking("1", "已预约")
+        };
+
+        assert_eq!(
+            unnamed.cancel_blocked(),
+            Some("预约记录不存在或已失效，请刷新后重试")
+        );
+    }
+
+    #[test]
+
+    fn booking_day_comes_from_begin_time_when_missing() {
+
+        // Shape of a live `member/seat` row: `day` is blank.
+        let booking = parse_booking(&json!({
+            "id": 393053,
+            "no": "495",
+            "day": "",
+            "beginTime": "2026-10-03 16:34:28",
+            "status": "8",
+            "status_name": "已结束",
+        }))
+        .unwrap();
+
+        assert_eq!(booking.day, "2026-10-03");
+
+        assert_eq!(booking.status, "8");
+
+        assert!(!booking.is_active());
+    }
+
+    #[test]
+
+    fn cancel_success_envelope_is_accepted() {
+
+        let body = r#"{"code":1,"message":"取消成功"}"#;
+
+        assert!(validate_library_response(200, body, "space/cancel").is_ok());
+    }
+
+    #[test]
+
+    fn cancel_refusals_are_reported_as_refusals() {
+
+        for body in [
+            r#"{"code":1,"message":"该预约已取消"}"#,
+            r#"{"code":1,"message":"当前状态不能取消"}"#,
+            r#"{"code":500,"message":"取消失败"}"#,
+        ] {
+
+            let error = validate_library_response(200, body, "space/cancel").unwrap_err();
+
+            assert!(format!("{error:#}").contains("拒绝"), "{body}: {error:#}");
+        }
+    }
+
+    #[test]
+
+    fn a_cancelled_booking_is_no_longer_active() {
+
+        let row = |status: &str, name: &str| {
+
+            Booking {
+                id: "b1".to_string(),
+                status: status.to_string(),
+                status_name: name.to_string(),
+                ..Booking::default()
+            }
+        };
+
+        assert!(still_active(&[row("6", "用户取消")], "b1").is_none());
+
+        assert!(still_active(&[], "b1").is_none());
+
+        assert!(still_active(&[row("1", "已预约")], "b1").is_some());
     }
 
     use serde_json::json;

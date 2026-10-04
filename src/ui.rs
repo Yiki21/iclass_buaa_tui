@@ -162,6 +162,52 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
         );
     }
 
+    // Name the seat or booking, so `y` confirms something the user can read.
+    let subject = match pending {
+        crate::app::PendingWrite::SeatBook => {
+            app.seat.seats.get(app.seat.selected_seat).map(|seat| {
+
+                let area = app
+                    .seat
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.name.clone())
+                    .unwrap_or_default();
+
+                let segment = app
+                    .seat
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.time_slots.first())
+                    .map(|slot| slot.label.clone())
+                    .unwrap_or_default();
+
+                format!("  {area}  座位 {}  {}  {segment}", seat.no, app.seat.date)
+            })
+        }
+        crate::app::PendingWrite::SeatCancel(id) => {
+            app.seat
+                .bookings
+                .iter()
+                .find(|booking| &booking.id == id)
+                .map(|booking| {
+
+                    format!(
+                        "  {}  座位 {}  {}",
+                        booking.area_name,
+                        booking.seat_no,
+                        booking_span(booking)
+                    )
+                })
+        }
+        _ => None,
+    };
+
+    if let Some(subject) = subject {
+
+        lines.insert(2, Line::from(Span::styled(subject, theme::label_style())));
+    }
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1228,6 +1274,42 @@ fn seat_status_line(app: &App) -> Line<'static> {
         sep(),
     ];
 
+    if app.seat.show_bookings {
+
+        let active = app
+            .seat
+            .bookings
+            .iter()
+            .filter(|booking| booking.is_active())
+            .count();
+
+        spans.push(Span::styled(
+            format!(
+                "我的预约  ·  共 {} 条，{active} 条有效",
+                app.seat.bookings.len()
+            ),
+            theme::text_style(),
+        ));
+
+        spans.push(sep());
+
+        spans.push(theme::activity_badge(
+            app.tick,
+            app.seat.bookings_loading,
+            if app.seat.bookings_loading {
+
+                "正在加载"
+            } else {
+
+                "就绪"
+            },
+        ));
+
+        spans.push(Span::styled("  x 取消  b 返回", theme::muted_style()));
+
+        return Line::from(spans);
+    }
+
     if app.seat.show_seats {
 
         let available = app
@@ -1721,75 +1803,16 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
 
     let [body, footer] = course_layout_pair(area);
 
+    if app.seat.show_bookings {
+
+        render_seat_bookings(frame, body, footer, app);
+
+        return;
+    }
+
     if app.seat.show_seats {
 
-        let items: Vec<ListItem> = if app.seat.seats.is_empty() {
-
-            vec![empty_row(
-                false,
-                app.tick,
-                "",
-                "该阅览区没有座位数据，按 r 刷新",
-            )]
-        } else {
-
-            app.seat
-                .seats
-                .iter()
-                .enumerate()
-                .map(|(index, seat)| {
-
-                    let line = Line::from(vec![
-                        Span::raw(" "),
-                        Span::styled(format!("{:<10}", seat.no), theme::label_style()),
-                        Span::styled(seat.name.clone(), theme::text_style()),
-                        Span::raw("  "),
-                        Span::styled(
-                            if seat.is_available {
-
-                                "可预约"
-                            } else {
-
-                                "已占用"
-                            },
-                            if seat.is_available {
-
-                                Style::default().fg(theme::OK)
-                            } else {
-
-                                theme::muted_style()
-                            },
-                        ),
-                        Span::styled(format!("  {}", seat.status_name), theme::muted_style()),
-                    ]);
-
-                    let item = ListItem::new(line);
-
-                    if index == app.seat.selected_seat {
-
-                        item.style(theme::selection_style())
-                    } else {
-
-                        item
-                    }
-                })
-                .collect()
-        };
-
-        render_selectable_rows(
-            frame,
-            body,
-            app,
-            items,
-            app.seat.seats.len(),
-            app.seat.selected_seat,
-        );
-
-        render_key_hint(
-            frame,
-            footer,
-            "j/k 选座位  enter 预约（需确认）  b 返回阅览区",
-        );
+        render_seat_map(frame, body, footer, app);
 
         return;
     }
@@ -1858,7 +1881,346 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
     render_key_hint(
         frame,
         footer,
-        "j/k 选图书馆  enter 看阅览区  r 刷新  B 我的预约  x 取消预约",
+        "j/k 选图书馆  enter 看阅览区  r 刷新  B 我的预约",
+    );
+}
+
+/// Draws the selected area's seats on their floor-plan layout.
+///
+/// How:
+/// Each grid cell is one seat number plus a one-column gap. When the full
+/// width does not fit, cells shrink to a single glyph (`o` bookable, `x`
+/// not), which keeps the room's shape on screen; the selected seat's number
+/// is always spelled out on the info line. A map taller or wider than the
+/// view scrolls only as far as the cursor needs. ASCII glyphs are used
+/// because block and circle symbols are East Asian ambiguous width and
+/// misalign in CJK terminals.
+
+fn render_seat_map(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
+
+    render_key_hint(
+        frame,
+        footer,
+        "hjkl/方向键 移动  f 下一个空位  enter 预约（需确认）  r 刷新  B 我的预约  b 返回",
+    );
+
+    let seats = &app.seat.seats;
+
+    let grid = &app.seat.grid;
+
+    if seats.is_empty() || grid.rows == 0 {
+
+        render_selectable_rows(
+            frame,
+            body,
+            app,
+            vec![empty_row(
+                false,
+                app.tick,
+                "",
+                "该阅览区没有座位数据，按 r 刷新",
+            )],
+            0,
+            0,
+        );
+
+        return;
+    }
+
+    let [info, _, map] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(body);
+
+    let label_width = seats
+        .iter()
+        .map(|seat| display_width(&seat.no))
+        .max()
+        .unwrap_or(1)
+        .clamp(1, 6);
+
+    // One column of margin on the left, one gap after every cell.
+    let usable = map.width.saturating_sub(1) as usize;
+
+    let numbered = grid.cols * (label_width + 1) <= usable;
+
+    let cell_width = if numbered { label_width + 1 } else { 2 };
+
+    let visible_cols = (usable / cell_width).clamp(1, grid.cols);
+
+    let visible_rows = (map.height as usize).clamp(1, grid.rows);
+
+    let selected = app.seat.selected_seat.min(seats.len() - 1);
+
+    let (selected_row, selected_col) = grid.position(selected).unwrap_or((0, 0));
+
+    let (row_offset, col_offset) = app.seat.map_offset.get();
+
+    let row_offset = follow(row_offset, selected_row, visible_rows, grid.rows);
+
+    let col_offset = follow(col_offset, selected_col, visible_cols, grid.cols);
+
+    app.seat.map_offset.set((row_offset, col_offset));
+
+    app.list_page_size.set(visible_rows);
+
+    // Centre a map narrower than the view, like a plan on a page.
+    let left_pad = 1 + usable.saturating_sub(visible_cols * cell_width) / 2;
+
+    let mut lines = Vec::with_capacity(visible_rows);
+
+    for row in row_offset..row_offset + visible_rows {
+
+        let mut spans = vec![Span::raw(" ".repeat(left_pad))];
+
+        for col in col_offset..col_offset + visible_cols {
+
+            let Some(index) = grid.at(row, col) else {
+
+                spans.push(Span::raw(" ".repeat(cell_width)));
+
+                continue;
+            };
+
+            let seat = &seats[index];
+
+            let text = if numbered {
+
+                pad_cell(&seat.no, label_width)
+            } else if seat.is_available {
+
+                "o".to_string()
+            } else {
+
+                "x".to_string()
+            };
+
+            let style = if index == selected {
+
+                theme::selection_style().add_modifier(Modifier::BOLD)
+            } else if seat.is_available {
+
+                Style::default().fg(theme::OK)
+            } else {
+
+                theme::muted_style()
+            };
+
+            spans.push(Span::styled(text, style));
+
+            spans.push(Span::raw(" "));
+
+            let x = map.x as usize + left_pad + (col - col_offset) * cell_width;
+
+            app.record_hotspot(
+                Rect {
+                    x:      x as u16,
+                    y:      map.y + (row - row_offset) as u16,
+                    width:  (cell_width - 1) as u16,
+                    height: 1,
+                },
+                HotAction::ListRow { index },
+            );
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(Paragraph::new(lines), map);
+
+    let seat = &seats[selected];
+
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(format!("座位 {}", seat.no), theme::label_style()),
+        Span::raw("  "),
+        if seat.is_available {
+
+            Span::styled("可预约", Style::default().fg(theme::OK))
+        } else {
+
+            Span::styled(
+                if seat.status_name.is_empty() {
+
+                    "不可预约".to_string()
+                } else {
+
+                    seat.status_name.clone()
+                },
+                theme::muted_style(),
+            )
+        },
+        sep(),
+    ];
+
+    if numbered {
+
+        spans.push(Span::styled("绿色", Style::default().fg(theme::OK)));
+
+        spans.push(Span::styled(" 可预约  ", theme::muted_style()));
+
+        spans.push(Span::styled("灰色 不可预约", theme::muted_style()));
+    } else {
+
+        spans.push(Span::styled("o", Style::default().fg(theme::OK)));
+
+        spans.push(Span::styled(" 可预约  x 不可预约", theme::muted_style()));
+    }
+
+    spans.push(sep());
+
+    spans.push(Span::styled(
+        match grid.layout {
+            crate::libbook::grid::Layout::FloorPlan => "按平面图排列",
+            crate::libbook::grid::Layout::Numbering => "无平面图，按编号排列",
+        },
+        theme::muted_style(),
+    ));
+
+    if visible_rows < grid.rows || visible_cols < grid.cols {
+
+        spans.push(Span::styled("  移动光标可滚动", theme::muted_style()));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), info);
+}
+
+/// Scroll offset that keeps `selected` inside a window of `visible` cells.
+///
+/// The window moves only when the selection would leave it, and never past
+/// the end of the `total` cells.
+
+fn follow(offset: usize, selected: usize, visible: usize, total: usize) -> usize {
+
+    let offset = if selected < offset {
+
+        selected
+    } else if selected >= offset + visible {
+
+        selected + 1 - visible
+    } else {
+
+        offset
+    };
+
+    offset.min(total.saturating_sub(visible))
+}
+
+/// Left-aligns `text` in exactly `width` display columns.
+
+fn pad_cell(text: &str, width: usize) -> String {
+
+    let text = truncate(text, width);
+
+    let padding = width.saturating_sub(display_width(&text));
+
+    format!("{text}{}", " ".repeat(padding))
+}
+
+/// `2026-10-03 16:34-23:00` for a booking, from whichever fields it has.
+
+fn booking_span(booking: &crate::libbook::Booking) -> String {
+
+    // `2026-10-03 16:34:28` -> `16:34`; a bare time is kept as it is.
+    fn clock(value: &str) -> &str {
+
+        let time = value.split_once(' ').map_or(value, |(_, time)| time);
+
+        time.get(..5).unwrap_or(time)
+    }
+
+    let begin = clock(&booking.begin_time);
+
+    let end = clock(&booking.end_time);
+
+    let span = match (begin.is_empty(), end.is_empty()) {
+        (false, false) => format!("{begin}-{end}"),
+        (false, true) => begin.to_string(),
+        _ => String::new(),
+    };
+
+    [booking.day.as_str(), span.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The caller's seat bookings, current ones first.
+
+fn render_seat_bookings(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
+
+    let bookings = &app.seat.bookings;
+
+    let items: Vec<ListItem> = if bookings.is_empty() {
+
+        vec![empty_row(
+            app.seat.bookings_loading,
+            app.tick,
+            "正在加载预约记录",
+            "没有座位预约记录，按 r 刷新",
+        )]
+    } else {
+
+        bookings
+            .iter()
+            .enumerate()
+            .map(|(index, booking)| {
+
+                let active = booking.is_active();
+
+                let status = if booking.status_name.is_empty() {
+
+                    if active { "有效" } else { "已结束" }.to_string()
+                } else {
+
+                    booking.status_name.clone()
+                };
+
+                let (status_style, text_style) = if active {
+
+                    (Style::default().fg(theme::OK), theme::text_style())
+                } else {
+
+                    (theme::muted_style(), theme::muted_style())
+                };
+
+                let line = Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(pad_cell(&status, 8), status_style),
+                    Span::styled(pad_cell(&booking_span(booking), 24), text_style),
+                    Span::styled(booking.area_name.clone(), text_style),
+                    Span::styled(format!("  座位 {}", booking.seat_no), text_style),
+                ]);
+
+                let item = ListItem::new(line);
+
+                if index == app.seat.selected_booking {
+
+                    item.style(theme::selection_style())
+                } else {
+
+                    item
+                }
+            })
+            .collect()
+    };
+
+    render_selectable_rows(
+        frame,
+        body,
+        app,
+        items,
+        bookings.len(),
+        app.seat.selected_booking,
+    );
+
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选择  x 取消预约（需确认）  r 刷新  b 返回",
     );
 }
 
@@ -1924,7 +2286,11 @@ fn render_seat_areas(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
         app.seat.selected_area,
     );
 
-    render_key_hint(frame, footer, "j/k 选阅览区  enter 看座位  b 返回图书馆");
+    render_key_hint(
+        frame,
+        footer,
+        "j/k 选阅览区  enter 看座位  B 我的预约  b 返回图书馆",
+    );
 }
 
 /// Renders the clock-in tab.
@@ -6030,6 +6396,185 @@ mod tests {
                 "tab 键无法到达 {tab:?}；实际经过 {seen:?}"
             );
         }
+    }
+
+    fn seat_app(seats: Vec<crate::libbook::Seat>) -> App {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Seat;
+
+        app.seat.grid = crate::libbook::grid::SeatGrid::build(&seats);
+
+        app.seat.seats = seats;
+
+        app.seat.show_seats = true;
+
+        app
+    }
+
+    fn plan_seat(no: &str, x: f64, y: f64, free: bool) -> crate::libbook::Seat {
+
+        crate::libbook::Seat {
+            id: format!("id{no}"),
+            no: no.to_string(),
+            is_available: free,
+            x: Some(x),
+            y: Some(y),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+
+    fn seat_map_draws_the_floor_plan_with_its_aisle() {
+
+        // Two seats, an aisle, then two more, on one line.
+        let app = seat_app(vec![
+            plan_seat("101", 10.0, 50.0, true),
+            plan_seat("102", 12.0, 50.0, false),
+            plan_seat("103", 20.0, 50.0, true),
+            plan_seat("104", 22.0, 50.0, true),
+        ]);
+
+        let backend = TestBackend::new(100, 20);
+
+        let mut terminal = Terminal::new(backend).expect("终端应可创建");
+
+        terminal
+            .draw(|frame| render_workspace(frame, &app))
+            .expect("应可渲染");
+
+        let buffer = terminal.backend().buffer().clone();
+
+        let row = (0..buffer.area.height)
+            .map(|y| {
+
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .find(|line| line.contains("101") && line.contains("104"))
+            .expect("地图应画出座位号");
+
+        // The aisle is one empty cell: wider than the gap between neighbours.
+        let gap = |a: &str, b: &str| row.find(b).unwrap() - row.find(a).unwrap();
+
+        assert!(gap("102", "103") > gap("101", "102"), "过道应留空：\n{row}");
+
+        assert_eq!(gap("101", "102"), gap("103", "104"));
+
+        // The top-level render clears hotspots each frame; this test draws
+        // twice through `render_workspace`, so it clears them itself.
+        app.clear_hotspots();
+
+        let out = render_into(&app, 100, 20);
+
+        assert!(out.contains("座位101"), "信息行应标出当前座位：\n{out}");
+
+        assert!(out.contains("按平面图排列"), "{out}");
+
+        // Every seat is clickable.
+        assert_eq!(
+            app.hotspots
+                .borrow()
+                .iter()
+                .filter(|spot| matches!(spot.action, HotAction::ListRow { .. }))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+
+    fn a_wide_seat_map_shrinks_to_glyphs_and_scrolls_to_the_cursor() {
+
+        let seats: Vec<_> = (0..60)
+            .map(|index| {
+
+                plan_seat(
+                    &format!("{:03}", index + 1),
+                    index as f64 * 1.5,
+                    10.0,
+                    index % 2 == 0,
+                )
+            })
+            .collect();
+
+        let mut app = seat_app(seats);
+
+        app.seat.selected_seat = 59;
+
+        let out = render_into(&app, 80, 20);
+
+        assert!(out.contains("座位060"), "选中座位应在信息行：\n{out}");
+
+        assert!(out.contains("移动光标可滚动"), "{out}");
+
+        assert!(app.seat.map_offset.get().1 > 0, "视口应跟随光标右移");
+
+        let selected = app
+            .hotspots
+            .borrow()
+            .iter()
+            .any(|spot| matches!(spot.action, HotAction::ListRow { index: 59 }));
+
+        assert!(selected, "选中的座位应在可见区域内");
+    }
+
+    #[test]
+
+    fn bookings_view_shows_status_time_and_seat() {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Seat;
+
+        app.seat.show_bookings = true;
+
+        app.seat.bookings = vec![crate::libbook::Booking {
+            id:          "7".to_string(),
+            area_name:   "四层中文借阅室东区".to_string(),
+            seat_no:     "495".to_string(),
+            day:         "2026-10-03".to_string(),
+            begin_time:  "2026-10-03 16:34:28".to_string(),
+            end_time:    "2026-10-03 23:00:00".to_string(),
+            status:      "1".to_string(),
+            status_name: "已预约".to_string(),
+        }];
+
+        let out = render_into(&app, 120, 20);
+
+        assert!(out.contains("已预约"), "{out}");
+
+        assert!(
+            out.contains("2026-10-0316:34-23:00"),
+            "应显示日期和时段：\n{out}"
+        );
+
+        assert!(out.contains("座位495"), "{out}");
+
+        assert!(out.contains("x取消预约"), "{out}");
+    }
+
+    #[test]
+
+    fn follow_scrolls_only_when_the_selection_leaves_the_window() {
+
+        assert_eq!(follow(0, 3, 5, 20), 0);
+
+        assert_eq!(follow(0, 7, 5, 20), 3);
+
+        assert_eq!(follow(10, 4, 5, 20), 4);
+
+        // Never past the end, even with a stale offset.
+        assert_eq!(follow(18, 19, 5, 20), 15);
+
+        assert_eq!(follow(3, 0, 10, 4), 0);
     }
 
     #[test]

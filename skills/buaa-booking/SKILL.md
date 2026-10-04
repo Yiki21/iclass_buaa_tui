@@ -29,13 +29,19 @@ List and cancel: `venue-orders --json`, then `venue-orders --cancel <order_id> -
 
 1. `seats --date YYYY-MM-DD --json`: `libraries` with `id`, `free_num`, `total_num`.
 2. `seats --library <library id> --date ... --json`: adds `areas` (`id` is `--area`).
-3. `seat-map --area <area id> --date ... --free --json`: `segments` (time segment ids), `available_dates`, and `seats` with `id`, `no`, `is_available`. `--segment <id>` picks a segment; it defaults to the first.
+3. `seat-map --area <area id> --date ... --free --json`: `segments` (time segment ids), `available_dates`, and `seats` with `id`, `no`, `is_available`, and `x`/`y` (position on the floor plan, in percent) when the area has a plan. `--segment <id>` picks a segment; it defaults to the first.
 4. Preview: `seat-book --area <area> --seat <seat id> --date ... [--segment <id>] --json`.
 5. Same command with `--yes`. Success returns `"submitted": true` and a `booking_id`.
 
 `--seat` takes the seat `id`, not the printed seat number `no`. When the user names a seat by its number, map it through `seat-map` first.
 
-List and cancel: `seat-orders --json`, then `seat-orders --cancel <booking_id> --yes --json`.
+List and cancel:
+
+1. `seat-orders --json`: each booking has `id`, `day`, `begin_time`, `end_time`, `status_name` and `cancellable`. Only `cancellable: true` bookings can be cancelled.
+2. Preview: `seat-orders --cancel <booking id> --json` returns `"submitted": false` with `would_cancel`, `cancellable` and `blocked_reason`.
+3. Confirm with the user, then the same command with `--yes`. Success returns `"submitted": true`.
+
+Cancelling gives up a seat that may not be free again. Do it only when the user asks for that booking by name.
 
 ## When it is taken
 

@@ -77,6 +77,9 @@ pub enum AsyncEvent {
     SeatDetail(Result<crate::libbook::AreaDetail, String>),
     SeatSeats(Result<Vec<crate::libbook::Seat>, String>),
     SeatBookings(Result<Vec<crate::libbook::Booking>, String>),
+    /// A seat cancellation finished. On success it carries the message and
+    /// the booking list read back after the cancel.
+    SeatCancelled(Result<(String, Vec<crate::libbook::Booking>), String>),
     ClockinOverview(Result<ClockinOverview, String>),
     ClockinRecords(Result<Vec<crate::ygdk::Record>, String>),
     EvalTasks(Result<Vec<crate::evaluation::EvaluationTask>, String>),
@@ -981,23 +984,37 @@ pub struct VenueState {
 #[derive(Clone, Debug, Default)]
 
 pub struct SeatState {
-    pub libraries:       Vec<crate::libbook::Library>,
-    pub selected:        usize,
-    pub loading:         bool,
-    pub loaded:          bool,
-    pub areas:           Vec<crate::libbook::Area>,
-    pub selected_area:   usize,
-    pub detail:          Option<crate::libbook::AreaDetail>,
-    pub seats:           Vec<crate::libbook::Seat>,
-    pub selected_seat:   usize,
-    pub bookings:        Vec<crate::libbook::Booking>,
-    pub bookings_loaded: bool,
-    pub date:            String,
+    pub libraries:        Vec<crate::libbook::Library>,
+    pub selected:         usize,
+    pub loading:          bool,
+    pub loaded:           bool,
+    pub areas:            Vec<crate::libbook::Area>,
+    pub selected_area:    usize,
+    pub detail:           Option<crate::libbook::AreaDetail>,
+    pub seats:            Vec<crate::libbook::Seat>,
+    pub selected_seat:    usize,
+    /// Floor-plan layout of `seats`, rebuilt whenever they load.
+    pub grid:             crate::libbook::grid::SeatGrid,
+    /// First visible `(row, col)` of the seat map.
+    ///
+    /// Why a cell:
+    /// The renderer only learns the viewport size while drawing, and it
+    /// borrows the app immutably. Scrolling only as far as the selection
+    /// needs, instead of re-centring on every step, keeps the map still while
+    /// the cursor moves inside the view.
+    pub map_offset:       std::cell::Cell<(usize, usize)>,
+    pub bookings:         Vec<crate::libbook::Booking>,
+    pub bookings_loaded:  bool,
+    pub bookings_loading: bool,
+    pub selected_booking: usize,
+    /// Showing the caller's bookings; takes precedence over every other level.
+    pub show_bookings:    bool,
+    pub date:             String,
     /// Showing the area list of the selected library.
-    pub show_areas:      bool,
+    pub show_areas:       bool,
     /// Showing the seats of the selected area; takes precedence over areas.
-    pub show_seats:      bool,
-    pub pending:         Option<PendingWrite>,
+    pub show_seats:       bool,
+    pub pending:          Option<PendingWrite>,
 }
 
 /// Clock-in tab state.
@@ -1894,7 +1911,10 @@ impl App {
                 }
             }
             WorkspaceTab::Seat => {
-                if self.seat.show_seats {
+                if self.seat.show_bookings {
+
+                    self.seat.bookings.len()
+                } else if self.seat.show_seats {
 
                     self.seat.seats.len()
                 } else if self.seat.show_areas {
@@ -1955,7 +1975,10 @@ impl App {
                 }
             }
             WorkspaceTab::Seat => {
-                if self.seat.show_seats {
+                if self.seat.show_bookings {
+
+                    self.seat.selected_booking = index;
+                } else if self.seat.show_seats {
 
                     self.seat.selected_seat = index;
                 } else if self.seat.show_areas {
@@ -2710,14 +2733,27 @@ impl App {
                 }
             }
             AsyncEvent::SeatSeats(result) => {
+
                 match result {
                     Ok(seats) => {
 
                         let available = seats.iter().filter(|seat| seat.is_available).count();
 
-                        self.seat.seats = seats;
+                        self.seat.grid = crate::libbook::grid::SeatGrid::build(&seats);
 
-                        self.seat.selected_seat = 0;
+                        // Start on the first free seat, so enter books
+                        // something rather than tripping on a taken one.
+                        self.seat.selected_seat = self
+                            .seat
+                            .grid
+                            .reading_order()
+                            .find(|&index| seats[index].is_available)
+                            .or_else(|| self.seat.grid.reading_order().next())
+                            .unwrap_or(0);
+
+                        self.seat.map_offset.set((0, 0));
+
+                        self.seat.seats = seats;
 
                         self.seat.show_seats = true;
 
@@ -2730,20 +2766,47 @@ impl App {
                 }
             }
             AsyncEvent::SeatBookings(result) => {
+
+                self.seat.bookings_loading = false;
+
                 match result {
                     Ok(bookings) => {
 
                         let count = bookings.len();
 
-                        self.seat.bookings = bookings;
+                        let active = bookings
+                            .iter()
+                            .filter(|booking| booking.is_active())
+                            .count();
 
-                        self.seat.bookings_loaded = true;
+                        self.set_seat_bookings(bookings);
 
-                        self.seat.selected = 0;
-
-                        self.success(format!("座位预约记录已加载，共 {count} 条"));
+                        self.success(format!(
+                            "座位预约记录已加载，共 {count} 条，其中 {active} 条有效"
+                        ));
                     }
                     Err(error) => self.error(format!("座位预约记录加载失败: {error}")),
+                }
+            }
+            AsyncEvent::SeatCancelled(result) => {
+
+                self.write_in_flight = false;
+
+                match result {
+                    Ok((message, bookings)) => {
+
+                        self.set_seat_bookings(bookings);
+
+                        self.success(message);
+                    }
+                    // The write may have happened; the list on screen is
+                    // stale either way, so it is reloaded rather than trusted.
+                    Err(error) => {
+
+                        self.error(error);
+
+                        self.load_seat_bookings(tx);
+                    }
                 }
             }
             AsyncEvent::ClockinOverview(result) => {
@@ -3151,13 +3214,50 @@ impl App {
     }
 
     /// Keys for the library seat tab.
+    ///
+    /// How:
+    /// The tab is a stack of levels: libraries, areas, seats, with the
+    /// caller's bookings on top of whichever is showing. `b` pops one level,
+    /// and `x` only acts inside the bookings view so a cancel always targets
+    /// the row the user can see.
 
     fn handle_seat_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
 
+        use crate::libbook::grid::Direction;
+
+        if self.seat.show_bookings {
+
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+                KeyCode::Up | KeyCode::Char('k') => self.move_seat_selection(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_seat_selection(1),
+                KeyCode::Char('r') => self.load_seat_bookings(tx),
+                KeyCode::Char('x') => self.request_seat_cancel(),
+                KeyCode::Char('b') | KeyCode::Char('B') => self.seat.show_bookings = false,
+                _ => {}
+            }
+
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') if self.seat.show_seats => {
+                self.step_seat(Direction::Up)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.seat.show_seats => {
+                self.step_seat(Direction::Down)
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.seat.show_seats => {
+                self.step_seat(Direction::Left)
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.seat.show_seats => {
+                self.step_seat(Direction::Right)
+            }
+            KeyCode::Char('f') if self.seat.show_seats => self.next_free_seat(),
             KeyCode::Up | KeyCode::Char('k') => self.move_seat_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_seat_selection(1),
+            KeyCode::Char('r') if self.seat.show_seats => self.load_seat_seats(tx),
             KeyCode::Char('r') => self.refresh_seat(tx),
             KeyCode::Enter | KeyCode::Char('o') => {
                 if self.seat.show_seats {
@@ -3186,15 +3286,72 @@ impl App {
                     self.seat.show_seats = false;
 
                     self.seat.seats.clear();
+
+                    self.seat.grid = crate::libbook::grid::SeatGrid::default();
                 } else {
 
                     self.seat.show_areas = false;
                 }
             }
-            KeyCode::Char('B') => self.load_seat_bookings(tx),
-            KeyCode::Char('x') => self.request_seat_cancel(),
+            KeyCode::Char('B') => self.open_seat_bookings(tx),
             _ => {}
         }
+    }
+
+    /// Moves the seat cursor on the floor-plan map.
+
+    fn step_seat(&mut self, direction: crate::libbook::grid::Direction) {
+
+        if let Some(next) = self.seat.grid.step(self.seat.selected_seat, direction) {
+
+            self.seat.selected_seat = next;
+        }
+    }
+
+    /// Jumps to the next bookable seat in reading order.
+
+    fn next_free_seat(&mut self) {
+
+        let seats = &self.seat.seats;
+
+        match self.seat.grid.next_where(self.seat.selected_seat, |index| {
+
+            seats.get(index).is_some_and(|seat| seat.is_available)
+        }) {
+            Some(index) => self.seat.selected_seat = index,
+            None => self.warn("该阅览区暂无可预约座位"),
+        }
+    }
+
+    /// Shows the caller's bookings, loading them the first time.
+
+    fn open_seat_bookings(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        self.seat.show_bookings = true;
+
+        if !self.seat.bookings_loaded {
+
+            self.load_seat_bookings(tx);
+        }
+    }
+
+    /// Replaces the booking list, current bookings first.
+    ///
+    /// Why reorder:
+    /// The service lists newest first, and nearly every row is a finished
+    /// booking. A current booking is the one the user came to see or cancel,
+    /// so it goes to the top and is selected. The sort is stable, so each
+    /// group keeps the service's order.
+
+    fn set_seat_bookings(&mut self, mut bookings: Vec<crate::libbook::Booking>) {
+
+        bookings.sort_by_key(|booking| !booking.is_active());
+
+        self.seat.bookings = bookings;
+
+        self.seat.bookings_loaded = true;
+
+        self.seat.selected_booking = 0;
     }
 
     /// Keys for the clock-in tab.
@@ -3378,14 +3535,30 @@ impl App {
     }
 
     /// Moves the selection in whichever seat-tab list is showing.
+    ///
+    /// The seat map moves in reading order here (scroll wheel, PageUp/Down);
+    /// arrow keys on the map go through [`Self::step_seat`] instead.
 
     fn move_seat_selection(&mut self, delta: isize) {
 
         let seat = &mut self.seat;
 
-        if seat.show_seats {
+        if seat.show_bookings {
 
-            seat.selected_seat = clamp_step(seat.selected_seat, seat.seats.len(), delta);
+            seat.selected_booking = clamp_step(seat.selected_booking, seat.bookings.len(), delta);
+        } else if seat.show_seats {
+
+            let order: Vec<usize> = seat.grid.reading_order().collect();
+
+            let at = order
+                .iter()
+                .position(|&index| index == seat.selected_seat)
+                .unwrap_or(0);
+
+            if let Some(&index) = order.get(clamp_step(at, order.len(), delta)) {
+
+                seat.selected_seat = index;
+            }
         } else if seat.show_areas {
 
             seat.selected_area = clamp_step(seat.selected_area, seat.areas.len(), delta);
@@ -3397,9 +3570,27 @@ impl App {
 
     fn request_seat_book(&mut self) {
 
-        if self.seat.seats.is_empty() {
+        let Some(seat) = self.seat.seats.get(self.seat.selected_seat) else {
 
             self.warn("没有可选座位，请先按 r 刷新");
+
+            return;
+        };
+
+        if !seat.is_available {
+
+            let reason = if seat.status_name.is_empty() {
+
+                "不可预约".to_string()
+            } else {
+
+                seat.status_name.clone()
+            };
+
+            self.warn(format!(
+                "座位 {} 当前{reason}，可按 f 跳到下一个空闲座位",
+                seat.no
+            ));
 
             return;
         }
@@ -3407,14 +3598,27 @@ impl App {
         self.seat.pending = Some(PendingWrite::SeatBook);
     }
 
+    /// Asks to cancel the booking selected in the bookings view.
+    ///
+    /// Why check first:
+    /// Most rows are finished bookings. Refusing those here gives the real
+    /// reason and never sends a write the service would reject.
+
     fn request_seat_cancel(&mut self) {
 
-        let Some(booking) = self.seat.bookings.get(self.seat.selected) else {
+        let Some(booking) = self.seat.bookings.get(self.seat.selected_booking) else {
 
-            self.warn("请先按 B 载入预约记录，再选择要取消的一条");
+            self.warn("没有可取消的预约，按 r 刷新预约记录");
 
             return;
         };
+
+        if let Some(reason) = booking.cancel_blocked() {
+
+            self.warn(reason);
+
+            return;
+        }
 
         let id = booking.id.clone();
 
@@ -4612,9 +4816,14 @@ impl App {
 
     fn load_seat_bookings(&mut self, tx: &UnboundedSender<AsyncEvent>) {
 
+        if self.seat.bookings_loading {
+
+            return;
+        }
+
         let tx = tx.clone();
 
-        self.spawn_authenticated(
+        self.seat.bookings_loading = self.spawn_authenticated(
             move |session| {
 
                 async move {
@@ -4665,6 +4874,10 @@ impl App {
         let segment_id = segment.id.clone();
 
         let date = self.seat.date.clone();
+
+        // Whatever the outcome, the list may now hold a new booking, so the
+        // next `B` reads it again instead of showing the cached one.
+        self.seat.bookings_loaded = false;
 
         let tx = tx.clone();
 
@@ -4722,12 +4935,12 @@ impl App {
                         .api
                         .libbook_cancel(&token, &booking_id)
                         .await
-                        .map(|()| format!("已取消座位预约 {booking_id}"))
+                        .map(|bookings| (format!("已取消座位预约 {booking_id}"), bookings))
                         .map_err(format_anyhow_error)
                 }
             },
             tx,
-            AsyncEvent::Write,
+            AsyncEvent::SeatCancelled,
         );
     }
 
@@ -6990,6 +7203,171 @@ mod tests {
         app.handle_seat_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &tx);
 
         assert!(!app.seat.show_areas);
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    fn seat(no: &str, x: f64, y: f64, free: bool) -> crate::libbook::Seat {
+
+        crate::libbook::Seat {
+            id: format!("id{no}"),
+            no: no.to_string(),
+            is_available: free,
+            x: Some(x),
+            y: Some(y),
+            ..Default::default()
+        }
+    }
+
+    fn booking(id: &str, status: &str, status_name: &str) -> crate::libbook::Booking {
+
+        crate::libbook::Booking {
+            id: id.to_string(),
+            seat_no: format!("{id}0"),
+            status: status.to_string(),
+            status_name: status_name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+
+    fn seat_map_opens_on_a_free_seat_and_moves_in_two_dimensions() {
+
+        use crossterm::event::KeyCode;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        // Two rows of two; only the bottom-right seat is free. The service
+        // lists them out of reading order on purpose.
+        app.handle_async(
+            AsyncEvent::SeatSeats(Ok(vec![
+                seat("4", 20.0, 20.0, true),
+                seat("1", 10.0, 10.0, false),
+                seat("3", 10.0, 20.0, false),
+                seat("2", 20.0, 10.0, false),
+            ])),
+            &tx,
+        );
+
+        assert!(app.seat.show_seats);
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].no, "4");
+
+        app.handle_seat_key(key(KeyCode::Char('h')), &tx);
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].no, "3");
+
+        app.handle_seat_key(key(KeyCode::Char('k')), &tx);
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].no, "1");
+
+        app.handle_seat_key(key(KeyCode::Right), &tx);
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].no, "2");
+
+        // A taken seat is refused before any confirmation is offered.
+        app.handle_seat_key(key(KeyCode::Enter), &tx);
+
+        assert!(app.seat.pending.is_none());
+
+        app.handle_seat_key(key(KeyCode::Char('f')), &tx);
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].no, "4");
+
+        app.handle_seat_key(key(KeyCode::Enter), &tx);
+
+        assert!(matches!(
+            app.seat.pending,
+            Some(super::PendingWrite::SeatBook)
+        ));
+    }
+
+    #[test]
+
+    fn bookings_view_lists_current_first_and_only_cancels_current() {
+
+        use crossterm::event::KeyCode;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        app.seat.show_bookings = true;
+
+        app.handle_async(
+            AsyncEvent::SeatBookings(Ok(vec![
+                booking("9", "8", "已结束"),
+                booking("7", "1", "已预约"),
+                booking("5", "6", "用户取消"),
+            ])),
+            &tx,
+        );
+
+        let ids: Vec<&str> = app.seat.bookings.iter().map(|b| b.id.as_str()).collect();
+
+        assert_eq!(ids, ["7", "9", "5"]);
+
+        assert_eq!(app.seat.selected_booking, 0);
+
+        // A finished booking is refused with its reason, no dialog.
+        app.handle_seat_key(key(KeyCode::Char('j')), &tx);
+
+        app.handle_seat_key(key(KeyCode::Char('x')), &tx);
+
+        assert!(app.seat.pending.is_none());
+
+        app.handle_seat_key(key(KeyCode::Char('k')), &tx);
+
+        app.handle_seat_key(key(KeyCode::Char('x')), &tx);
+
+        assert!(matches!(
+            &app.seat.pending,
+            Some(super::PendingWrite::SeatCancel(id)) if id == "7"
+        ));
+
+        app.seat.pending = None;
+
+        app.handle_seat_key(key(KeyCode::Char('b')), &tx);
+
+        assert!(!app.seat.show_bookings);
+
+        // Outside the bookings view `x` does nothing, so it cannot cancel a
+        // row the user is not looking at.
+        app.handle_seat_key(key(KeyCode::Char('x')), &tx);
+
+        assert!(app.seat.pending.is_none());
+    }
+
+    #[test]
+
+    fn a_confirmed_cancel_replaces_the_list_and_frees_the_write_slot() {
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App {
+            write_in_flight: true,
+            ..App::default()
+        };
+
+        app.seat.bookings = vec![booking("7", "1", "已预约")];
+
+        app.handle_async(
+            AsyncEvent::SeatCancelled(Ok((
+                "已取消座位预约 7".to_string(),
+                vec![booking("7", "6", "用户取消")],
+            ))),
+            &tx,
+        );
+
+        assert!(!app.write_in_flight);
+
+        assert!(!app.seat.bookings[0].is_active());
     }
 
     #[test]
