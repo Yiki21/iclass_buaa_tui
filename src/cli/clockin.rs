@@ -5,6 +5,8 @@
 //! sports record under the user's name and requires a photo. The two are
 //! therefore separate commands, and submission previews by default.
 
+use std::io::Write;
+
 use anyhow::{Context, Result, bail};
 use chrono::TimeZone;
 
@@ -243,50 +245,28 @@ pub(crate) async fn clockin_submit_command(args: ClockinSubmitArgs) -> Result<()
 
     let (start, end) = resolve_span(args.start.as_deref(), args.end.as_deref())?;
 
-    println!("类别\t{}", args.classify);
+    let plan = ClockinPlan {
+        classify_id: args.classify,
+        item_id: item.id,
+        item_name: item.name.clone(),
+        place: args.place.clone(),
+        start,
+        end,
+        photo: args.photo.display().to_string(),
+    };
 
-    println!("项目\t{}\t{}", item.id, item.name);
+    {
 
-    println!("地点\t{}", args.place);
+        let (mut stdout, mut stderr) = (std::io::stdout().lock(), std::io::stderr().lock());
 
-    println!(
-        "时间\t{} ~ {}",
-        start.format("%Y-%m-%d %H:%M"),
-        end.format("%Y-%m-%d %H:%M")
-    );
+        if !args.yes {
 
-    println!("照片\t{}", args.photo.display());
-
-    if !args.yes {
-
-        if args.json {
-
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "action": "clockin-submit",
-                    "submitted": false,
-                    "would_submit": {
-                        "classify_id": args.classify,
-                        "item_id": item.id,
-                        "item_name": item.name,
-                        "place": args.place,
-                        "start": start.to_rfc3339(),
-                        "end": end.to_rfc3339(),
-                        "photo": args.photo.display().to_string(),
-                    },
-                    "hint": "加上 --yes 才会真正提交打卡",
-                }))?
-            );
-
-            return Ok(());
+            return write_preview(&mut stdout, &mut stderr, &plan, args.json);
         }
 
-        println!();
-
-        println!("这是预览。确认无误后加上 --yes 才会真正提交打卡。");
-
-        return Ok(());
+        // The summary still precedes a real submission, so the log of the run
+        // shows what was sent; under --json it must stay off stdout.
+        write_summary(if args.json { &mut stderr } else { &mut stdout }, &plan)?;
     }
 
     let photo = ClockinPhoto::from_path(&args.photo)?;
@@ -333,6 +313,105 @@ pub(crate) async fn clockin_submit_command(args: ClockinSubmitArgs) -> Result<()
 
         println!("记录号\t{record_id}");
     }
+
+    Ok(())
+}
+
+/// What `clockin-submit` is about to record, resolved from the arguments.
+
+struct ClockinPlan {
+    classify_id: i64,
+    item_id:     i64,
+    item_name:   String,
+    place:       String,
+    start:       chrono::DateTime<chrono::FixedOffset>,
+    end:         chrono::DateTime<chrono::FixedOffset>,
+    photo:       String,
+}
+
+/// The irreversibility warning a preview must carry.
+///
+/// Why:
+/// Nothing in this tool or the service's app deletes a clock-in record, and it
+/// is attributed to the user. The README promises the preview says so, in the
+/// same terms `eval-submit` uses for its own permanent submission.
+
+const IRREVERSIBLE_NOTE: &str = "注意：提交后无法撤销，打卡记录会记在你的名下，本工具无法删除。";
+
+/// Prints the table of what would be recorded.
+
+fn write_summary(out: &mut dyn Write, plan: &ClockinPlan) -> Result<()> {
+
+    writeln!(out, "类别\t{}", plan.classify_id)?;
+
+    writeln!(out, "项目\t{}\t{}", plan.item_id, plan.item_name)?;
+
+    writeln!(out, "地点\t{}", plan.place)?;
+
+    writeln!(
+        out,
+        "时间\t{} ~ {}",
+        plan.start.format("%Y-%m-%d %H:%M"),
+        plan.end.format("%Y-%m-%d %H:%M")
+    )?;
+
+    writeln!(out, "照片\t{}", plan.photo)?;
+
+    Ok(())
+}
+
+/// Prints the preview of a clock-in that has not been submitted.
+///
+/// How:
+/// Under `--json` stdout carries exactly one document, so the human summary
+/// and the warning move to stderr; the warning is also carried in the
+/// document itself, so a caller that only reads JSON still sees it.
+
+fn write_preview(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    plan: &ClockinPlan,
+    json: bool,
+) -> Result<()> {
+
+    if json {
+
+        write_summary(err, plan)?;
+
+        writeln!(err, "{IRREVERSIBLE_NOTE}")?;
+
+        writeln!(
+            out,
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "action": "clockin-submit",
+                "submitted": false,
+                "irreversible": true,
+                "would_submit": {
+                    "classify_id": plan.classify_id,
+                    "item_id": plan.item_id,
+                    "item_name": plan.item_name,
+                    "place": plan.place,
+                    "start": plan.start.to_rfc3339(),
+                    "end": plan.end.to_rfc3339(),
+                    "photo": plan.photo,
+                },
+                "hint": "加上 --yes 才会真正提交打卡；提交后无法撤销",
+            }))?
+        )?;
+
+        return Ok(());
+    }
+
+    write_summary(out, plan)?;
+
+    writeln!(out)?;
+
+    writeln!(out, "{IRREVERSIBLE_NOTE}")?;
+
+    writeln!(out)?;
+
+    writeln!(out, "这是预览。确认无误后加上 --yes 才会真正提交打卡。")?;
 
     Ok(())
 }
@@ -420,8 +499,79 @@ fn dash(value: &str) -> &str {
 
 mod tests {
 
-    use super::{format_stamp, resolve_span};
     use chrono::TimeZone;
+
+    use super::{ClockinPlan, format_stamp, resolve_span, write_preview};
+
+    fn plan() -> ClockinPlan {
+
+        let (start, end) =
+            resolve_span(Some("2026-03-10 06:00"), Some("2026-03-10 06:40")).expect("合法时段");
+
+        ClockinPlan {
+            classify_id: 1,
+            item_id: 2,
+            item_name: "跑步".to_string(),
+            place: "操场".to_string(),
+            start,
+            end,
+            photo: "/tmp/p.png".to_string(),
+        }
+    }
+
+    fn preview(json: bool) -> (String, String) {
+
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        write_preview(&mut out, &mut err, &plan(), json).expect("写入预览");
+
+        (
+            String::from_utf8(out).expect("UTF-8"),
+            String::from_utf8(err).expect("UTF-8"),
+        )
+    }
+
+    #[test]
+
+    fn preview_states_that_a_clockin_cannot_be_undone() {
+
+        // README: 打卡和评教提交后无法撤销，确认框和预览都会写明这一点。
+        let (stdout, _) = preview(false);
+
+        assert!(
+            stdout.contains("无法撤销"),
+            "预览缺少不可撤销提示：{stdout}"
+        );
+
+        assert!(stdout.contains("--yes"), "预览应说明如何真正提交：{stdout}");
+    }
+
+    #[test]
+
+    fn json_preview_is_one_document_that_carries_the_warning() {
+
+        let (stdout, stderr) = preview(true);
+
+        let document: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("--json 的 stdout 必须是 JSON（{error}）：{stdout}"));
+
+        assert_eq!(document["submitted"], false);
+
+        assert_eq!(document["irreversible"], true);
+
+        assert_eq!(document["would_submit"]["item_id"], 2);
+
+        // The human summary and the warning are still shown, on stderr.
+        assert!(
+            stderr.contains("无法撤销"),
+            "stderr 缺少不可撤销提示：{stderr}"
+        );
+
+        assert!(
+            stderr.contains("项目\t2\t跑步"),
+            "stderr 缺少摘要：{stderr}"
+        );
+    }
 
     #[test]
 

@@ -31,6 +31,10 @@ pub enum FailureKind {
     Network,
     Http5xx,
     ResourceUnavailable,
+    /// The caller already holds what the write would create. The command line is
+    /// fine and the resource is not gone: the state is the problem, so the fix
+    /// is to cancel the existing one or choose another target.
+    AlreadyBooked,
     ConfigInvalid,
     InvalidArgument,
     Unknown,
@@ -50,6 +54,7 @@ impl FailureKind {
             Self::Network => "network_error",
             Self::Http5xx => "upstream_error",
             Self::ResourceUnavailable => "resource_unavailable",
+            Self::AlreadyBooked => "already_booked",
             Self::ConfigInvalid => "config_invalid",
             Self::InvalidArgument => "invalid_argument",
             Self::Unknown => "unknown",
@@ -143,7 +148,12 @@ pub fn classify_text(text: &str, operation: Operation) -> Classification {
     } else if contains("423") || contains("locked") || contains("锁定") {
 
         FailureKind::AccountLocked
-    } else if contains("429") || contains("限流") || contains("too many") {
+    } else if contains("429")
+        || contains("限流")
+        || contains("too many")
+        // SSO's own wording, e.g. `尝试登录太过频繁，请稍后再试`.
+        || contains("频繁")
+    {
 
         FailureKind::RateLimited
     } else if contains("5xx")
@@ -172,8 +182,19 @@ pub fn classify_text(text: &str, operation: Operation) -> Classification {
     {
 
         FailureKind::Credentials
-    } else if contains("已满") || contains("不可预约") || contains("已被占用") {
+    } else if contains("重复预约") || contains("不能重复") {
 
+        // The library's own wording for a seat the caller already holds in
+        // that segment (`…已存在座位预约，不可重复预约`). Nothing to pick around:
+        // every seat in the segment is refused until the existing booking goes.
+        FailureKind::AlreadyBooked
+    } else if contains("已满")
+        || contains("不可预约")
+        || contains("已被占用")
+        || contains("已被预约")
+    {
+
+        // A seat, room or course someone else took, or a window that closed.
         FailureKind::ResourceUnavailable
     } else if contains("配置文件") || contains("权限") || contains("config") {
 
@@ -316,5 +337,136 @@ mod tests {
         let locked = classify_text("HTTP 423 Locked", Operation::Write);
 
         assert!(!locked.retryable);
+    }
+
+    /// Messages observed live from the campus services, verbatim.
+    ///
+    /// Why:
+    /// The documented code table is only true if these exact strings map to the
+    /// codes it names; a paraphrase in a test would not catch a keyword miss.
+
+    const LIVE_RATE_LIMIT: &str = "登录失败：尝试登录太过频繁，请稍后再试";
+
+    const LIVE_ALREADY_BOOKED: &str =
+        "图书馆拒绝了请求：非常抱歉，由于您在该时段已存在座位预约，不可重复预约";
+
+    #[test]
+
+    fn live_sso_rate_limit_is_rate_limited() {
+
+        let read = classify_text(LIVE_RATE_LIMIT, Operation::Read);
+
+        assert_eq!(read.kind, FailureKind::RateLimited);
+
+        assert_eq!(read.code(), "rate_limited");
+
+        // A rate-limited write is still never replayed automatically.
+        assert!(!classify_text(LIVE_RATE_LIMIT, Operation::Write).retryable);
+    }
+
+    #[test]
+
+    fn live_duplicate_booking_is_already_booked_and_never_retried() {
+
+        for operation in [Operation::Read, Operation::Write] {
+
+            let classification = classify_text(LIVE_ALREADY_BOOKED, operation);
+
+            assert_eq!(classification.code(), "already_booked");
+
+            assert!(!classification.retryable);
+
+            // The service answered; the write did not vanish in transit.
+            assert!(!classification.write_outcome_unknown);
+        }
+    }
+
+    #[test]
+
+    fn a_seat_taken_by_someone_else_stays_resource_unavailable() {
+
+        // The 0.9.2 rejection wording: someone else holds it, so another seat
+        // is the right answer, unlike `already_booked`.
+        let classification = classify_text("图书馆拒绝了请求：该座位已被预约", Operation::Write);
+
+        assert_eq!(classification.code(), "resource_unavailable");
+    }
+
+    /// Every kind, written so a new variant fails to compile here until it is
+    /// added, and with it to the documented tables below.
+
+    fn every_kind() -> Vec<FailureKind> {
+
+        let all = [
+            FailureKind::AuthExpired,
+            FailureKind::Credentials,
+            FailureKind::AccountLocked,
+            FailureKind::RateLimited,
+            FailureKind::ConnectTimeout,
+            FailureKind::ReadTimeout,
+            FailureKind::UpstreamTimeout,
+            FailureKind::Network,
+            FailureKind::Http5xx,
+            FailureKind::ResourceUnavailable,
+            FailureKind::AlreadyBooked,
+            FailureKind::ConfigInvalid,
+            FailureKind::InvalidArgument,
+            FailureKind::Unknown,
+        ];
+
+        for kind in all {
+
+            match kind {
+                FailureKind::AuthExpired
+                | FailureKind::Credentials
+                | FailureKind::AccountLocked
+                | FailureKind::RateLimited
+                | FailureKind::ConnectTimeout
+                | FailureKind::ReadTimeout
+                | FailureKind::UpstreamTimeout
+                | FailureKind::Network
+                | FailureKind::Http5xx
+                | FailureKind::ResourceUnavailable
+                | FailureKind::AlreadyBooked
+                | FailureKind::ConfigInvalid
+                | FailureKind::InvalidArgument
+                | FailureKind::Unknown => {}
+            }
+        }
+
+        all.to_vec()
+    }
+
+    #[test]
+
+    fn every_emitted_code_is_documented_for_callers() {
+
+        // The code table is what a caller acts on. A code the classifier can
+        // emit but no table names falls through to the caller's default.
+        let documents = [
+            (
+                "AGENTS.md",
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/AGENTS.md")),
+            ),
+            (
+                "skills/buaa-campus/SKILL.md",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/skills/buaa-campus/SKILL.md"
+                )),
+            ),
+        ];
+
+        for kind in every_kind() {
+
+            for (name, text) in documents {
+
+                assert!(
+                    text.contains(&format!("`{}`", kind.code())),
+                    "{name} 的错误码表缺少 {}",
+                    kind.code()
+                );
+            }
+        }
     }
 }

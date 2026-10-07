@@ -15,6 +15,10 @@
 - 已结束或已取消的预约（状态 6/8，或状态名含取消、结束、过期等）在发送请求前就拒绝取消，并说明原因。
 - 预约记录的 `day` 为空时从 `begin_time` 取日期；预约成功后找回记录时只匹配仍有效的预约，不会把同座位号的旧记录当成新预约。
 - `seat-orders --cancel` 的预览和结果在 `--json` 下输出 JSON（`submitted`、`would_cancel`、`cancellable`、`blocked_reason`），此前是纯文本；`seat-orders --json` 每条记录增加 `status` 和 `cancellable`。
+- **`venue-orders --cancel --json` 此前输出纯文本**，与同一提交里的 `seat-orders` 不一致，也没有文档承诺的 `submitted` 字段。现在预览与提交都输出 `{"action":"venue-orders --cancel","submitted":…,"would_cancel":…,"cancellable":…,"blocked_reason":…}`；`--json` 时人读提示走 stderr，stdout 只有一个 JSON 文档。
+- **`schema` 把 `venue-orders` / `seat-orders` 标成 `effect: read`，却又给它们 `confirmation_flag: --yes`**。现在两者的 `--cancel` 形态各自是一条 `effect: write` 的条目（名字带 `--cancel`），读形态则通过新的 `write_when` 字段说明带哪个标志才会写，且不再虚报确认标志。
+- **失败码表与分类器不一致**：`尝试登录太过频繁` 归为 `unknown`（应为 `rate_limited`），`不可重复预约` 也归为 `unknown`。现在 `太过频繁` 认作限流；重复预约新增会话外的状态类码 `already_booked`，提示改为「取消已有预约或换时段/日期」，因为换一个座位同样会被拒。
+- **`clockin-submit` 的预览没有写「不可撤销」**，而 README 承诺打卡与评教的预览都会写明。现在预览多了 `注意：提交后无法撤销…`，`--json` 也带 `"irreversible": true`；`--json` 时摘要与提示走 stderr。
 
 ### 依赖
 
@@ -23,7 +27,8 @@
 
 ### 验证
 
-- `cargo test --locked`：182 passed，含一个去掉 `HOME` 与 `XDG_*` 后运行子命令的集成测试（在修复前会以 `HOME 未设置` 失败）。
+- `cargo fmt --check` 通过；`cargo test --all-targets`：217 passed + 1 集成测试（`tests/no_home.rs`），0 failed。新增的断言都先在本分支上复现失败再修复：取消预览的纯 JSON、`already_booked`/`rate_limited` 分类、`clockin-submit` 预览的不可撤销提示、AGENTS.md 写命令表与错误码表和 `schema`/分类器一致。
+- 真实服务只读验证：`venue-orders --cancel` 在拿不到订单时输出 `submitted: false` 的 JSON 并把中文提示写到 stderr；`rate_limited` 现在能从真实的 `尝试登录太过频繁` 得到。未执行任何写操作。
 - Windows 目标交叉编译后在本机 Wine 下运行：`HOME` 清空时子命令正常，日志写到 `%LOCALAPPDATA%\iclass-buaa\events.jsonl`，配置能从 `%APPDATA%` 与 `%USERPROFILE%\.config` 两处找到。
 
 ## 0.9.2

@@ -153,4 +153,26 @@ mod tests {
 
         assert!(!code.retryable);
     }
+
+    #[test]
+
+    fn live_upstream_messages_map_to_the_documented_codes() {
+
+        // The exact strings two campus services returned, verbatim. The
+        // documented code table is only useful if these produce the code it
+        // promises rather than falling through to `unknown`.
+        let limited = classify("登录失败：尝试登录太过频繁，请稍后再试");
+
+        assert_eq!(limited.code, "rate_limited");
+
+        // `classify` strips auth-expiry from retryable; rate limiting stays.
+        assert!(limited.retryable);
+
+        let duplicate =
+            classify("图书馆拒绝了请求：非常抱歉，由于您在该时段已存在座位预约，不可重复预约");
+
+        assert_eq!(duplicate.code, "already_booked");
+
+        assert!(!duplicate.retryable);
+    }
 }
