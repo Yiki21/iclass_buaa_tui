@@ -6697,15 +6697,14 @@ mod tests {
             .map(|(status, name)| {
 
                 crate::libbook::Booking {
-                    id: format!("id{status}"),
-                    area_name: "学院路校区图书馆/一楼/一层西阅学空间".to_string(),
-                    seat_no: "103".to_string(),
-                    day: "2026-10-04".to_string(),
-                    begin_time: "2026-10-04 22:03:00".to_string(),
-                    end_time: "2026-10-04 23:00:00".to_string(),
-                    status: "1".to_string(),
+                    id:          format!("id{status}"),
+                    area_name:   "学院路校区图书馆/一楼/一层西阅学空间".to_string(),
+                    seat_no:     "103".to_string(),
+                    day:         "2026-10-04".to_string(),
+                    begin_time:  "2026-10-04 22:03:00".to_string(),
+                    end_time:    "2026-10-04 23:00:00".to_string(),
+                    status:      "1".to_string(),
                     status_name: (*name).to_string(),
-                    ..Default::default()
                 }
             })
             .collect();
