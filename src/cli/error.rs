@@ -30,15 +30,34 @@ pub struct ErrorCode {
 /// How:
 /// The order matters: authentication is checked before the generic cases, since
 /// an expired session often surfaces as a transport-looking error.
+///
+/// Why the operation matters:
+/// A read that times out is safe to repeat. A write that times out may already
+/// have happened, so repeating it can duplicate the effect. The same text is
+/// therefore classified differently depending on whether the caller was
+/// writing, and only the caller knows which.
 
-pub fn classify(message: &str) -> ErrorCode {
+pub fn classify_for(message: &str, operation: Operation) -> ErrorCode {
 
-    let classified = failure::classify_text(message, Operation::Read);
+    let classified = failure::classify_text(message, operation);
 
     ErrorCode {
         code:      classified.code(),
         retryable: classified.retryable && !classified.kind.is_auth_expiry(),
     }
+}
+
+/// Classifies a read failure.
+///
+/// Why it stays:
+/// Most callers really are reading, and this is the shorter name for that case.
+/// It is used by the tests that pin the read-side mapping.
+
+#[cfg(test)]
+
+pub fn classify(message: &str) -> ErrorCode {
+
+    classify_for(message, Operation::Read)
 }
 
 /// The JSON document emitted when a `--json` call fails.
@@ -67,12 +86,21 @@ pub struct ErrorPayload {
 
 impl ErrorReport {
     /// Builds a report from an `anyhow` error.
+    ///
+    /// Why the operation is a parameter:
+    /// A write whose outcome is unknown must not advertise itself as retryable,
+    /// because retrying could repeat a side effect that already happened. The
+    /// caller knows whether it was writing; the error text does not.
 
-    pub fn from_error(error: &anyhow::Error, command: Option<String>) -> Self {
+    pub fn from_error(
+        error: &anyhow::Error,
+        command: Option<String>,
+        operation: Operation,
+    ) -> Self {
 
         let message = error.to_string();
 
-        let classified = classify(&message);
+        let classified = classify_for(&message, operation);
 
         let causes = error.chain().skip(1).map(ToString::to_string).collect();
 
@@ -90,6 +118,36 @@ impl ErrorReport {
 mod tests {
 
     use super::classify;
+
+    #[test]
+
+    fn a_write_that_timed_out_is_never_reported_as_retryable() {
+
+        use super::{ErrorReport, classify_for};
+        use crate::failure::Operation;
+
+        // The same transient text: safe to repeat as a read, unsafe as a write,
+        // because the write may already have taken effect.
+        for text in ["请求超时", "upstream returned 503", "连接失败: dns error"] {
+
+            assert!(
+                classify_for(text, Operation::Read).retryable,
+                "{text} 读应可重试"
+            );
+
+            assert!(
+                !classify_for(text, Operation::Write).retryable,
+                "{text}: 写入结果未知时不能标成可重试"
+            );
+        }
+
+        let error = anyhow::anyhow!("请求超时");
+
+        let report =
+            ErrorReport::from_error(&error, Some("seat-book".to_string()), Operation::Write);
+
+        assert!(!report.retryable);
+    }
 
     #[test]
 

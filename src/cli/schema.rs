@@ -104,6 +104,42 @@ fn classify(name: &str) -> Effect {
     }
 }
 
+/// Whether one invocation actually changes remote or host state.
+///
+/// Why:
+/// The failure report has to know this to decide `retryable`. A write whose
+/// outcome is unknown may already have happened, so it must not be reported as
+/// safe to repeat. A write command run without `--yes` only previews, which is
+/// a read and is safe to repeat; so the classification is the command's effect
+/// combined with the confirmation flag, not the command name alone.
+///
+/// How:
+/// Reuses `classify` and `CONDITIONAL_WRITES`, so the schema and the failure
+/// report cannot disagree about which commands write.
+
+pub(crate) fn invocation_writes(name: &str, argv: &[String]) -> bool {
+
+    let confirmed = argv.iter().any(|argument| argument == "--yes");
+
+    if !confirmed {
+
+        return false;
+    }
+
+    let conditional = CONDITIONAL_WRITES
+        .iter()
+        .find(|(base, _)| *base == name)
+        .map(|(_, flag)| *flag);
+
+    let effective = match conditional {
+        Some(flag) if argv.iter().any(|argument| argument == flag) => format!("{name} {flag}"),
+        Some(_) => return false,
+        None => name.to_string(),
+    };
+
+    !matches!(classify(&effective), Effect::Read)
+}
+
 /// Builds the schema document.
 
 pub(crate) fn schema_json() -> Result<Value> {
@@ -300,7 +336,67 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{CONDITIONAL_WRITES, Effect, classify, schema_json};
+    use super::{CONDITIONAL_WRITES, Effect, classify, invocation_writes, schema_json};
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+
+        std::iter::once("iclass_buaa_tui")
+            .chain(parts.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+
+    fn only_a_confirmed_write_counts_as_writing() {
+
+        // A write command without --yes only previews, so it is a read.
+        assert!(!invocation_writes(
+            "seat-book",
+            &argv(&["seat-book", "--json"])
+        ));
+
+        assert!(invocation_writes(
+            "seat-book",
+            &argv(&["seat-book", "--yes"])
+        ));
+
+        assert!(invocation_writes(
+            "clockin-submit",
+            &argv(&["clockin-submit", "--yes"])
+        ));
+
+        // A pure read stays a read even if --yes is passed by mistake.
+        assert!(!invocation_writes(
+            "seat-map",
+            &argv(&["seat-map", "--yes"])
+        ));
+    }
+
+    #[test]
+
+    fn an_orders_command_writes_only_when_cancelling() {
+
+        assert!(!invocation_writes(
+            "seat-orders",
+            &argv(&["seat-orders", "--yes"])
+        ));
+
+        assert!(!invocation_writes(
+            "seat-orders",
+            &argv(&["seat-orders", "--cancel", "7"])
+        ));
+
+        assert!(invocation_writes(
+            "seat-orders",
+            &argv(&["seat-orders", "--cancel", "7", "--yes"])
+        ));
+
+        assert!(invocation_writes(
+            "venue-orders",
+            &argv(&["venue-orders", "--cancel", "7", "--yes"])
+        ));
+    }
 
     #[test]
 
