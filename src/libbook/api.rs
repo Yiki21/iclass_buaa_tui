@@ -133,28 +133,83 @@ pub struct Booking {
     pub day:         String,
     pub begin_time:  String,
     pub end_time:    String,
-    /// Raw status code. `6` (用户取消) and `8` (已结束) are final.
+    /// Raw status code. `4` (已结束), `6` (用户取消) and `8` (已结束) are
+    /// final; `3` (使用中) is a live booking that refuses the cancel.
     #[serde(default)]
     pub status:      String,
     pub status_name: String,
 }
 
-/// Status codes after which a booking can no longer be cancelled.
+/// Status codes after which a booking can no longer be cancelled, and the
+/// words that say the same thing in `status_name`.
+///
+/// Why `4`:
+/// The live list returned `4` for 已结束 rows, which the reference client's
+/// two-code set misses; those rows were only refused because their name
+/// happened to contain 结束.
 
-const FINAL_BOOKING_STATUS: [&str; 2] = ["6", "8"];
+const FINAL_BOOKING_STATUS: [&str; 3] = ["4", "6", "8"];
 
 /// Status-name words that mark a booking as over.
 
 const FINAL_BOOKING_WORDS: [&str; 5] = ["取消", "结束", "已完成", "过期", "失效"];
 
+/// The live state of a seat someone is sitting in. The service answers a
+/// cancel of one with `当前预约已失效`, so it is never offered.
+
+const IN_USE_BOOKING_STATUS: [&str; 1] = ["3"];
+
+/// Status-name words for a seat that is in use right now.
+
+const IN_USE_BOOKING_WORDS: [&str; 2] = ["使用中", "临时离开"];
+
+/// The states a cancel has been accepted for.
+///
+/// Why an allow-list:
+/// A status this tool has never seen must not be advertised as cancellable.
+/// Offering a cancel upstream then refuses costs the user a confirmation and
+/// a misleading "预约已失效" — so an unknown code fails closed instead.
+
+const CANCELLABLE_BOOKING_STATUS: [&str; 1] = ["1"];
+
+/// Status-name words for a booking that is current and free to cancel.
+
+const CANCELLABLE_BOOKING_WORDS: [&str; 2] = ["预约成功", "已预约"];
+
 impl Booking {
+    /// Whether the states say the booking is over.
+
+    fn is_finished(&self) -> bool {
+
+        FINAL_BOOKING_STATUS.contains(&self.status.trim())
+            || FINAL_BOOKING_WORDS
+                .iter()
+                .any(|word| self.status_name.contains(word))
+    }
+
+    /// Whether the states say the seat is being used right now.
+
+    fn is_in_use(&self) -> bool {
+
+        IN_USE_BOOKING_STATUS.contains(&self.status.trim())
+            || IN_USE_BOOKING_WORDS
+                .iter()
+                .any(|word| self.status_name.contains(word))
+    }
+
     /// Why this booking cannot be cancelled, or `None` when it can.
     ///
     /// Why mirror the reference client:
     /// The service answers a cancel of a finished booking with a refusal that
     /// reads like a failure. Checking first gives the user the real reason and
-    /// keeps a pointless write off the wire. The codes and words are the ones
-    /// UBAA's `cancelBlockedMessage` uses.
+    /// keeps a pointless write off the wire. The finished codes and words are
+    /// the ones UBAA's `cancelBlockedMessage` uses.
+    ///
+    /// How:
+    /// Finished first (a `4` row named 已结束 must not be reported as in use),
+    /// then in use, then the allow-list of states a cancel has worked on. A
+    /// state in none of the three is refused as unconfirmed rather than
+    /// offered.
 
     pub fn cancel_blocked(&self) -> Option<&'static str> {
 
@@ -163,17 +218,39 @@ impl Booking {
             return Some("预约记录不存在或已失效，请刷新后重试");
         }
 
-        let finished = FINAL_BOOKING_STATUS.contains(&self.status.trim())
-            || FINAL_BOOKING_WORDS
+        if self.is_finished() {
+
+            return Some("该预约已结束或已取消，无需取消");
+        }
+
+        if self.is_in_use() {
+
+            return Some("座位正在使用中，无法取消；请在图书馆官方页面或现场退座");
+        }
+
+        let known = CANCELLABLE_BOOKING_STATUS.contains(&self.status.trim())
+            || CANCELLABLE_BOOKING_WORDS
                 .iter()
                 .any(|word| self.status_name.contains(word));
 
-        finished.then_some("该预约已结束或已取消，无需取消")
+        (!known).then_some("无法确认该预约可以取消，请刷新预约记录后重试")
     }
 
-    /// Whether the booking is still current, which is when it can be cancelled.
+    /// Whether the booking is still current: not known to be over.
+    ///
+    /// Why not `can_cancel`:
+    /// A booking that is under way (使用中) can no longer be cancelled but is
+    /// still live, so it stays in the 有效 count and the read-back after a
+    /// reservation still finds it. Cancellability is [`Booking::can_cancel`].
 
     pub fn is_active(&self) -> bool {
+
+        !self.id.trim().is_empty() && !self.is_finished()
+    }
+
+    /// Whether a cancel may be sent for this booking.
+
+    pub fn can_cancel(&self) -> bool {
 
         self.cancel_blocked().is_none()
     }
@@ -626,7 +703,13 @@ fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Valu
 
     // Words the service uses to refuse a write while still answering code 1;
     // the reference client treats the same list as failure.
-    const WRITE_REFUSALS: [&str; 8] = [
+    //
+    // Why 失效:
+    // A cancel of a booking the service no longer serves (status 3, 使用中)
+    // came back as `{"code":1,"message":"当前预约已失效"}`. Without this word
+    // that envelope is read as accepted, and the refusal only surfaces as the
+    // caller's read-back mismatch, which hides the service's own words.
+    const WRITE_REFUSALS: [&str; 9] = [
         "不可",
         "已被",
         "不能取消",
@@ -635,6 +718,7 @@ fn validate_library_response(status: u16, body: &str, path: &str) -> Result<Valu
         "用户取消",
         "已结束",
         "已完成",
+        "失效",
     ];
 
     if value.get("success") == Some(&Value::Bool(false))
@@ -1261,6 +1345,104 @@ mod tests {
         assert!(still_active(&[], "b1").is_none());
 
         assert!(still_active(&[row("1", "已预约")], "b1").is_some());
+    }
+
+    fn status(status: &str, name: &str) -> Booking {
+
+        Booking {
+            id: "397030".to_string(),
+            status: status.to_string(),
+            status_name: name.to_string(),
+            ..Booking::default()
+        }
+    }
+
+    // Every code the live `member/seat` list returned for the test account,
+    // plus one it has never returned.
+
+    #[test]
+
+    fn live_status_codes_have_the_right_cancel_verdict() {
+
+        let cancellable = |status: &Booking| status.cancel_blocked().is_none();
+
+        // 397030: in use. The service refuses the cancel (当前预约已失效).
+        assert!(!cancellable(&status("3", "使用中")), "使用中不能取消");
+
+        assert!(!cancellable(&status("4", "已结束")));
+
+        assert!(!cancellable(&status("6", "用户取消")));
+
+        assert!(!cancellable(&status("8", "已结束")));
+
+        // A final code stays final under a name the word list misses.
+        assert!(!cancellable(&status("4", "Finished")), "状态 4 已结束");
+
+        // The states a cancel has worked on.
+        assert!(cancellable(&status("1", "已预约")));
+
+        assert!(cancellable(&status("", "预约成功")));
+    }
+
+    #[test]
+
+    fn an_unknown_status_cannot_be_cancelled() {
+
+        let unknown = status("11", "待审核");
+
+        assert!(unknown.cancel_blocked().is_some(), "未知状态应拒绝取消");
+
+        // Nothing says it is over, so it still counts as current.
+        assert!(unknown.is_active());
+    }
+
+    #[test]
+
+    fn an_in_use_booking_is_current_but_not_cancellable() {
+
+        let in_use = status("3", "使用中");
+
+        let reason = in_use.cancel_blocked().expect("使用中不能取消");
+
+        assert!(reason.contains("使用中"), "{reason}");
+
+        // Still a live booking: counted as 有效 and sorted to the top.
+        assert!(in_use.is_active());
+
+        assert!(!in_use.can_cancel());
+
+        // Without a code, the name alone is enough.
+        assert!(status("", "使用中").cancel_blocked().is_some());
+
+        assert!(status("", "临时离开").cancel_blocked().is_some());
+    }
+
+    #[test]
+
+    fn a_new_in_use_booking_is_still_found_after_a_reservation() {
+
+        // The live readback of a fresh reservation was status 3 (使用中).
+        let fresh = Booking {
+            seat_no: "101".to_string(),
+            day: "2026-10-07".to_string(),
+            ..status("3", "使用中")
+        };
+
+        assert_eq!(
+            find_new_booking(&[fresh], "101", "2026-10-07").map(|b| b.id),
+            Some("397030".to_string())
+        );
+    }
+
+    #[test]
+
+    fn a_cancel_refusal_keeps_the_service_words() {
+
+        let body = r#"{"code":1,"message":"当前预约已失效"}"#;
+
+        let error = validate_library_response(200, body, "space/cancel").unwrap_err();
+
+        assert!(format!("{error:#}").contains("当前预约已失效"), "{error:#}");
     }
 
     use serde_json::json;
