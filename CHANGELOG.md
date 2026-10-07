@@ -1,6 +1,6 @@
 # ChangeLog
 
-## Unreleased
+## 0.10.0
 
 ### 变更
 
@@ -32,8 +32,10 @@
 
 ### 验证
 
-- `cargo fmt --check` 通过；`cargo test --all-targets`：217 passed + 1 集成测试（`tests/no_home.rs`），0 failed。新增的断言都先在本分支上复现失败再修复：取消预览的纯 JSON、`already_booked`/`rate_limited` 分类、`clockin-submit` 预览的不可撤销提示、AGENTS.md 写命令表与错误码表和 `schema`/分类器一致。
-- 真实服务只读验证：`venue-orders --cancel` 在拿不到订单时输出 `submitted: false` 的 JSON 并把中文提示写到 stderr；`rate_limited` 现在能从真实的 `尝试登录太过频繁` 得到。未执行任何写操作。
+- `cargo fmt --check` 通过；`cargo test --all-targets`：243 passed + 1 集成测试（`tests/no_home.rs`），0 failed。新增的断言都先在本分支上复现失败再修复：取消预览的纯 JSON、`already_booked`/`rate_limited` 分类、`clockin-submit` 预览的不可撤销提示、AGENTS.md 写命令表与错误码表和 `schema`/分类器一致。
+- 真实账号上的 TUI 验证：图书馆 → 阅览区 → 座位平面图（175 个座位）→ 我的预约 全流程；预约一个座位再取消，`1 条有效` 回到 `0 条有效`；确认框按 `n` 关闭后提示「未提交预约，没有做任何修改」；我的预约里 `使用中`/`用户取消`/`已结束` 与日期之间有间隔。
+- 一条 `使用中`（状态 3）的预约两次取消都被图书馆拒绝（`当前预约已失效`），由此发现并修复了「使用中可取消」的问题；修复后 `x` 在本地直接拒绝并提示到官方页面退座，不再发送请求。本工具和参考客户端都没有退座接口。
+- CLI 只读验证：`venue-orders --cancel` 在拿不到订单时输出 `submitted: false` 的 JSON 并把中文提示写到 stderr；`seat-orders --cancel` 对 `使用中` 预约给出 `cancellable: false` 及原因；真实的 `尝试登录太过频繁` 现在报告为 `rate_limited`（此前即使原因在下一层也报 `unknown`）。
 - Windows 目标交叉编译后在本机 Wine 下运行：`HOME` 清空时子命令正常，日志写到 `%LOCALAPPDATA%\iclass-buaa\events.jsonl`，配置能从 `%APPDATA%` 与 `%USERPROFILE%\.config` 两处找到。
 
 ## 0.9.2
