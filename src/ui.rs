@@ -6943,7 +6943,14 @@ mod tests {
 
         assert!(out.contains("研讨室"), "应说明要做什么：\n{out}");
 
-        assert!(out.contains("不可撤销"), "应说明后果：\n{out}");
+        // A reservation is reversible through 我的预约, so saying otherwise
+        // would be false; the consequence stated is the occupied room.
+        assert!(out.contains("占用真实房间"), "应说明后果：\n{out}");
+
+        assert!(
+            !out.contains("不可撤销"),
+            "预约可以取消，不应说不可撤销：\n{out}"
+        );
 
         assert!(out.contains("取消"), "应列出取消键：\n{out}");
     }

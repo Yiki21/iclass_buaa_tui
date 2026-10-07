@@ -5,6 +5,7 @@
 ### 变更
 
 - **macOS 只发布 Apple Silicon 包**：不再构建 `macos-x64.dmg`，发布产物里只有 `iclass_buaa_tui-macos-arm64.dmg`。Intel Mac 无法运行 arm64 包，需要按 README 从源码安装。
+- **工具链升级到 `nightly-2026-10-04`**（此前 `nightly-2026-09-21`），`rust-toolchain.toml` 与 CI、发布工作流一并更新。仍用 nightly：`rustfmt.toml` 的字段对齐、空行等 6 个选项只有 nightly 支持，stable 会忽略它们并重排全部代码。代码本身不依赖 nightly 特性，已用 stable 1.99 `--locked` 验证可编译。
 
 ### 新增
 

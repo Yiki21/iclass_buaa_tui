@@ -1127,8 +1127,12 @@ impl PendingWrite {
     pub fn detail(&self) -> &'static str {
 
         match self {
-            Self::VenueReserve | Self::SeatBook { .. } => {
-                "此操作不可撤销；如需撤回请在列表里取消。"
+            Self::VenueReserve => "预约会占用真实房间；如需撤回，可在「我的预约」里取消。",
+            // Seen live: booking the current segment came back as 使用中 at once,
+            // and the service refuses to cancel that state. Promising "cancel it
+            // from the list" would be false for the very case the user is in.
+            Self::SeatBook { .. } => {
+                "预约会占用真实座位；当前时段的预约可能立刻变成「使用中」，那时无法在这里取消。"
             }
             Self::VenueCancel(_) | Self::SeatCancel(_) => "取消后该时段会释放给其他人。",
             Self::ClockinSubmit { .. } => "打卡记录无法删除；照片为自动生成的纯色占位图。",
