@@ -6,6 +6,9 @@
 //! write only with `--yes`.
 
 use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
+use std::fmt::Display;
+use std::io::{self, Write};
 
 use crate::iclass::IClassApi;
 
@@ -194,6 +197,120 @@ pub(crate) async fn seat_map_command(args: SeatMapArgs) -> Result<()> {
     Ok(())
 }
 
+/// Where `seat-book` writes.
+///
+/// Why:
+/// With `--json`, stdout must carry the JSON document and nothing else, so a
+/// caller can hand it straight to a parser and read `submitted`. The
+/// human-readable header is still useful to a person at the terminal, so under
+/// `--json` it moves to stderr instead of being dropped. Without `--json`
+/// everything goes to stdout, as before.
+
+struct BookOutput<Out, Err> {
+    json:   bool,
+    stdout: Out,
+    stderr: Err,
+}
+
+impl<Out: Write, Err: Write> BookOutput<Out, Err> {
+    fn new(json: bool, stdout: Out, stderr: Err) -> Self {
+
+        Self {
+            json,
+            stdout,
+            stderr,
+        }
+    }
+
+    /// A line for a human: stdout normally, stderr under `--json`.
+
+    fn human(&mut self, line: impl Display) -> Result<()> {
+
+        if self.json {
+
+            writeln!(self.stderr, "{line}")?;
+        } else {
+
+            writeln!(self.stdout, "{line}")?;
+        }
+
+        Ok(())
+    }
+
+    /// The JSON document, alone on stdout.
+
+    fn document(&mut self, value: &Value) -> Result<()> {
+
+        writeln!(self.stdout, "{}", serde_json::to_string_pretty(value)?)?;
+
+        Ok(())
+    }
+}
+
+/// The seat, date and segment about to be booked, for the human reader.
+
+fn write_book_header<Out: Write, Err: Write>(
+    out: &mut BookOutput<Out, Err>,
+    area_name: &str,
+    seat: &crate::libbook::Seat,
+    date: &str,
+    segment: &crate::libbook::TimeSlot,
+) -> Result<()> {
+
+    out.human(format!("阅览区\t{area_name}"))?;
+
+    out.human(format!("座位\t{}\t{}", seat.no, seat.name))?;
+
+    out.human(format!("日期\t{date}"))?;
+
+    out.human(format!(
+        "时段\t{}\t{}-{}",
+        segment.id, segment.start, segment.end
+    ))?;
+
+    out.human(format!(
+        "状态\t{}",
+        if seat.is_available {
+
+            "可预约"
+        } else {
+
+            "不可预约"
+        }
+    ))
+}
+
+/// The preview `seat-book` prints without `--yes`.
+
+fn write_book_preview<Out: Write, Err: Write>(
+    out: &mut BookOutput<Out, Err>,
+    area_id: &str,
+    seat: &crate::libbook::Seat,
+    date: &str,
+    segment: &crate::libbook::TimeSlot,
+) -> Result<()> {
+
+    if out.json {
+
+        return out.document(&json!({
+            "action": "seat-book",
+            "submitted": false,
+            "would_reserve": {
+                "area_id": area_id,
+                "seat_id": seat.id,
+                "seat_no": seat.no,
+                "date": date,
+                "segment": segment.id,
+            },
+            "hint": "加上 --yes 才会真正提交预约",
+        }));
+    }
+
+    out.human("")?;
+
+    out.human("这是预览。确认无误后加上 --yes 才会真正提交预约。")
+}
+
 pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
 
     let config = load_config(args.config.as_deref())?;
@@ -228,24 +345,9 @@ pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
             )
         })?;
 
-    println!("阅览区\t{}", detail.name);
+    let mut out = BookOutput::new(args.json, io::stdout(), io::stderr());
 
-    println!("座位\t{}\t{}", seat.no, seat.name);
-
-    println!("日期\t{}", args.date);
-
-    println!("时段\t{}\t{}-{}", segment.id, segment.start, segment.end);
-
-    println!(
-        "状态\t{}",
-        if seat.is_available {
-
-            "可预约"
-        } else {
-
-            "不可预约"
-        }
-    );
+    write_book_header(&mut out, &detail.name, seat, &args.date, segment)?;
 
     if !seat.is_available {
 
@@ -254,32 +356,7 @@ pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
 
     if !args.yes {
 
-        if args.json {
-
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "action": "seat-book",
-                    "submitted": false,
-                    "would_reserve": {
-                        "area_id": args.area,
-                        "seat_id": seat.id,
-                        "seat_no": seat.no,
-                        "date": args.date,
-                        "segment": segment.id,
-                    },
-                    "hint": "加上 --yes 才会真正提交预约",
-                }))?
-            );
-
-            return Ok(());
-        }
-
-        println!();
-
-        println!("这是预览。确认无误后加上 --yes 才会真正提交预约。");
-
-        return Ok(());
+        return write_book_preview(&mut out, &args.area, seat, &args.date, segment);
     }
 
     let booking = api
@@ -290,40 +367,42 @@ pub(crate) async fn seat_book_command(args: SeatBookArgs) -> Result<()> {
 
     if args.json {
 
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "action": "seat-book",
-                "submitted": true,
-                "booking_id": booking.id,
-                "seat_no": booking.seat_no,
-                "area": booking.area_name,
-                "date": if booking.day.is_empty() { args.date.clone() } else { booking.day.clone() },
-                "begin": booking.begin_time,
-                "end": booking.end_time,
-            }))?
-        );
-
-        return Ok(());
+        return out.document(&json!({
+            "action": "seat-book",
+            "submitted": true,
+            "booking_id": booking.id,
+            "seat_no": booking.seat_no,
+            "area": booking.area_name,
+            "date": if booking.day.is_empty() { args.date.clone() } else { booking.day.clone() },
+            "begin": booking.begin_time,
+            "end": booking.end_time,
+        }));
     }
 
-    println!();
+    out.human("")?;
 
     if booking.id.is_empty() {
 
-        println!("预约已提交（服务未返回预约详情，请用 seat-orders 确认）");
+        out.human("预约已提交（服务未返回预约详情，请用 seat-orders 确认）")
     } else {
 
-        println!(
+        out.human(format!(
             "预约成功\t{}\t{}\t{} {}-{}",
             booking.seat_no, booking.area_name, booking.day, booking.begin_time, booking.end_time
-        );
+        ))
     }
-
-    Ok(())
 }
 
 pub(crate) async fn seat_orders_command(args: SeatOrdersArgs) -> Result<()> {
+
+    if args
+        .cancel
+        .as_deref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+
+        bail!("--cancel 的预约 id 不能为空");
+    }
 
     let config = load_config(args.config.as_deref())?;
 
@@ -331,33 +410,21 @@ pub(crate) async fn seat_orders_command(args: SeatOrdersArgs) -> Result<()> {
 
     let token = seat_token(&api).await?;
 
-    if let Some(booking_id) = args.cancel.as_deref() {
-
-        if !args.yes {
-
-            println!("将取消预约 {booking_id}。确认后加上 --yes 才会真正取消。");
-
-            return Ok(());
-        }
-
-        api.libbook_cancel(&token, booking_id)
-            .await
-            .map_err(seat_error)
-            .with_context(|| format!("取消预约 {booking_id} 失败"))?;
-
-        println!("已取消预约 {booking_id}");
-
-        return Ok(());
-    }
-
     let bookings = api
-        .libbook_bookings(&token, 1, 20)
+        .libbook_bookings(&token, 1, BOOKING_PAGE_SIZE)
         .await
         .map_err(seat_error)?;
 
+    if let Some(booking_id) = args.cancel.as_deref() {
+
+        return cancel_booking(&api, &token, &bookings, booking_id.trim(), &args).await;
+    }
+
     if args.json {
 
-        println!("{}", serde_json::to_string_pretty(&bookings)?);
+        let rows: Vec<Value> = bookings.iter().map(booking_json).collect();
+
+        println!("{}", serde_json::to_string_pretty(&rows)?);
 
         return Ok(());
     }
@@ -374,16 +441,156 @@ pub(crate) async fn seat_orders_command(args: SeatOrdersArgs) -> Result<()> {
     for booking in &bookings {
 
         println!(
-            "{}\t{}\t{}\t{}\t{}-{}\t{}",
+            "{}\t{}\t{}\t{}\t{}-{}\t{}{}",
             booking.id,
             booking.day,
             booking.area_name,
             booking.seat_no,
-            booking.begin_time,
-            booking.end_time,
+            clock_time(&booking.begin_time),
+            clock_time(&booking.end_time),
             booking.status_name,
+            if booking.can_cancel() {
+
+                "（可取消）"
+            } else {
+
+                ""
+            },
         );
     }
+
+    Ok(())
+}
+
+/// Bookings read per call. The service pages its history; current bookings
+/// are the newest, so the first page holds every one that can be cancelled.
+
+const BOOKING_PAGE_SIZE: i64 = 20;
+
+/// A booking as JSON, with whether it can still be cancelled.
+///
+/// Why:
+/// The raw status codes are the service's own; a caller should not have to
+/// know that `6` and `8` are final to decide whether `--cancel` makes sense.
+
+fn booking_json(booking: &crate::libbook::Booking) -> Value {
+
+    let mut value = serde_json::to_value(booking).unwrap_or(Value::Null);
+
+    if let Some(object) = value.as_object_mut() {
+
+        object.insert("cancellable".to_string(), json!(booking.can_cancel()));
+    }
+
+    value
+}
+
+/// `2026-10-03 16:34:28` -> `16:34`; anything else is shown as it came.
+
+fn clock_time(timestamp: &str) -> &str {
+
+    timestamp
+        .split_once(' ')
+        .map_or(timestamp, |(_, time)| time.get(..5).unwrap_or(time))
+}
+
+/// Handles `seat-orders --cancel`.
+///
+/// How:
+/// The booking is looked up in the list just read, so the preview names the
+/// seat and time a human would recognise, and a booking that is finished or
+/// not there is refused before anything is sent. Only then does `--yes` send
+/// the cancel, which reads the list back to confirm it took effect.
+
+async fn cancel_booking(
+    api: &IClassApi,
+    token: &str,
+    bookings: &[crate::libbook::Booking],
+    booking_id: &str,
+    args: &SeatOrdersArgs,
+) -> Result<()> {
+
+    let booking = bookings.iter().find(|booking| booking.id == booking_id);
+
+    let blocked = match booking {
+        Some(booking) => booking.cancel_blocked().map(str::to_string),
+        None => {
+            Some(format!(
+                "预约 id 无效：最近 {BOOKING_PAGE_SIZE} 条预约里没有 {booking_id}，请先用 \
+                 seat-orders 查看"
+            ))
+        }
+    };
+
+    if !args.yes {
+
+        if args.json {
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "action": "seat-orders --cancel",
+                    "submitted": false,
+                    "would_cancel": booking.map(booking_json),
+                    "cancellable": blocked.is_none(),
+                    "blocked_reason": blocked,
+                    // `--yes` would also be refused, so a blocked preview
+                    // must not suggest it.
+                    "hint": if blocked.is_none() {
+                        "加上 --yes 才会真正取消"
+                    } else {
+                        "这条预约不能取消，加 --yes 也不会发送请求"
+                    },
+                }))?
+            );
+
+            return Ok(());
+        }
+
+        match (booking, &blocked) {
+            (_, Some(reason)) => println!("不能取消 {booking_id}：{reason}"),
+            (Some(booking), None) => {
+
+                println!(
+                    "将取消预约 {booking_id}：{} {} 座 {} {}-{}。确认后加上 --yes 才会真正取消。",
+                    booking.area_name,
+                    booking.seat_no,
+                    booking.day,
+                    clock_time(&booking.begin_time),
+                    clock_time(&booking.end_time),
+                )
+            }
+            (None, None) => unreachable!("a missing booking is always blocked"),
+        }
+
+        return Ok(());
+    }
+
+    if let Some(reason) = blocked {
+
+        bail!("未发送取消请求：{reason}");
+    }
+
+    api.libbook_cancel(token, booking_id)
+        .await
+        .map_err(seat_error)
+        .with_context(|| format!("取消预约 {booking_id} 失败"))?;
+
+    if args.json {
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "action": "seat-orders --cancel",
+                "submitted": true,
+                "cancelled": booking.map(booking_json),
+            }))?
+        );
+
+        return Ok(());
+    }
+
+    println!("已取消预约 {booking_id}");
 
     Ok(())
 }
@@ -438,8 +645,11 @@ fn resolve_date(value: Option<String>) -> Result<String> {
 
 mod tests {
 
-    use super::{resolve_date, resolve_segment};
-    use crate::libbook::TimeSlot;
+    use super::{
+        BookOutput, booking_json, clock_time, resolve_date, resolve_segment, write_book_header,
+        write_book_preview,
+    };
+    use crate::libbook::{Booking, Seat, TimeSlot};
 
     fn slot(id: &str, label: &str) -> TimeSlot {
 
@@ -491,5 +701,119 @@ mod tests {
         );
 
         assert!(resolve_date(Some("03/10/2026".to_string())).is_err());
+    }
+
+    #[test]
+
+    fn booking_times_print_as_clock_times() {
+
+        assert_eq!(clock_time("2026-10-03 16:34:28"), "16:34");
+
+        assert_eq!(clock_time("16:34"), "16:34");
+
+        assert_eq!(clock_time(""), "");
+    }
+
+    #[test]
+
+    fn booking_json_says_whether_it_can_be_cancelled() {
+
+        let active = Booking {
+            id: "1".to_string(),
+            status: "1".to_string(),
+            status_name: "已预约".to_string(),
+            ..Booking::default()
+        };
+
+        let ended = Booking {
+            status: "8".to_string(),
+            status_name: "已结束".to_string(),
+            ..active.clone()
+        };
+
+        assert_eq!(booking_json(&active)["cancellable"], true);
+
+        assert_eq!(booking_json(&ended)["cancellable"], false);
+
+        assert_eq!(booking_json(&active)["id"], "1");
+    }
+
+    #[test]
+
+    fn booking_json_does_not_offer_cancelling_a_seat_in_use() {
+
+        let in_use = Booking {
+            id: "397030".to_string(),
+            status: "3".to_string(),
+            status_name: "\u{4f7f}\u{7528}\u{4e2d}".to_string(),
+            ..Booking::default()
+        };
+
+        assert_eq!(booking_json(&in_use)["cancellable"], false);
+    }
+
+    /// Runs the `seat-book` preview into buffers: `(stdout, stderr)`.
+
+    fn book_preview(json: bool) -> (String, String) {
+
+        let seat = Seat {
+            id: "129".to_string(),
+            no: "001".to_string(),
+            name: "001".to_string(),
+            is_available: true,
+            ..Seat::default()
+        };
+
+        let segment = slot("seg-1", "08:00-23:00");
+
+        let mut out = BookOutput::new(json, Vec::new(), Vec::new());
+
+        write_book_header(
+            &mut out,
+            "\u{4e00}\u{5c42}\u{897f}\u{9605}\u{5b66}\u{7a7a}\u{95f4}",
+            &seat,
+            "2026-10-08",
+            &segment,
+        )
+        .unwrap();
+
+        write_book_preview(&mut out, "8", &seat, "2026-10-08", &segment).unwrap();
+
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    }
+
+    #[test]
+
+    fn seat_book_json_preview_is_only_json_on_stdout() {
+
+        let (stdout, stderr) = book_preview(true);
+
+        let value: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+
+            panic!("stdout \u{5e94}\u{662f} JSON\u{ff1a}{error}\n{stdout}")
+        });
+
+        assert_eq!(value["submitted"], false);
+
+        assert_eq!(value["would_reserve"]["seat_id"], "129");
+
+        // The header a person reads is kept, on stderr.
+        assert!(stderr.contains("\u{5ea7}\u{4f4d}\t001"), "{stderr}");
+    }
+
+    #[test]
+
+    fn seat_book_text_preview_is_unchanged() {
+
+        let (stdout, stderr) = book_preview(false);
+
+        assert!(stdout.starts_with("\u{9605}\u{89c8}\u{533a}\t"), "{stdout}");
+
+        assert!(stdout.contains("--yes"), "{stdout}");
+
+        assert!(stderr.is_empty(), "{stderr}");
     }
 }

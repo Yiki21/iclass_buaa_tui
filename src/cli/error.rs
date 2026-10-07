@@ -17,28 +17,44 @@ use serde::Serialize;
 use crate::failure::{self, Operation};
 
 /// A stable failure code plus whether retrying could help.
+///
+/// Test-only: the CLI builds its report through `failure::classify` on the
+/// whole error (see `ErrorReport::from_error`). These text helpers pin the
+/// keyword mapping in tests without constructing `anyhow` chains.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
 pub struct ErrorCode {
     pub code:      &'static str,
     pub retryable: bool,
 }
 
-/// Classifies a failure from its message.
+/// Classifies one message as a read or a write.
 ///
-/// How:
-/// The order matters: authentication is checked before the generic cases, since
-/// an expired session often surfaces as a transport-looking error.
+/// Why the operation matters:
+/// A read that times out is safe to repeat. A write that times out may already
+/// have happened, so repeating it can duplicate the effect.
 
-pub fn classify(message: &str) -> ErrorCode {
+#[cfg(test)]
 
-    let classified = failure::classify_text(message, Operation::Read);
+pub fn classify_for(message: &str, operation: Operation) -> ErrorCode {
+
+    let classified = failure::classify_text(message, operation);
 
     ErrorCode {
         code:      classified.code(),
         retryable: classified.retryable && !classified.kind.is_auth_expiry(),
     }
+}
+
+/// Classifies one message as a read.
+
+#[cfg(test)]
+
+pub fn classify(message: &str) -> ErrorCode {
+
+    classify_for(message, Operation::Read)
 }
 
 /// The JSON document emitted when a `--json` call fails.
@@ -67,20 +83,32 @@ pub struct ErrorPayload {
 
 impl ErrorReport {
     /// Builds a report from an `anyhow` error.
+    ///
+    /// Why the whole error, not its text:
+    /// The outer message is often a wrapper ("登录失败"), and the
+    /// actionable detail, a rate limit or a taken seat, lives in the cause chain
+    /// or in a typed `Failure` further down. `failure::classify` walks both;
+    /// classifying only the top message lost the diagnosis and fell back to
+    /// `unknown`. The operation is passed through because a write whose outcome
+    /// is unknown must not advertise itself as retryable.
 
-    pub fn from_error(error: &anyhow::Error, command: Option<String>) -> Self {
+    pub fn from_error(
+        error: &anyhow::Error,
+        command: Option<String>,
+        operation: Operation,
+    ) -> Self {
 
         let message = error.to_string();
 
-        let classified = classify(&message);
+        let classified = failure::classify(error, operation);
 
         let causes = error.chain().skip(1).map(ToString::to_string).collect();
 
         Self {
             error: ErrorPayload { message, causes },
             command,
-            retryable: classified.retryable,
-            code: classified.code,
+            retryable: classified.retryable && !classified.kind.is_auth_expiry(),
+            code: classified.code(),
         }
     }
 }
@@ -90,6 +118,57 @@ impl ErrorReport {
 mod tests {
 
     use super::classify;
+
+    #[test]
+
+    fn a_write_that_timed_out_is_never_reported_as_retryable() {
+
+        use super::{ErrorReport, classify_for};
+        use crate::failure::Operation;
+
+        // The same transient text: safe to repeat as a read, unsafe as a write,
+        // because the write may already have taken effect.
+        for text in ["请求超时", "upstream returned 503", "连接失败: dns error"] {
+
+            assert!(
+                classify_for(text, Operation::Read).retryable,
+                "{text} 读应可重试"
+            );
+
+            assert!(
+                !classify_for(text, Operation::Write).retryable,
+                "{text}: 写入结果未知时不能标成可重试"
+            );
+        }
+
+        let error = anyhow::anyhow!("请求超时");
+
+        let report =
+            ErrorReport::from_error(&error, Some("seat-book".to_string()), Operation::Write);
+
+        assert!(!report.retryable);
+    }
+
+    #[test]
+
+    fn the_code_comes_from_the_cause_chain_not_just_the_outer_message() {
+
+        use super::ErrorReport;
+        use crate::failure::Operation;
+
+        // Seen live: the outer context says only "登录失败", while the reason
+        // worth acting on is one cause deeper. Classifying the outer string
+        // alone reported `unknown`.
+        let error = anyhow::anyhow!("登录失败：尝试登录太过频繁，请稍后再试")
+            .context("登录失败：获取问卷数据");
+
+        let report =
+            ErrorReport::from_error(&error, Some("eval-submit".to_string()), Operation::Read);
+
+        assert_eq!(report.code, "rate_limited", "应从未层原因识别出限流");
+
+        assert!(report.retryable, "限流可以重试");
+    }
 
     #[test]
 
@@ -152,5 +231,27 @@ mod tests {
         assert_eq!(code.code, "unknown");
 
         assert!(!code.retryable);
+    }
+
+    #[test]
+
+    fn live_upstream_messages_map_to_the_documented_codes() {
+
+        // The exact strings two campus services returned, verbatim. The
+        // documented code table is only useful if these produce the code it
+        // promises rather than falling through to `unknown`.
+        let limited = classify("登录失败：尝试登录太过频繁，请稍后再试");
+
+        assert_eq!(limited.code, "rate_limited");
+
+        // `classify` strips auth-expiry from retryable; rate limiting stays.
+        assert!(limited.retryable);
+
+        let duplicate =
+            classify("图书馆拒绝了请求：非常抱歉，由于您在该时段已存在座位预约，不可重复预约");
+
+        assert_eq!(duplicate.code, "already_booked");
+
+        assert!(!duplicate.retryable);
     }
 }

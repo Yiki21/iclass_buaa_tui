@@ -1,11 +1,29 @@
 # ChangeLog
 
-## Unreleased
+## 0.10.0
+
+### 变更
+
+- **macOS 只发布 Apple Silicon 包**：不再构建 `macos-x64.dmg`，发布产物里只有 `iclass_buaa_tui-macos-arm64.dmg`。Intel Mac 无法运行 arm64 包，需要按 README 从源码安装。
+- **工具链升级到 `nightly-2026-10-04`**（此前 `nightly-2026-09-21`），`rust-toolchain.toml` 与 CI、发布工作流一并更新。仍用 nightly：`rustfmt.toml` 的字段对齐、空行等 6 个选项只有 nightly 支持，stable 会忽略它们并重排全部代码。代码本身不依赖 nightly 特性，已用 stable 1.99 `--locked` 验证可编译。
+
+### 新增
+
+- **图书馆座位平面图**：座位按接口返回的 `point_x`/`point_y` 坐标排成网格，桌子与过道的形状和官方页面一致；`hjkl`/方向键按平面图移动，`f` 跳到下一个空位。终端放不下座位号时每个座位缩成 `o`/`x` 一个字符，选中座位的编号显示在信息行。没有坐标的阅览区按座位号每行 10 个排列。`seat-map --json` 增加 `x`/`y`。
+- **TUI 我的预约**：图书馆页任意层级按 `B` 打开，列出预约的日期、时段、阅览区、座位和状态；`x` 取消选中的预约，先弹确认框，取消后自动刷新列表。
 
 ### 修复
 
 - **Windows 上任意子命令报「HOME 未设置」后退出**（#18）：Windows 默认不设 `HOME`，此前日志、配置、课表缓存、planner 锁和 TUI 记住的登录都从 `HOME` 推路径。现在由 `etcetera` 定位目录：Windows 用 `%APPDATA%`（配置）和 `%LOCALAPPDATA%`（日志、锁），Linux 与 macOS 仍按 XDG，路径不变。Windows 上原来为绕过问题放在 `%XDG_CONFIG_HOME%` 或 `%HOME%\.config` 的配置仍能找到。
 - `--log-file` 此前也绕不过这个问题：指定了日志路径，程序仍会先计算默认路径并因缺 `HOME` 失败。现在只在没给 `--log-file` 时才计算默认路径。
+- **取消座位预约总是报「写入结果未知」**：`space/cancel` 此前没有成功判定。现在按参考客户端的规则接受 `{"code":1,"message":"取消成功"}`，拒绝消息（已取消、不能取消……）直接显示原因；之后再读一次预约记录，确认这条预约已不再有效。
+- 已结束或已取消的预约（状态 6/8，或状态名含取消、结束、过期等）在发送请求前就拒绝取消，并说明原因。
+- 预约记录的 `day` 为空时从 `begin_time` 取日期；预约成功后找回记录时只匹配仍有效的预约，不会把同座位号的旧记录当成新预约。
+- `seat-orders --cancel` 的预览和结果在 `--json` 下输出 JSON（`submitted`、`would_cancel`、`cancellable`、`blocked_reason`），此前是纯文本；`seat-orders --json` 每条记录增加 `status` 和 `cancellable`。
+- **`venue-orders --cancel --json` 此前输出纯文本**，与同一提交里的 `seat-orders` 不一致，也没有文档承诺的 `submitted` 字段。现在预览与提交都输出 `{"action":"venue-orders --cancel","submitted":…,"would_cancel":…,"cancellable":…,"blocked_reason":…}`；`--json` 时人读提示走 stderr，stdout 只有一个 JSON 文档。
+- **`schema` 把 `venue-orders` / `seat-orders` 标成 `effect: read`，却又给它们 `confirmation_flag: --yes`**。现在两者的 `--cancel` 形态各自是一条 `effect: write` 的条目（名字带 `--cancel`），读形态则通过新的 `write_when` 字段说明带哪个标志才会写，且不再虚报确认标志。
+- **失败码表与分类器不一致**：`尝试登录太过频繁` 归为 `unknown`（应为 `rate_limited`），`不可重复预约` 也归为 `unknown`。现在 `太过频繁` 认作限流；重复预约新增会话外的状态类码 `already_booked`，提示改为「取消已有预约或换时段/日期」，因为换一个座位同样会被拒。
+- **`clockin-submit` 的预览没有写「不可撤销」**，而 README 承诺打卡与评教的预览都会写明。现在预览多了 `注意：提交后无法撤销…`，`--json` 也带 `"irreversible": true`；`--json` 时摘要与提示走 stderr。
 
 ### 依赖
 
@@ -14,7 +32,10 @@
 
 ### 验证
 
-- `cargo test --locked`：182 passed，含一个去掉 `HOME` 与 `XDG_*` 后运行子命令的集成测试（在修复前会以 `HOME 未设置` 失败）。
+- `cargo fmt --check` 通过；`cargo test --all-targets`：243 passed + 1 集成测试（`tests/no_home.rs`），0 failed。新增的断言都先在本分支上复现失败再修复：取消预览的纯 JSON、`already_booked`/`rate_limited` 分类、`clockin-submit` 预览的不可撤销提示、AGENTS.md 写命令表与错误码表和 `schema`/分类器一致。
+- 真实账号上的 TUI 验证：图书馆 → 阅览区 → 座位平面图（175 个座位）→ 我的预约 全流程；预约一个座位再取消，`1 条有效` 回到 `0 条有效`；确认框按 `n` 关闭后提示「未提交预约，没有做任何修改」；我的预约里 `使用中`/`用户取消`/`已结束` 与日期之间有间隔。
+- 一条 `使用中`（状态 3）的预约两次取消都被图书馆拒绝（`当前预约已失效`），由此发现并修复了「使用中可取消」的问题；修复后 `x` 在本地直接拒绝并提示到官方页面退座，不再发送请求。本工具和参考客户端都没有退座接口。
+- CLI 只读验证：`venue-orders --cancel` 在拿不到订单时输出 `submitted: false` 的 JSON 并把中文提示写到 stderr；`seat-orders --cancel` 对 `使用中` 预约给出 `cancellable: false` 及原因；真实的 `尝试登录太过频繁` 现在报告为 `rate_limited`（此前即使原因在下一层也报 `unknown`）。
 - Windows 目标交叉编译后在本机 Wine 下运行：`HOME` 清空时子命令正常，日志写到 `%LOCALAPPDATA%\iclass-buaa\events.jsonl`，配置能从 `%APPDATA%` 与 `%USERPROFILE%\.config` 两处找到。
 
 ## 0.9.2

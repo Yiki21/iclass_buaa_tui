@@ -43,6 +43,20 @@ impl Effect {
     }
 }
 
+/// Commands that only write when a specific flag is present.
+///
+/// Why:
+/// `venue-orders` and `seat-orders` are pure reads until `--cancel` is passed,
+/// and then they write. Flattening each cancelling form into its own `write`
+/// entry keeps `effect` honest for a caller that gates on it, instead of
+/// labelling a writing command `read` because its read form is the common one.
+/// The mapping is written out here for the same reason the rest of the
+/// classification is: it is a property of what the command does, and clap
+/// cannot see it.
+
+const CONDITIONAL_WRITES: &[(&str, &str)] =
+    &[("venue-orders", "--cancel"), ("seat-orders", "--cancel")];
+
 /// Classifies one subcommand.
 ///
 /// Why:
@@ -67,10 +81,17 @@ fn classify(name: &str) -> Effect {
 
         // Can be undone through the tool: a reservation or booking is
         // cancellable with —x or --cancel, and a BYKC enrollment with
-        // bykc-deselect (until the course's cancel deadline).
-        "venue-reserve" | "seat-book" | "sign" | "plan" | "bykc-select" | "bykc-deselect" => {
-            Effect::Write
-        }
+        // bykc-deselect (until the course's cancel deadline). The `--cancel`
+        // forms are listed as leaves of their own so `effect` is not `read`
+        // for a command that can write.
+        "venue-reserve"
+        | "seat-book"
+        | "sign"
+        | "plan"
+        | "bykc-select"
+        | "bykc-deselect"
+        | "venue-orders --cancel"
+        | "seat-orders --cancel" => Effect::Write,
 
         // Nothing undoes these.
         "clockin-submit" | "eval-submit" => Effect::WriteIrreversible,
@@ -81,6 +102,42 @@ fn classify(name: &str) -> Effect {
 
         _ => Effect::Read,
     }
+}
+
+/// Whether one invocation actually changes remote or host state.
+///
+/// Why:
+/// The failure report has to know this to decide `retryable`. A write whose
+/// outcome is unknown may already have happened, so it must not be reported as
+/// safe to repeat. A write command run without `--yes` only previews, which is
+/// a read and is safe to repeat; so the classification is the command's effect
+/// combined with the confirmation flag, not the command name alone.
+///
+/// How:
+/// Reuses `classify` and `CONDITIONAL_WRITES`, so the schema and the failure
+/// report cannot disagree about which commands write.
+
+pub(crate) fn invocation_writes(name: &str, argv: &[String]) -> bool {
+
+    let confirmed = argv.iter().any(|argument| argument == "--yes");
+
+    if !confirmed {
+
+        return false;
+    }
+
+    let conditional = CONDITIONAL_WRITES
+        .iter()
+        .find(|(base, _)| *base == name)
+        .map(|(_, flag)| *flag);
+
+    let effective = match conditional {
+        Some(flag) if argv.iter().any(|argument| argument == flag) => format!("{name} {flag}"),
+        Some(_) => return false,
+        None => name.to_string(),
+    };
+
+    !matches!(classify(&effective), Effect::Read)
 }
 
 /// Builds the schema document.
@@ -137,34 +194,81 @@ pub(crate) fn schema_json() -> Result<Value> {
             .map(describe_argument)
             .collect();
 
+        // A conditional write is still a read in its common form, so its base
+        // entry keeps `effect: read` and names the flag that turns it into a
+        // write. The `--yes` flag alone does not do that, so the base entry
+        // must not advertise a confirmation flag a caller would then trust.
+        let conditional = CONDITIONAL_WRITES
+            .iter()
+            .find(|(base, _)| *base == name.as_str());
+
         // Read from the parser rather than assumed: a command that writes but
         // has no confirmation flag must not claim one, or a caller will pass a
         // flag that does not exist.
-        let confirm_flag = arguments
-            .iter()
-            .find(|argument| argument["name"] == "yes")
-            .and_then(|argument| argument["long"].as_str())
-            .map(str::to_string);
+        let parsed_confirm_flag = || {
+
+            arguments
+                .iter()
+                .find(|argument| argument["name"] == "yes")
+                .and_then(|argument| argument["long"].as_str())
+                .map(str::to_string)
+        };
+
+        let confirm_flag = if conditional.is_some() {
+
+            None
+        } else {
+
+            parsed_confirm_flag()
+        };
 
         commands.push(json!({
             "name": name,
             "summary": subcommand.get_about().map(|about| about.to_string()),
             "effect": effect.as_str(),
             "confirmation_flag": confirm_flag,
+            "write_when": conditional.map(|(_, flag)| (*flag).to_string()),
             "supports_json": arguments.iter().any(|argument| argument["name"] == "json"),
-            "arguments": arguments,
+            "arguments": arguments.clone(),
         }));
+
+        // One entry per writing form, so an agent can plan against it directly.
+        if let Some((_, flag)) = conditional {
+
+            let variant = format!("{name} {flag}");
+
+            commands.push(json!({
+                "name": variant,
+                "summary": format!(
+                    "{}（加 {flag} 后）",
+                    subcommand.get_about().map(ToString::to_string).unwrap_or_default()
+                ),
+                "effect": classify(&variant).as_str(),
+                "confirmation_flag": parsed_confirm_flag(),
+                "write_when": flag,
+                "supports_json": arguments.iter().any(|argument| argument["name"] == "json"),
+                "arguments": arguments,
+            }));
+        }
     }
 
     // Execution order matters for a caller: reads that establish a session
-    // should come first, and writes last.
+    // should come first, and writes last. Within a tier the base command comes
+    // before its conditional variant, which reads as the natural order.
     commands.sort_by_key(|entry| {
 
-        match entry["effect"].as_str() {
+        let tier = match entry["effect"].as_str() {
             Some("read") => 0,
             Some("write") => 1,
             _ => 2,
-        }
+        };
+
+        let variant = entry["write_when"].is_string()
+            && entry["name"]
+                .as_str()
+                .is_some_and(|name| name.split(' ').next().is_some_and(|base| base != name));
+
+        (tier, variant)
     });
 
     Ok(json!({
@@ -174,6 +278,7 @@ pub(crate) fn schema_json() -> Result<Value> {
         "conventions": {
             "json": "supports_json=true 的命令接受 --json 输出结构化结果；失败时 stderr 输出带 code/retryable 的错误报告。",
             "confirmation": "标为写操作的命令在没有确认标志时只做预览，输出 submitted=false；加上确认标志才会真正执行。",
+            "conditional_writes": "write_when 非空的命令只在带上该标志时才写；不带时是纯读。取消类命令均为 read/写两种形态各一条，写形态的名字带 --cancel。",
             "exit_codes": {
                 "0": "成功",
                 "1": "失败（未登录、参数错误、上游拒绝等）",
@@ -229,7 +334,69 @@ pub(crate) fn schema_command() -> Result<()> {
 
 mod tests {
 
-    use super::{Effect, classify, schema_json};
+    use serde_json::Value;
+
+    use super::{CONDITIONAL_WRITES, Effect, classify, invocation_writes, schema_json};
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+
+        std::iter::once("iclass_buaa_tui")
+            .chain(parts.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+
+    fn only_a_confirmed_write_counts_as_writing() {
+
+        // A write command without --yes only previews, so it is a read.
+        assert!(!invocation_writes(
+            "seat-book",
+            &argv(&["seat-book", "--json"])
+        ));
+
+        assert!(invocation_writes(
+            "seat-book",
+            &argv(&["seat-book", "--yes"])
+        ));
+
+        assert!(invocation_writes(
+            "clockin-submit",
+            &argv(&["clockin-submit", "--yes"])
+        ));
+
+        // A pure read stays a read even if --yes is passed by mistake.
+        assert!(!invocation_writes(
+            "seat-map",
+            &argv(&["seat-map", "--yes"])
+        ));
+    }
+
+    #[test]
+
+    fn an_orders_command_writes_only_when_cancelling() {
+
+        assert!(!invocation_writes(
+            "seat-orders",
+            &argv(&["seat-orders", "--yes"])
+        ));
+
+        assert!(!invocation_writes(
+            "seat-orders",
+            &argv(&["seat-orders", "--cancel", "7"])
+        ));
+
+        assert!(invocation_writes(
+            "seat-orders",
+            &argv(&["seat-orders", "--cancel", "7", "--yes"])
+        ));
+
+        assert!(invocation_writes(
+            "venue-orders",
+            &argv(&["venue-orders", "--cancel", "7", "--yes"])
+        ));
+    }
 
     #[test]
 
@@ -302,6 +469,108 @@ mod tests {
                     entry["name"]
                 );
             }
+        }
+    }
+
+    #[test]
+
+    fn only_write_entries_advertise_a_confirmation_flag() {
+
+        // The contradiction this replaced: `venue-orders` and `seat-orders`
+        // were `effect: read` while still carrying `confirmation_flag: --yes`.
+        // A caller that trusts `effect` concluded no write was possible.
+        let schema = schema_json().expect("应能生成 schema");
+
+        for entry in schema["commands"].as_array().expect("应有 commands 数组") {
+
+            let name = entry["name"].as_str().expect("命令名");
+
+            let conditional_read = entry["effect"] == "read" && entry["write_when"].is_string();
+
+            if entry["effect"] == "read" && !conditional_read {
+
+                assert_eq!(
+                    entry["confirmation_flag"],
+                    Value::Null,
+                    "{name} 是纯读却带了确认标志"
+                );
+            }
+
+            if entry["effect"] != "read" {
+
+                assert_eq!(
+                    entry["confirmation_flag"], "--yes",
+                    "{name} 是写操作却没有 --yes"
+                );
+            }
+        }
+    }
+
+    #[test]
+
+    fn a_conditionally_writing_command_has_a_write_entry_for_that_flag() {
+
+        let schema = schema_json().expect("应能生成 schema");
+
+        let commands = schema["commands"].as_array().expect("应有 commands 数组");
+
+        for (base, flag) in CONDITIONAL_WRITES {
+
+            let read_entry = commands
+                .iter()
+                .find(|entry| entry["name"] == *base)
+                .unwrap_or_else(|| panic!("schema 缺少 {base}"));
+
+            assert_eq!(read_entry["effect"], "read");
+
+            assert_eq!(read_entry["write_when"], *flag);
+
+            let write_entry = commands
+                .iter()
+                .find(|entry| entry["name"] == format!("{base} {flag}"))
+                .unwrap_or_else(|| panic!("schema 缺少 {base} {flag} 的写形态"));
+
+            assert_eq!(write_entry["effect"], "write");
+
+            assert_eq!(write_entry["confirmation_flag"], "--yes");
+
+            // Both entries describe the same parser command, so their argument
+            // lists must match; the flag the write form needs has to be there.
+            assert_eq!(write_entry["arguments"], read_entry["arguments"]);
+
+            assert!(
+                write_entry["arguments"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg["long"] == *flag)),
+                "{base} 的参数里没有 {flag}"
+            );
+        }
+    }
+
+    #[test]
+
+    fn every_write_command_is_listed_in_agents_md() {
+
+        // AGENTS.md is linked from the README as the write inventory. It went
+        // stale once — five write-capable commands were missing — so the list
+        // is checked against the classification instead of trusted.
+        let schema = schema_json().expect("应能生成 schema");
+
+        let document = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/AGENTS.md"));
+
+        for entry in schema["commands"].as_array().expect("应有 commands 数组") {
+
+            if entry["effect"] == "read" {
+
+                continue;
+            }
+
+            let name = entry["name"].as_str().expect("命令名");
+
+            assert!(
+                document.contains(&format!("`{name}`")),
+                "AGENTS.md 的写命令表漏了 {name}"
+            );
         }
     }
 

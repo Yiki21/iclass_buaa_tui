@@ -22,8 +22,6 @@ jobs:
         include:
           - runner: macos-latest
             arch: arm64
-          - runner: macos-15-intel
-            arch: x64
 
     runs-on: ${{ matrix.runner }}
 
@@ -34,7 +32,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-09-21
+          toolchain: nightly-2026-10-04
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -78,7 +76,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-09-21
+          toolchain: nightly-2026-10-04
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -119,7 +117,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-09-21
+          toolchain: nightly-2026-10-04
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -176,7 +174,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-09-21
+          toolchain: nightly-2026-10-04
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

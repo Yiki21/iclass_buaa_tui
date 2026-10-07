@@ -20,6 +20,7 @@ use std::ffi::OsString;
 use anyhow::Result;
 use clap::Parser;
 
+use crate::failure;
 use crate::logging;
 
 use self::args::{Cli, CommandKind};
@@ -49,6 +50,18 @@ pub async fn run_cli() -> Result<()> {
     let json_requested = env::args().any(|argument| argument == "--json");
 
     let command = Some(command_name(&cli.command));
+
+    // Whether this invocation really writes decides how a failure is reported:
+    // a write with an unknown outcome must not be advertised as retryable.
+    let argv: Vec<String> = env::args().collect();
+
+    let operation = if schema::invocation_writes(&command.clone().unwrap_or_default(), &argv) {
+
+        failure::Operation::Write
+    } else {
+
+        failure::Operation::Read
+    };
 
     let result = match cli.command {
         CommandKind::ListToday(args) => planner::list_today(args).await,
@@ -94,7 +107,7 @@ pub async fn run_cli() -> Result<()> {
         && json_requested
     {
 
-        let report = error::ErrorReport::from_error(error, command);
+        let report = error::ErrorReport::from_error(error, command, operation);
 
         if let Ok(json) = serde_json::to_string_pretty(&report) {
 

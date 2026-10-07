@@ -7,3 +7,10 @@ iclass_tui_ref
 
 # Local scratch (contains throwaway test credentials; never commit)
 .tmp/
+
+# Reference clones and scratch output (never commit)
+UBAA/
+iclass_buaa/
+logs/
+name.txt
+*.rpm

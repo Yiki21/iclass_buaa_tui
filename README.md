@@ -1,49 +1,64 @@
-# 🎓 北航校园服务终端
+# iclass_buaa_tui
 
-北航（BUAA）课程与校园服务的终端工具：课表、成绩、作业、签到、博雅课程、研讨室、图书馆座位、阳光打卡、评教。同一个二进制既可以当交互式 TUI 用，也可以当脚本和 LLM 调用的 CLI 用。
+北航（BUAA）校园服务的终端客户端。课表、成绩、作业、签到、博雅课程、研讨室、图书馆座位、阳光打卡和评教，都在一个程序里：不带参数启动是交互式 TUI，带子命令就是可以写进脚本、交给定时任务或 LLM agent 调用的 CLI。
 
 [![Release](https://img.shields.io/github/v/release/Yiki21/iclass_buaa_tui)](https://github.com/Yiki21/iclass_buaa_tui/releases)
+[![CI](https://github.com/Yiki21/iclass_buaa_tui/actions/workflows/ci.yml/badge.svg)](https://github.com/Yiki21/iclass_buaa_tui/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/github/license/Yiki21/iclass_buaa_tui)](LICENSE)
+
+> 这是学生个人维护的非官方项目，与北京航空航天大学及其各业务系统没有关联。
+
+## 功能
+
+| 领域 | 能做什么 |
+|---|---|
+| 课表与学业 | 本科读 BYXT、研究生读 GSMIS 的学期课表，缓存后可离线查看；考试安排、成绩、空教室、作业汇总；课表导出为 markdown / csv / json / ics，比较两个学期的差异 |
+| 签到 | iClass 课堂签到，博雅签到与签退，失败按配置重试；TUI 里显示签到二维码；`install-autologin` 把定时签到交给系统调度器，`autologin-status` 查看定时任务状态 |
+| 博雅课程 | 可选课程、已选课程、课程详情、各类别学分统计，选课与退选 |
+| 研讨室 | 按楼层、房间、时段预约，查看并取消自己的预约 |
+| 图书馆座位 | 图书馆 → 阅览区 → 座位逐级浏览，座位按平面图坐标摆放；预约、查看「我的预约」、取消 |
+| 阳光打卡 | 各类别进度与历史记录，TUI 里一键随机时段打卡；CLI 用 `clockin-submit` 提交（需附照片） |
+| 评教 | 待评课程、问卷内容及将要选中的选项、提交（`eval-submit`） |
+
+所有会改变远端状态的操作，TUI 里先弹确认框，CLI 里不加 `--yes` 只做预览。打卡和评教提交后无法撤销，确认框和预览都会写明这一点。
 
 ## 安装
 
-优先从 [GitHub Releases](https://github.com/Yiki21/iclass_buaa_tui/releases) 下载对应平台的产物。
+从 [Releases](https://github.com/Yiki21/iclass_buaa_tui/releases) 下载对应平台的文件。发版 tag 的格式是 `Build-vX.Y.Z`。
 
 | 平台 | 文件 |
 |---|---|
-| macOS (Apple Silicon / Intel) | `iclass_buaa_tui-macos-arm64.dmg` / `-macos-x64.dmg` |
-| Windows (x64 / ARM64) | `iclass_buaa_tui-windows-x64.exe` / `-windows-arm64.exe` |
+| macOS（Apple Silicon） | `iclass_buaa_tui-macos-arm64.dmg` |
+| Windows（x64 / ARM64） | `iclass_buaa_tui-windows-x64.exe` / `-windows-arm64.exe` |
 | Debian / Ubuntu | `iclass-buaa-tui_<version>-1_amd64.deb`（`arm64` 同理） |
 | Fedora / RHEL | `iclass_buaa_tui-<version>-1.x86_64.rpm`（`aarch64` 同理） |
 
 ```bash
-# Debian / Ubuntu
-sudo apt install ./iclass-buaa-tui_<version>-1_amd64.deb
-
-# Fedora / RHEL
-sudo dnf install ./iclass_buaa_tui-<version>-1.x86_64.rpm
+sudo apt install ./iclass-buaa-tui_<version>-1_amd64.deb   # Debian / Ubuntu
+sudo dnf install ./iclass_buaa_tui-<version>-1.x86_64.rpm   # Fedora / RHEL
 ```
 
-GitHub 每次发版的 tag 是 `Build-vX.Y.Z`，Release 名就是它（[列表](https://github.com/Yiki21/iclass_buaa_tui/releases)）。
-
-macOS：打开 `.dmg`，把 `iClass BUAA TUI.app` 拖进 `Applications`，然后从「应用程序」启动。这是终端程序，双击会自动拉起 `Terminal.app`。当前 release 未做 Apple Developer ID 签名与公证，若提示「已损坏」，确认文件来自本项目 Releases 后执行：
+macOS：打开 `.dmg`，把 `iClass BUAA TUI.app` 拖进「应用程序」。它是终端程序，启动时会打开 `Terminal.app`。发布包没有 Apple Developer ID 签名和公证，提示「已损坏」时，先确认文件来自本项目的 Releases，再执行：
 
 ```bash
-xattr -dr com.apple.quarantine ~/Downloads/iclass_buaa_tui-macos-arm64.dmg
-# 若已拖入 Applications 仍打不开
 xattr -dr com.apple.quarantine "/Applications/iClass BUAA TUI.app"
 ```
 
-有 Rust 工具链也可以从源码安装：
+只发布 Apple Silicon 版。Intel Mac 请按下面的方式从源码安装。
+
+从源码安装（工具链版本由 `rust-toolchain.toml` 固定，rustup 会自动安装）：
 
 ```bash
+git clone https://github.com/Yiki21/iclass_buaa_tui.git
+cd iclass_buaa_tui
 cargo install --path .
 ```
 
 ## 快速开始
 
-### 1. 写配置
+### 1. 写配置文件
 
-登录只从配置文件读取凭据，命令行不接收密码。取第一个存在的文件：
+凭据只从配置文件读取，命令行不接收密码。按顺序查找，用第一个存在的文件：
 
 Windows：
 
@@ -54,114 +69,143 @@ Windows：
 Linux 与 macOS：
 
 - `$XDG_CONFIG_HOME/iclass-buaa/config.toml`，默认 `~/.config/iclass-buaa/config.toml`
-- `$XDG_CONFIG_DIRS/iclass-buaa/config.toml`，默认 `/etc/xdg`
+- `$XDG_CONFIG_DIRS/iclass-buaa/config.toml`（默认 `/etc/xdg`）
 - `/etc/iclass-buaa/config.toml`
 
 Windows 上 `HOME` 通常不设，程序不再依赖它：配置放 `%APPDATA%`，日志等本机状态放 `%LOCALAPPDATA%\iclass-buaa\events.jsonl`。Linux 与 macOS 的日志仍在 `$XDG_STATE_HOME/iclass-buaa/events.jsonl`，默认 `~/.local/state/iclass-buaa/events.jsonl`。
 
 ```toml
 student_id = "2337xxxx"
-use_vpn = true
-vpn_username = "2337xxxx"      # 统一认证账号，留空则用 student_id
+use_vpn = true                       # 经 WebVPN 访问；博雅课程必须为 true
+vpn_username = "2337xxxx"            # 统一认证账号，留空时使用 student_id
 vpn_password = "your-sso-password"   # 统一认证密码
 
 enable_iclass = true
 enable_bykc = false
 
-advance_minutes = 5
-retry_count = 6
-retry_interval_seconds = 30
-
 include_courses = ["*"]
 exclude_courses = ["体育", "*实验课*"]
 ```
 
-完整示例见 [config.example.toml](config.example.toml)。**配置文件含密码时权限必须是 `600`**，否则拒绝加载。
-
-`vpn_username` / `vpn_password` 是历史字段名，现在含义就是统一认证账号和密码；`use_vpn` 控制是否经 WebVPN 访问。BYKC（博雅）必须 `use_vpn = true`。
-
-课程过滤用 `include_courses` / `exclude_courses`（支持 `*` 通配符，也按 `course_id` 匹配），两侧还能分别用 `iclass_include_courses` / `bykc_include_courses` 等覆盖；专属列表为空时回退到通用列表。
-
-### 2. 先自检
+文件里有密码时，权限必须是 `600`，否则程序拒绝读取：
 
 ```bash
-iclass_buaa_tui doctor        # 检查 WebVPN、统一认证、iClass、BYKC 连通性
-iclass_buaa_tui notify        # 确认这台机器能弹桌面通知
+chmod 600 ~/.config/iclass-buaa/config.toml
 ```
 
-### 3. 用起来
+`vpn_username` / `vpn_password` 是沿用下来的字段名，现在表示统一认证的账号和密码。签到重试、通知、课程过滤等其余选项见 [config.example.toml](config.example.toml)。
+
+### 2. 检查连通性
 
 ```bash
-iclass_buaa_tui               # 不带子命令 = 进入 TUI
-iclass_buaa_tui today         # 今日课程与下一节课
-iclass_buaa_tui list-today    # 今天的签到目标
+iclass_buaa_tui doctor   # WebVPN、统一认证、iClass、博雅是否可达
+iclass_buaa_tui notify   # 这台机器能否弹出桌面通知
 ```
 
-TUI 里按 `tab` 切换七个工作区：课表、签到、博雅、研讨室、图书馆、打卡、评教。所有写操作（预约、打卡、评教、签到）都会先弹确认框，说明将要做什么以及后果。
-
-## 主要功能
-
-**课表与学业**（只读）：本科从 BYXT、研究生从 GSMIS 读取课表；首次使用按 `u` 导入当前学期，之后可离线查看。`1`~`6` 切换今日课程、学期课表、考试、成绩、空教室、作业；`/` 搜索课程名/课程号/地点/教师；`,/.` 换学期，`[`/`]` 换周。课表可导出为 markdown / csv / json / ics，也可比较两个学期的差异。
-
-**签到**：支持 iClass 签到和博雅签到/签退，失败按配置重试；TUI 里可生成签到二维码（`g` 终端内刷新、`G` 存成图片）。`plan` 跑一轮自动签到，`install-autologin` 把轮询交给系统调度器（Linux `systemd --user`、macOS `launchd`、Windows `schtasks`），`autologin-status` 看调度器健康状态。无人值守时失败会发桌面通知（`notify_on_failure`，默认开）。
-
-**博雅课程**：浏览可选课程、已选课程、课程详情与学分统计，以及选课/退选（需 `--yes`）。
-
-**预约**：研讨室按房间和时段预约；图书馆座位按图书馆 → 阅览区 → 座位逐级选，都能查看和取消自己的预约。座位相关命令不只是能约，也能查：`seats` 列图书馆，加 `--library` 列阅览区，`seat-map --area <id>` 列座位。
-
-**打卡与评教**：阳光打卡查看各类别进度与历史记录，TUI 里按 `s` 一键随机时段打卡；评教列出待评课程、查看问卷并按 `--yes` 提交。这两类提交都无法撤销。
-
-**CLI 与 TUI 的边界**：数据读取和写操作两边都有。只有二维码签到（TUI 里 `g` 生成、`G` 存成图片）没有 CLI 命令，`skills`、`schema` 这类命令只对调用方有意义，TUI 里没有。TUI 面向交互，CLI 面向脚本和自动调度。
-
-## AI Native
-
-这个工具是给 agent 用的第一等公民。
-
-### 先读接口，不要猜
+### 3. 启动
 
 ```bash
-iclass_buaa_tui schema
+iclass_buaa_tui          # 进入 TUI
 ```
 
-输出全部命令的 JSON 描述：参数、`effect`（`read` / `write` / `write_irreversible`）、`confirmation_flag`、`supports_json`。参数由 clap 反射得到，不会与真实解析器脱节；命令组会摊平成叶子（`skills install`），因为不同子命令的 effect 不同。优先读它，不要抓 `--help`。
+第一次使用时，在课表页按 `u` 导入当前学期课表。
 
-### 写操作只在显式确认后执行
+## 使用
 
-**所有非 `read` 的命令没有 `--yes` 就不会写入，而且退出码仍然是 0。** 不加 `--yes` 时只做预览，输出 `"submitted": false`。判断是否真的写入要看 `--json` 里的 `submitted` 字段，不能只看退出码。
+### TUI
 
-预览本身会重读实时状态，所以它也能告诉你这次写入现在是否还成立。工作方式建议是两次调用：先不带 `--yes` 预览给用户看，得到明确同意后再带 `--yes`。
+`Tab` / `Shift+Tab` 在七个工作区之间切换：课表、签到、博雅、研讨室、图书馆、打卡、评教。导入课表后，第一个页签按门户显示为「本科课表」或「研究生课表」。每个页面底部都列出当前可用的按键，常用的几个：
 
-`write_irreversible`（`clockin-submit`、`eval-submit`）没有任何撤销手段，只有在用户明确要求提交那一次时才执行。
+| 页面 | 按键 |
+|---|---|
+| 课表 | `1`–`6` 切换今日、学期课表、考试、成绩、空教室、作业；`/` 搜索；`,` `.` 换学期；`[` `]` 换周；`u` 更新课表 |
+| 签到 | `s` 签到选中的课；`g` 在终端里显示签到二维码，`G` 在浏览器里打开持续刷新的二维码页面 |
+| 研讨室 | `O` 我的预约，`x` 取消 |
+| 图书馆 | `enter` 逐级进入，`b` 返回；座位平面图里 `hjkl` 或方向键移动，`f` 跳到下一个空位，`enter` 预约；`B` 我的预约，`x` 取消 |
+| 打卡 | `s` 随机时段打卡 |
+| 通用 | `r` 刷新，`q` 退出 |
 
-### 失败有稳定错误码
+座位平面图使用图书馆接口返回的座位坐标，桌子和过道的形状与官方页面一致。终端放不下全部座位号时，每个座位缩成一个字符（`o` 可预约，`x` 不可预约），当前选中座位的编号显示在信息行。
 
-带 `--json` 时失败会往 stderr 输出结构化报告：
-
-```json
-{"error": {"message": "...", "causes": ["..."]},
- "command": "seat-book", "retryable": false, "code": "resource_unavailable"}
-```
-
-按 `code` 决定动作：`not_authenticated` 重试一次后跑 `doctor`；`config_invalid` 让用户改配置（含密码时需 `600`）；`invalid_argument` 修参数、别原样重试；`resource_unavailable` 换一个目标；`account_locked` 等锁过期；`rate_limited` 退避；`upstream_timeout` / `network_error` / `upstream_error` 退避后重试；`unknown` 当不可重试处理。退出码只有 0 和 1。
-
-### 内置 Agent Skills
-
-描述各领域工作流的 Agent Skills 编译在二进制里，版本与命令始终一致：
+### CLI
 
 ```bash
-iclass_buaa_tui skills list                                       # 列出 6 个 skill
-iclass_buaa_tui skills show buaa-campus                           # 打印入口 skill
-iclass_buaa_tui skills install --target ~/.claude/skills --yes     # 装到任意 agent 的 skills 目录
+iclass_buaa_tui today                          # 今日课程与下一节课
+iclass_buaa_tui grades --all --json            # 全部学期成绩
+iclass_buaa_tui seats --date 2026-10-08        # 各图书馆空闲座位
+iclass_buaa_tui seat-orders                    # 我的座位预约
+iclass_buaa_tui seat-orders --cancel <id>      # 预览取消，不加 --yes 不会执行
+iclass_buaa_tui plan --yes                     # 跑一轮自动签到
+iclass_buaa_tui install-autologin --yes        # 安装定时签到（systemd --user / launchd / schtasks）
 ```
 
-入口是 `buaa-campus`（通用规则与路由），其余按领域拆分：`buaa-academics`、`buaa-attendance`、`buaa-bykc`、`buaa-booking`、`buaa-clockin-eval`。源文件在 `skills/`。`install` 不会覆盖不是它自己写的文件，有冲突就整批拒绝；`--force` 只更新它自己之前装过的文件。
+完整命令列表用 `iclass_buaa_tui --help` 查看，或者用 `iclass_buaa_tui schema` 拿到 JSON 格式的描述。
 
-更完整的调用约定见 [AGENTS.md](AGENTS.md)。
+## 给 agent 调用
+
+CLI 按程序调用的需要设计，有四条约定：
+
+- **接口可查询**：`schema` 输出每个命令的参数、是读还是写、确认标志是什么、是否支持 `--json`。参数直接取自命令行解析器，不会和实际行为不一致。`venue-orders`、`seat-orders` 平时只读，带 `--cancel` 才写，`schema` 把两种形态分成两条列出。
+- **写操作要确认**：不加 `--yes` 时只预览，退出码依然是 0，输出里 `"submitted": false`。是否真的写入，以 `submitted` 字段为准，不要看退出码。
+- **错误可分类**：带 `--json` 失败时，stderr 输出带 `code` 和 `retryable` 的报告。`code` 区分未登录、参数错误、资源被占用、限流、上游超时等情况，调用方据此决定换目标、退避还是放弃。
+- **自带 Agent Skills**：各领域的操作流程写成 SKILL.md，编译进二进制，版本和命令保持一致。
+
+```bash
+iclass_buaa_tui skills list
+iclass_buaa_tui skills show buaa-campus                          # 入口 skill
+iclass_buaa_tui skills install --target ~/.claude/skills --yes   # 安装到 agent 的 skills 目录
+```
+
+`install` 不会覆盖不是它写入的文件，有冲突时整批放弃。错误码表和调用顺序见 [AGENTS.md](AGENTS.md)。
+
+## 开发
+
+```bash
+cargo run                                # 启动 TUI
+cargo run -- doctor                      # 运行某个子命令
+cargo fmt --all -- --check
+cargo check --locked
+cargo test --locked
+cargo clippy --locked --all-targets
+```
+
+CI 运行的就是后四条。`rustfmt.toml` 用到了 nightly 才有的格式选项，所以工具链固定为 nightly，版本见 `rust-toolchain.toml`。
+
+代码结构：
+
+| 路径 | 内容 |
+|---|---|
+| `src/iclass/` | 统一认证、WebVPN 和 iClass 客户端 |
+| `src/bykc/` | 博雅课程 |
+| `src/cgyy/` | 研讨室 |
+| `src/libbook/` | 图书馆座位，`grid.rs` 把座位坐标换算成终端网格 |
+| `src/ygdk/` | 阳光打卡 |
+| `src/evaluation/` | 评教 |
+| `src/academic.rs` `src/schedule.rs` `src/tasks.rs` | 课表、考试、成绩、作业 |
+| `src/app.rs` `src/ui.rs` | TUI 状态与渲染 |
+| `src/cli/` | 子命令、`schema`、内置 skills |
+| `skills/` | Agent Skills 源文件 |
+| `tests/fixtures/` | 上游页面与接口的样本 |
+
+## 参与贡献
+
+欢迎提 issue 和 PR。提交前请跑通上面四条 CI 命令。
+
+- 上游接口变了的话，请附上能复现的响应样本（去掉学号、姓名等个人信息），解析代码改动应带上对应测试。
+- 新增的写操作需要遵守预览约定：不加 `--yes` 时不发送任何写请求，并输出 `"submitted": false`；同时在 `src/cli/schema.rs` 里登记它的类型。
+- 修改命令时同步更新 `skills/` 里的说明，测试会检查 skill 中引用的命令是否存在。
 
 ## 注意事项
 
-- 本项目仅供个人学习和研究交流，请勿用于违反学校规定的用途。
-- 登录凭据只存在本机配置目录，不上传；课表缓存同样只存本地。
-- 上游接口随时可能变化，不保证长期及时跟进。
+- 仅供个人学习和研究使用，请遵守学校的相关规定。自动签到、打卡等功能的使用后果由使用者自己承担。
+- 凭据和课表缓存只保存在本机，不会上传到任何第三方。
+- 学校系统的接口随时可能变化，本项目不保证及时跟进。
 
-Inspired by [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa) && [UBAA](https://github.com/BUAASubnet/UBAA)
+## 致谢
+
+- [iclass_buaa](https://github.com/zeroduhyy/iclass_buaa)：iClass 签到流程的参考。
+- [UBAA](https://github.com/BUAASubnet/UBAA)：图书馆、研讨室、阳光打卡等接口的参考实现。
+
+## 许可证
+
+[GPL-3.0](LICENSE)

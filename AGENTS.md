@@ -71,35 +71,53 @@ With `--json`, a failure also writes a structured report to stderr:
 | `not_authenticated` | session expired | run `list-today` once to log in again |
 | `config_invalid` | missing or unreadable config | check `--config`, file permissions |
 | `invalid_argument` | the command line is wrong | fix the arguments, do not retry |
-| `resource_unavailable` | seat/room taken or not bookable | pick another |
+| `resource_unavailable` | seat/room taken by someone else, or not bookable | pick another |
+| `already_booked` | you already hold a booking in that slot | cancel the existing one, or pick another slot/date; do not retry |
 | `account_locked` | upstream locked the account | wait for the lock window to expire |
 | `rate_limited` | too many requests | back off |
+| `connect_timeout`, `read_timeout` | the request timed out connecting / reading | retry with backoff |
 | `upstream_timeout`, `network_error`, `upstream_error` | transient | retry with backoff |
 | `unknown` | not classified | treat as non-retryable |
+
+The table is the contract `src/failure.rs` implements; a keyword that misses
+means a call reports `unknown` where a specific code was promised.
 
 Exit codes are only 0 (success) and 1 (failure). The exit code does not
 distinguish kinds of failure; `code` does.
 
 ## Writes and their gates
 
-Classified by what cannot be undone:
+Classified by what cannot be undone. Confirm the flag exists before passing it:
+`schema` lists the real one per command.
 
 | command | effect | confirm flag |
 |---|---|---|
 | `venue-reserve` | write | `--yes` |
+| `venue-orders --cancel` | write | `--yes` |
 | `seat-book` | write | `--yes` |
+| `seat-orders --cancel` | write | `--yes` |
 | `sign` | write | `--yes` |
 | `plan` | write | `--yes` |
+| `bykc-select` | write | `--yes` |
+| `bykc-deselect` | write | `--yes` |
 | `install-autologin`, `uninstall-autologin` | write | `--yes` |
+| `skills install` | write | `--yes` |
 | `clockin-submit` | **irreversible** | `--yes` |
 | `eval-submit` | **irreversible** | `--yes` |
 
-Irreversible means nothing in this tool undoes it. A booking or reservation can
-be cancelled (`venue-orders --cancel`, `seat-orders --cancel`); a clock-in
-record and a submitted evaluation cannot.
+`venue-orders` and `seat-orders` are reads until `--cancel` names an order, at
+which point they are writes; `schema` lists each form separately, with `effect`
+and `write_when` saying which flag turns the read into the write.
 
-`eval-submit` answers a questionnaire on the user's behalf and is attributed to
-them. Do not call it without an explicit human instruction, and read
+Irreversible means nothing in this tool undoes it. A booking or reservation can
+be cancelled (`venue-orders --cancel`, `seat-orders --cancel`); a BYKC
+enrollment can be withdrawn with `bykc-deselect` until the course's cancel
+deadline; a clock-in record and a submitted evaluation cannot be undone.
+
+`clockin-submit` and `eval-submit` write a record that is attributed to the real
+account. Their previews say so; `eval-submit` additionally answers a
+questionnaire on the user's behalf. Do not call either without an explicit human
+instruction for that exact submission, and for `eval-submit` read
 `eval --show <rwid>` first if you want to know what would be submitted.
 
 ## Order of operations
@@ -107,7 +125,8 @@ them. Do not call it without an explicit human instruction, and read
 1. `doctor --json` — reachability of each upstream service, before anything else.
 2. `list-today --json` — verifies authentication for that process. Each CLI invocation creates its own in-memory cookie jar; a previous command does not establish a session for a later process.
 3. Reads: `today`, `exams`, `grades --all`, `tasks`, `venues`, `seats`, `seat-map`, `clockin`, `eval`.
-4. Writes, last, and only with an explicit instruction.
+4. Writes, last, and only with an explicit instruction. `venue-orders` and
+   `seat-orders` count as writes too once `--cancel` is passed.
 
 ## Things that are not obvious
 

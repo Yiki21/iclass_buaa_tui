@@ -7,6 +7,8 @@
 //! two are therefore separate commands, and submission refuses to run without
 //! an explicit confirmation flag.
 
+use std::io::Write;
+
 use anyhow::{Context, Result, bail};
 
 use crate::evaluation::{EvaluationTask, Questionnaire};
@@ -62,7 +64,8 @@ pub(crate) async fn eval_command(args: EvalArgs) -> Result<()> {
             return Ok(());
         }
 
-        print_questionnaire(task, &questionnaire);
+        // `--json` already returned above, so this is the human path.
+        print_questionnaire(&mut std::io::stdout(), task, &questionnaire)?;
 
         return Ok(());
     }
@@ -163,10 +166,38 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
 
     if selected.is_empty() {
 
+        if args.json {
+
+            // A caller that asked for JSON gets JSON, even when there is
+            // nothing to submit: an empty stdout is not a document.
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "eval-submit",
+                    "submitted": false,
+                    "would_submit": [],
+                    "hint": "没有需要评教的课程",
+                }))?
+            );
+
+            return Ok(());
+        }
+
         println!("没有需要评教的课程");
 
         return Ok(());
     }
+
+    // Under `--json` stdout carries exactly one document, so every human line
+    // goes to stderr instead. Prose on stdout would make the output
+    // unparseable for the callers this flag exists for.
+    let mut human: Box<dyn Write> = if args.json {
+
+        Box::new(std::io::stderr())
+    } else {
+
+        Box::new(std::io::stdout())
+    };
 
     // Load every questionnaire first, so the preview is complete before any
     // submission happens.
@@ -182,18 +213,21 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
         prepared.push((*task, questionnaire));
     }
 
-    println!("将提交以下评教：");
+    writeln!(human, "将提交以下评教：")?;
 
-    println!();
+    writeln!(human)?;
 
     for (task, questionnaire) in &prepared {
 
-        print_questionnaire(task, questionnaire);
+        print_questionnaire(&mut human, task, questionnaire)?;
 
-        println!();
+        writeln!(human)?;
     }
 
-    println!("注意：提交后无法撤销，且评教结果会记在你的名下，而你并未逐题作答。");
+    writeln!(
+        human,
+        "注意：提交后无法撤销，且评教结果会记在你的名下，而你并未逐题作答。"
+    )?;
 
     if !args.yes {
 
@@ -224,9 +258,9 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
             return Ok(());
         }
 
-        println!();
+        writeln!(human)?;
 
-        println!("这是预览。确认无误后加上 --yes 才会真正提交。");
+        writeln!(human, "这是预览。确认无误后加上 --yes 才会真正提交。")?;
 
         return Ok(());
     }
@@ -242,19 +276,19 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
         match api.evaluation_submit(task, &answers).await {
             Ok(outcome) if outcome.success => {
 
-                println!("评教成功\t{}", task.course);
+                writeln!(human, "评教成功\t{}", task.course)?;
 
                 succeeded += 1;
             }
             Ok(outcome) => {
 
-                println!("评教失败\t{}\t{}", task.course, outcome.message);
+                writeln!(human, "评教失败\t{}\t{}", task.course, outcome.message)?;
 
                 failures.push(format!("{}: {}", task.course, outcome.message));
             }
             Err(error) => {
 
-                println!("评教失败\t{}\t{error}", task.course);
+                writeln!(human, "评教失败\t{}\t{error}", task.course)?;
 
                 failures.push(format!("{}: {error}", task.course));
             }
@@ -281,9 +315,13 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!();
+    writeln!(human)?;
 
-    println!("完成：成功 {succeeded} 门，失败 {} 门", failures.len());
+    writeln!(
+        human,
+        "完成：成功 {succeeded} 门，失败 {} 门",
+        failures.len()
+    )?;
 
     if !failures.is_empty() {
 
@@ -295,15 +333,20 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
 
 /// Prints a questionnaire and the answers that would be submitted.
 
-fn print_questionnaire(task: &EvaluationTask, questionnaire: &Questionnaire) {
+fn print_questionnaire(
+    writer: &mut dyn Write,
+    task: &EvaluationTask,
+    questionnaire: &Questionnaire,
+) -> Result<()> {
 
-    println!("课程\t{}", task.course);
+    // Writes through the caller's sink, so `--json` keeps stdout clean.
+    writeln!(writer, "课程\t{}", task.course)?;
 
-    println!("任务\t{}", task.rwid);
+    writeln!(writer, "任务\t{}", task.rwid)?;
 
     if !questionnaire.questions.is_empty() {
 
-        println!();
+        writeln!(writer)?;
 
         // Showing the questions is the point: it makes visible what is being
         // answered on the user's behalf.
@@ -315,9 +358,11 @@ fn print_questionnaire(task: &EvaluationTask, questionnaire: &Questionnaire) {
                 .map(|option| format!("→ {option}"))
                 .unwrap_or_else(|| "（不作答）".to_string());
 
-            println!("\t{}. {}\t{}", index + 1, question.text, answer);
+            writeln!(writer, "\t{}. {}\t{}", index + 1, question.text, answer)?;
         }
     }
+
+    Ok(())
 }
 
 /// Position of a task in the list, used as a short handle.
@@ -333,4 +378,56 @@ fn index_of(tasks: &[EvaluationTask], task: &EvaluationTask) -> usize {
 fn dash(value: &str) -> &str {
 
     if value.trim().is_empty() { "-" } else { value }
+}
+
+#[cfg(test)]
+
+mod tests {
+
+    use super::print_questionnaire;
+
+    use crate::evaluation::{EvaluationTask, Question, Questionnaire};
+
+    fn task() -> EvaluationTask {
+
+        EvaluationTask {
+            rwid:        "1".to_string(),
+            wjid:        "2".to_string(),
+            course:      "操作系统".to_string(),
+            course_code: "B3".to_string(),
+            teacher:     "王老师".to_string(),
+            evaluated:   false,
+        }
+    }
+
+    fn questionnaire() -> Questionnaire {
+
+        Questionnaire {
+            questions: vec![Question {
+                id:      "q1".to_string(),
+                text:    "课程内容如何？".to_string(),
+                options: vec!["很好".to_string(), "一般".to_string()],
+                choice:  true,
+            }],
+        }
+    }
+
+    #[test]
+
+    fn the_questionnaire_writes_through_the_sink_it_is_given() {
+
+        // The `--json` paths rely on this: prose must go wherever the caller
+        // points them, so stdout can stay one JSON document.
+        let mut sink: Vec<u8> = Vec::new();
+
+        print_questionnaire(&mut sink, &task(), &questionnaire()).expect("写入问卷");
+
+        let text = String::from_utf8(sink).expect("应该是 UTF-8");
+
+        assert!(text.contains("操作系统"), "缺少课程名：{text}");
+
+        assert!(text.contains("课程内容如何？"), "缺少题干：{text}");
+
+        assert!(text.contains("→ 很好"), "缺少默认答案：{text}");
+    }
 }

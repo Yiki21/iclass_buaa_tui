@@ -6,13 +6,20 @@
 //! exactly what would be booked and stops, which makes a mistyped command
 //! harmless.
 
+use std::io::Write;
+
 use anyhow::{Context, Result};
 
-use crate::cgyy::{DayInfo, ReservationRequest};
+use crate::cgyy::{DayInfo, Order, ReservationRequest};
 use crate::iclass::IClassApi;
 
 use super::args::{VenueArgs, VenueOrdersArgs, VenueReserveArgs, VenueSlotsArgs};
 use super::config::{AutomationConfig, load_config};
+
+/// How many of the caller's most recent orders are read, for the list and for
+/// finding the order a `--cancel` names.
+
+const ORDER_PAGE_SIZE: i64 = 20;
 
 /// Logs in and returns an authenticated API client.
 ///
@@ -309,24 +316,44 @@ pub(crate) async fn venue_orders_command(args: VenueOrdersArgs) -> Result<()> {
 
     if let Some(order_id) = args.cancel {
 
-        if !args.yes {
+        // Look the order up in the list just read, so the preview can name the
+        // room and state whether the cancellation is possible at all — the
+        // same contract `seat-orders --cancel` offers. A missing id is a
+        // blocked cancel, not a request to send blind.
+        let orders = api
+            .cgyy_orders(&token, 1, ORDER_PAGE_SIZE)
+            .await
+            .map_err(venue_error)?;
 
-            println!("将取消订单 {order_id}。确认后加上 --yes 才会真正取消。");
+        let state = venue_cancel_state(order_id, &orders);
 
-            return Ok(());
+        if args.yes {
+
+            if let Some(reason) = state["blocked_reason"].as_str() {
+
+                anyhow::bail!("未发送取消请求：{reason}");
+            }
+
+            api.cgyy_cancel(&token, order_id)
+                .await
+                .map_err(venue_error)
+                .with_context(|| format!("取消订单 {order_id} 失败"))?;
         }
 
-        api.cgyy_cancel(&token, order_id)
-            .await
-            .map_err(venue_error)
-            .with_context(|| format!("取消订单 {order_id} 失败"))?;
-
-        println!("已取消订单 {order_id}");
-
-        return Ok(());
+        return write_cancel_outcome(
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+            order_id,
+            &state,
+            args.yes,
+            args.json,
+        );
     }
 
-    let orders = api.cgyy_orders(&token, 1, 20).await.map_err(venue_error)?;
+    let orders = api
+        .cgyy_orders(&token, 1, ORDER_PAGE_SIZE)
+        .await
+        .map_err(venue_error)?;
 
     if args.json {
 
@@ -381,6 +408,111 @@ pub(crate) async fn venue_orders_command(args: VenueOrdersArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Prints the outcome of `venue-orders --cancel`, preview or confirmed.
+///
+/// Why:
+/// `--json` callers parse stdout as one document, so under `--json` nothing but
+/// that document may reach stdout; the human line still has to be visible, so
+/// it moves to stderr. Taking both writers as parameters lets a test hold the
+/// command to that split without a live session.
+
+fn write_cancel_outcome(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    order_id: i64,
+    state: &serde_json::Value,
+    submitted: bool,
+    json: bool,
+) -> Result<()> {
+
+    let human = human_cancel_line(order_id, state, submitted);
+
+    if !json {
+
+        writeln!(out, "{human}")?;
+
+        return Ok(());
+    }
+
+    // stdout carries exactly one JSON document; the prose goes to stderr.
+    writeln!(err, "{human}")?;
+
+    let document = if submitted {
+
+        serde_json::json!({
+            "action": "venue-orders --cancel",
+            "submitted": true,
+            "cancelled": state["would_cancel"].clone(),
+        })
+    } else {
+
+        state.clone()
+    };
+
+    writeln!(out, "{}", serde_json::to_string_pretty(&document)?)?;
+
+    Ok(())
+}
+
+/// The one-line human summary shared by the preview and the result.
+
+fn human_cancel_line(order_id: i64, state: &serde_json::Value, submitted: bool) -> String {
+
+    if submitted {
+
+        return format!("已取消订单 {order_id}");
+    }
+
+    match state["blocked_reason"].as_str() {
+        Some(reason) => format!("不能取消 {order_id}：{reason}"),
+
+        None => format!("将取消订单 {order_id}。确认后加上 --yes 才会真正取消。"),
+    }
+}
+
+/// Builds the `--json` document for a `venue-orders --cancel` attempt.
+///
+/// Why:
+/// The sibling library path (`seat-orders --cancel`) reports whether the
+/// cancellation can go ahead before `--yes` is passed, and an automated caller
+/// relies on that. Splitting it into a pure function keeps the shape testable
+/// without a live session.
+///
+/// How:
+/// The order is looked up in the page that was just read; an id that is not
+/// there is reported as `blocked_reason` and never sent. CGYY's status codes
+/// for a finished or cancelled order are not known from a live sample, so an
+/// order that is listed is not second-guessed here: the service decides, and
+/// its refusal reaches the caller as an error.
+
+fn venue_cancel_state(order_id: i64, orders: &[Order]) -> serde_json::Value {
+
+    let order = orders.iter().find(|order| order.id == order_id);
+
+    let blocked = order.is_none().then(|| {
+
+        format!(
+            "预约 id 无效：最近 {ORDER_PAGE_SIZE} 条预约里没有 {order_id}，请先用 venue-orders \
+             查看"
+        )
+    });
+
+    serde_json::json!({
+        "action": "venue-orders --cancel",
+        "submitted": false,
+        "would_cancel": order,
+        "cancellable": blocked.is_none(),
+        "blocked_reason": blocked,
+        // `--yes` would also be refused, so a blocked preview must not
+        // suggest it.
+        "hint": if blocked.is_none() {
+            "加上 --yes 才会真正取消"
+        } else {
+            "这条预约不能取消，加 --yes 也不会发送请求"
+        },
+    })
 }
 
 /// Prints what a reservation would book, without submitting it.
@@ -506,7 +638,18 @@ fn dash(value: &str) -> &str {
 
 mod tests {
 
-    use super::resolve_date;
+    use super::{Order, resolve_date, venue_cancel_state, write_cancel_outcome};
+
+    fn order(id: i64, status_text: &str) -> Order {
+
+        Order {
+            id,
+            status_text: Some(status_text.to_string()),
+            space_name: Some("四层中文借阅室东区".to_string()),
+            reservation_date: Some("2026-10-04".to_string()),
+            ..Default::default()
+        }
+    }
 
     #[test]
 
@@ -520,5 +663,98 @@ mod tests {
         assert!(resolve_date(Some("2026/03/10".to_string())).is_err());
 
         assert!(resolve_date(Some("明天".to_string())).is_err());
+    }
+
+    #[test]
+
+    fn a_cancellable_order_is_previewed_as_json() {
+
+        // The documented contract: a preview is `submitted: false` with the
+        // order it would act on, and `--yes` is what would actually cancel it.
+        let state = venue_cancel_state(12, &[order(12, "预约成功")]);
+
+        assert_eq!(state["action"], "venue-orders --cancel");
+
+        assert_eq!(state["submitted"], false);
+
+        assert_eq!(state["cancellable"], true);
+
+        assert!(state["blocked_reason"].is_null());
+
+        assert_eq!(state["would_cancel"]["id"], 12);
+    }
+
+    #[test]
+
+    fn an_order_not_in_the_list_is_refused_before_yes() {
+
+        let missing = venue_cancel_state(999, &[order(12, "预约成功")]);
+
+        assert_eq!(missing["cancellable"], false);
+
+        assert!(missing["blocked_reason"].is_string());
+
+        assert!(missing["would_cancel"].is_null());
+    }
+
+    /// Runs the cancel output path and checks the stdout/stderr split.
+
+    fn json_stdout(submitted: bool) -> (serde_json::Value, String) {
+
+        let state = venue_cancel_state(12, &[order(12, "预约成功")]);
+
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        write_cancel_outcome(&mut out, &mut err, 12, &state, submitted, true).expect("写入输出");
+
+        let stderr = String::from_utf8(err).expect("UTF-8");
+
+        // AGENTS.md: with --json, stdout is the document a caller parses and
+        // nothing else; the prose a human reads goes to stderr.
+        let parsed = serde_json::from_slice(&out).unwrap_or_else(|error| {
+
+            panic!(
+                "--json 的 stdout 必须是 JSON（{error}）：{}",
+                String::from_utf8_lossy(&out)
+            )
+        });
+
+        (parsed, stderr)
+    }
+
+    #[test]
+
+    fn cancel_preview_with_json_prints_only_json() {
+
+        let (preview, stderr) = json_stdout(false);
+
+        assert_eq!(preview["submitted"], false);
+
+        assert_eq!(preview["cancellable"], true);
+
+        assert_eq!(preview["would_cancel"]["id"], 12);
+
+        assert!(
+            stderr.contains("将取消订单 12"),
+            "人读提示应到 stderr：{stderr}"
+        );
+    }
+
+    #[test]
+
+    fn confirmed_cancel_with_json_prints_only_json() {
+
+        let (result, stderr) = json_stdout(true);
+
+        assert_eq!(result["action"], "venue-orders --cancel");
+
+        assert_eq!(result["submitted"], true);
+
+        assert_eq!(result["cancelled"]["id"], 12);
+
+        assert!(
+            stderr.contains("已取消订单 12"),
+            "人读提示应到 stderr：{stderr}"
+        );
     }
 }

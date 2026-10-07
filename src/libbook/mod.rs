@@ -10,6 +10,7 @@
 
 mod api;
 mod crypto;
+pub mod grid;
 
 // Public surface. The API types are named so they have a stable import path.
 // Public surface. Named so the types have a stable import path even where
