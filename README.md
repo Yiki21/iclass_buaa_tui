@@ -28,7 +28,7 @@
 
 | 平台 | 文件 |
 |---|---|
-| macOS（Apple Silicon / Intel） | `iclass_buaa_tui-macos-arm64.dmg` / `-macos-x64.dmg` |
+| macOS（Apple Silicon） | `iclass_buaa_tui-macos-arm64.dmg` |
 | Windows（x64 / ARM64） | `iclass_buaa_tui-windows-x64.exe` / `-windows-arm64.exe` |
 | Debian / Ubuntu | `iclass-buaa-tui_<version>-1_amd64.deb`（`arm64` 同理） |
 | Fedora / RHEL | `iclass_buaa_tui-<version>-1.x86_64.rpm`（`aarch64` 同理） |
@@ -43,6 +43,8 @@ macOS：打开 `.dmg`，把 `iClass BUAA TUI.app` 拖进「应用程序」。它
 ```bash
 xattr -dr com.apple.quarantine "/Applications/iClass BUAA TUI.app"
 ```
+
+只发布 Apple Silicon 版。Intel Mac 请按下面的方式从源码安装。
 
 从源码安装（工具链版本由 `rust-toolchain.toml` 固定，rustup 会自动安装）：
 

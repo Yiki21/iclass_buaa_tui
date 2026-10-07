@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 变更
+
+- **macOS 只发布 Apple Silicon 包**：不再构建 `macos-x64.dmg`，发布产物里只有 `iclass_buaa_tui-macos-arm64.dmg`。Intel Mac 无法运行 arm64 包，需要按 README 从源码安装。
+
 ### 新增
 
 - **图书馆座位平面图**：座位按接口返回的 `point_x`/`point_y` 坐标排成网格，桌子与过道的形状和官方页面一致；`hjkl`/方向键按平面图移动，`f` 跳到下一个空位。终端放不下座位号时每个座位缩成 `o`/`x` 一个字符，选中座位的编号显示在信息行。没有坐标的阅览区按座位号每行 10 个排列。`seat-map --json` 增加 `x`/`y`。
