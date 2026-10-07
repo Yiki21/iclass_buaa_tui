@@ -17,25 +17,26 @@ use serde::Serialize;
 use crate::failure::{self, Operation};
 
 /// A stable failure code plus whether retrying could help.
+///
+/// Test-only: the CLI builds its report through `failure::classify` on the
+/// whole error (see `ErrorReport::from_error`). These text helpers pin the
+/// keyword mapping in tests without constructing `anyhow` chains.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
 pub struct ErrorCode {
     pub code:      &'static str,
     pub retryable: bool,
 }
 
-/// Classifies a failure from its message.
-///
-/// How:
-/// The order matters: authentication is checked before the generic cases, since
-/// an expired session often surfaces as a transport-looking error.
+/// Classifies one message as a read or a write.
 ///
 /// Why the operation matters:
 /// A read that times out is safe to repeat. A write that times out may already
-/// have happened, so repeating it can duplicate the effect. The same text is
-/// therefore classified differently depending on whether the caller was
-/// writing, and only the caller knows which.
+/// have happened, so repeating it can duplicate the effect.
+
+#[cfg(test)]
 
 pub fn classify_for(message: &str, operation: Operation) -> ErrorCode {
 
@@ -47,11 +48,7 @@ pub fn classify_for(message: &str, operation: Operation) -> ErrorCode {
     }
 }
 
-/// Classifies a read failure.
-///
-/// Why it stays:
-/// Most callers really are reading, and this is the shorter name for that case.
-/// It is used by the tests that pin the read-side mapping.
+/// Classifies one message as a read.
 
 #[cfg(test)]
 
