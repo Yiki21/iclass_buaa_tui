@@ -134,7 +134,7 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
             Span::styled("y", theme::label_style()),
             Span::styled(" 确认    ", theme::muted_style()),
             Span::styled("enter / n / esc / q", theme::label_style()),
-            Span::styled(" 取消", theme::muted_style()),
+            Span::styled(" 返回，不做任何修改", theme::muted_style()),
         ]),
     ];
 
@@ -162,28 +162,20 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
         );
     }
 
-    // Name the seat or booking, so `y` confirms something the user can read.
+    // Name the seat, booking or item, so `y` confirms something the user can
+    // read. Each is read from the pinned target, never from a live cursor
+    // that a late refresh could have moved.
     let subject = match pending {
-        crate::app::PendingWrite::SeatBook => {
-            app.seat.seats.get(app.seat.selected_seat).map(|seat| {
-
-                let area = app
-                    .seat
-                    .detail
-                    .as_ref()
-                    .map(|detail| detail.name.clone())
-                    .unwrap_or_default();
-
-                let segment = app
-                    .seat
-                    .detail
-                    .as_ref()
-                    .and_then(|detail| detail.time_slots.first())
-                    .map(|slot| slot.label.clone())
-                    .unwrap_or_default();
-
-                format!("  {area}  座位 {}  {}  {segment}", seat.no, app.seat.date)
-            })
+        crate::app::PendingWrite::SeatBook {
+            seat_no,
+            area_name,
+            segment_label,
+            date,
+            ..
+        } => {
+            Some(format!(
+                "  {area_name}  座位 {seat_no}  {date}  {segment_label}"
+            ))
         }
         crate::app::PendingWrite::SeatCancel(id) => {
             app.seat
@@ -199,6 +191,14 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
                         booking_span(booking)
                     )
                 })
+        }
+        crate::app::PendingWrite::ClockinSubmit {
+            classify_name,
+            item,
+            ..
+        } => Some(format!("  {classify_name}  {}", item.name)),
+        crate::app::PendingWrite::EvalSubmitAll(rwids) => {
+            Some(format!("  共 {} 门课程", rwids.len()))
         }
         _ => None,
     };
@@ -1898,10 +1898,14 @@ fn render_seat(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_seat_map(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
 
-    render_key_hint(
+    render_key_hints(
         frame,
         footer,
-        "hjkl/方向键 移动  f 下一个空位  enter 预约（需确认）  r 刷新  B 我的预约  b 返回",
+        &[
+            "hjkl/方向键 移动  f 下一个空位  enter 预约（需确认）  r 刷新  B 我的预约  b 返回",
+            "hjkl/方向键 移动  f 下一个空位  enter 预约  r 刷新  B 我的预约  b 返回",
+            "hjkl 移动  f 空位  enter 预约  B 我的预约  b 返回",
+        ],
     );
 
     let seats = &app.seat.seats;
@@ -1944,9 +1948,12 @@ fn render_seat_map(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
     // One column of margin on the left, one gap after every cell.
     let usable = map.width.saturating_sub(1) as usize;
 
-    let numbered = grid.cols * (label_width + 1) <= usable;
+    // A numbered cell is a one-column marker (`x` for a seat that cannot be
+    // booked, blank otherwise), the seat number, and a gap: availability must
+    // not depend on colour alone.
+    let numbered = grid.cols * (label_width + 2) <= usable;
 
-    let cell_width = if numbered { label_width + 1 } else { 2 };
+    let cell_width = if numbered { label_width + 2 } else { 2 };
 
     let visible_cols = (usable / cell_width).clamp(1, grid.cols);
 
@@ -1988,7 +1995,9 @@ fn render_seat_map(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
 
             let text = if numbered {
 
-                pad_cell(&seat.no, label_width)
+                let marker = if seat.is_available { ' ' } else { 'x' };
+
+                format!("{marker}{}", pad_cell(&seat.no, label_width))
             } else if seat.is_available {
 
                 "o".to_string()
@@ -2061,7 +2070,7 @@ fn render_seat_map(frame: &mut Frame, body: Rect, footer: Rect, app: &App) {
 
         spans.push(Span::styled(" 可预约  ", theme::muted_style()));
 
-        spans.push(Span::styled("灰色 不可预约", theme::muted_style()));
+        spans.push(Span::styled("x+座号 不可预约", theme::muted_style()));
     } else {
 
         spans.push(Span::styled("o", Style::default().fg(theme::OK)));
@@ -2164,6 +2173,35 @@ fn render_seat_bookings(frame: &mut Frame, body: Rect, footer: Rect, app: &App) 
         )]
     } else {
 
+        let status_of = |booking: &crate::libbook::Booking| {
+            if booking.status_name.is_empty() {
+
+                if booking.is_active() {
+
+                    "有效"
+                } else {
+
+                    "已结束"
+                }
+                .to_string()
+            } else {
+
+                booking.status_name.clone()
+            }
+        };
+
+        // The status column is as wide as its widest value, so a
+        // four-character status such as 预约成功 is never cut, and a fixed
+        // gap always separates it from the date.
+        let status_width = bookings
+            .iter()
+            .map(|booking| display_width(&status_of(booking)))
+            .max()
+            .unwrap_or(0)
+            .clamp(6, 12);
+
+        let row_width = body.width as usize;
+
         bookings
             .iter()
             .enumerate()
@@ -2171,13 +2209,7 @@ fn render_seat_bookings(frame: &mut Frame, body: Rect, footer: Rect, app: &App) 
 
                 let active = booking.is_active();
 
-                let status = if booking.status_name.is_empty() {
-
-                    if active { "有效" } else { "已结束" }.to_string()
-                } else {
-
-                    booking.status_name.clone()
-                };
+                let status = status_of(booking);
 
                 let (status_style, text_style) = if active {
 
@@ -2187,13 +2219,37 @@ fn render_seat_bookings(frame: &mut Frame, body: Rect, footer: Rect, app: &App) 
                     (theme::muted_style(), theme::muted_style())
                 };
 
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::raw(" "),
-                    Span::styled(pad_cell(&status, 8), status_style),
+                    Span::styled(pad_cell(&status, status_width), status_style),
+                    Span::raw("  "),
                     Span::styled(pad_cell(&booking_span(booking), 24), text_style),
-                    Span::styled(booking.area_name.clone(), text_style),
-                    Span::styled(format!("  座位 {}", booking.seat_no), text_style),
-                ]);
+                ];
+
+                // The seat number comes before the long area name, and each
+                // is shown whole or not at all: a number cut by the frame
+                // edge (103 shown as 10) would point at the wrong seat.
+                let mut used = 1 + status_width + 2 + 24;
+
+                let seat = format!("座位 {}", booking.seat_no);
+
+                if used + display_width(&seat) <= row_width {
+
+                    used += display_width(&seat);
+
+                    spans.push(Span::styled(seat, text_style));
+
+                    let room = row_width.saturating_sub(used + 2);
+
+                    if room >= 4 && !booking.area_name.is_empty() {
+
+                        spans.push(Span::raw("  "));
+
+                        spans.push(Span::styled(truncate(&booking.area_name, room), text_style));
+                    }
+                }
+
+                let line = Line::from(spans);
 
                 let item = ListItem::new(line);
 
@@ -2801,6 +2857,28 @@ fn render_selectable_rows(
 /// Key hint row at the bottom of a content view.
 
 fn render_key_hint(frame: &mut Frame, area: Rect, hint: &str) {
+
+    render_key_hints(frame, area, &[hint]);
+}
+
+/// Key hint row that picks the longest variant fitting the width.
+///
+/// Why:
+/// A hint cut by the frame edge reads as complete: `b 返回` clipped to `b`
+/// leaves a key with no meaning. Hints are given from longest to shortest;
+/// the first that fits is drawn, and if none does the shortest is truncated
+/// with an ellipsis so the cut is visible.
+
+fn render_key_hints(frame: &mut Frame, area: Rect, hints: &[&str]) {
+
+    // One leading space of margin.
+    let budget = (area.width as usize).saturating_sub(1);
+
+    let hint = hints
+        .iter()
+        .find(|hint| display_width(hint) <= budget)
+        .map(|hint| (*hint).to_string())
+        .unwrap_or_else(|| truncate(hints.last().copied().unwrap_or_default(), budget));
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -6561,6 +6639,258 @@ mod tests {
         assert!(out.contains("x取消预约"), "{out}");
     }
 
+    /// Renders the workspace one row per line, keeping real spaces and
+    /// dropping the filler cell a wide glyph leaves behind.
+    ///
+    /// Why:
+    /// The padding between columns is itself under test, so it cannot be
+    /// stripped as the other helpers do; the invisible second cell of a CJK
+    /// glyph has to go, or no two-character Chinese string matches.
+
+    fn render_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+
+        let backend = TestBackend::new(width, height);
+
+        let mut terminal = Terminal::new(backend).expect("终端应可创建");
+
+        terminal
+            .draw(|frame| render_workspace(frame, app))
+            .expect("应可渲染");
+
+        let buffer = terminal.backend().buffer().clone();
+
+        (0..buffer.area.height)
+            .map(|y| {
+
+                let mut row = String::new();
+
+                let mut x = 0;
+
+                while x < buffer.area.width {
+
+                    let symbol = buffer[(x, y)].symbol();
+
+                    row.push_str(symbol);
+
+                    x += display_width(symbol).max(1) as u16;
+                }
+
+                row
+            })
+            .collect()
+    }
+
+    fn bookings_app(rows: &[(&str, &str)]) -> App {
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Seat;
+
+        app.seat.show_bookings = true;
+
+        app.seat.bookings_loaded = true;
+
+        app.seat.bookings = rows
+            .iter()
+            .map(|(status, name)| {
+
+                crate::libbook::Booking {
+                    id: format!("id{status}"),
+                    area_name: "学院路校区图书馆/一楼/一层西阅学空间".to_string(),
+                    seat_no: "103".to_string(),
+                    day: "2026-10-04".to_string(),
+                    begin_time: "2026-10-04 22:03:00".to_string(),
+                    end_time: "2026-10-04 23:00:00".to_string(),
+                    status: "1".to_string(),
+                    status_name: (*name).to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        app
+    }
+
+    #[test]
+
+    fn a_four_character_status_never_touches_the_date() {
+
+        // A 4-CJK status is exactly as wide as the old 8-cell column, so the
+        // date used to run straight into it: 预约成功2026-10-04.
+        let statuses = ["使用中", "预约成功", "用户取消", "临时离开", "已结束"];
+
+        let app = bookings_app(
+            &statuses
+                .iter()
+                .map(|status| (*status, *status))
+                .collect::<Vec<_>>(),
+        );
+
+        let rows = render_rows(&app, 140, 24);
+
+        for status in statuses {
+
+            let row = rows
+                .iter()
+                .find(|row| row.contains(status))
+                .unwrap_or_else(|| {
+
+                    panic!(
+                        "应画出 {status}：
+{}",
+                        rows.join(
+                            "
+"
+                        )
+                    )
+                });
+
+            let status_end = row.find(status).expect("状态应在行内") + status.len();
+
+            let date_at = row.find("2026-10-04").unwrap_or_else(|| {
+
+                panic!(
+                    "{status} 行应显示日期：
+{row}"
+                )
+            });
+
+            assert!(
+                date_at >= status_end + 2,
+                "{status} 与日期之间应留出空白：
+{row}"
+            );
+        }
+    }
+
+    #[test]
+
+    fn bookings_rows_are_complete_or_absent_never_cut() {
+
+        // At 80 columns the seat number used to be clipped to `座位 10`.
+        let app = bookings_app(&[("已结束", "已结束")]);
+
+        for width in [80u16, 100, 140] {
+
+            let rows = render_rows(&app, width, 24);
+
+            let row = rows
+                .iter()
+                .find(|row| row.contains("已结束"))
+                .unwrap_or_else(|| panic!("{width} 列时应画出预约行：\n{}", rows.join("\n")));
+
+            assert!(
+                row.contains("座位 103 "),
+                "{width} 列时座位号应完整显示：\n{row}"
+            );
+
+            // Whatever does not fit is cut with an ellipsis, not by the frame.
+            assert!(
+                row.contains("一层西阅学空间") || row.contains('…'),
+                "{width} 列时阅览区名应完整或带省略号：\n{row}"
+            );
+        }
+    }
+
+    #[test]
+
+    fn the_seat_map_footer_hint_is_not_cut_mid_phrase() {
+
+        let seats = vec![plan_seat("101", 10.0, 10.0, true)];
+
+        let app = seat_app(seats);
+
+        for width in [80u16, 100, 140] {
+
+            let rows = render_rows(&app, width, 24);
+
+            let hint = rows
+                .iter()
+                .find(|row| row.contains("hjkl"))
+                .unwrap_or_else(|| {
+
+                    panic!(
+                        "{width} 列时应有按键提示：
+{}",
+                        rows.join(
+                            "
+"
+                        )
+                    )
+                });
+
+            assert!(
+                hint.contains("b 返回"),
+                "{width} 列时返回键提示不应被截断：{hint}"
+            );
+        }
+    }
+
+    #[test]
+
+    fn the_numbered_seat_map_marks_taken_seats_without_colour() {
+
+        // No coordinates: the map falls back to numbered rows, where the only
+        // cue used to be colour.
+        let app = seat_app(vec![
+            crate::libbook::Seat {
+                id: "id101".to_string(),
+                no: "101".to_string(),
+                is_available: true,
+                ..Default::default()
+            },
+            crate::libbook::Seat {
+                id: "id102".to_string(),
+                no: "102".to_string(),
+                is_available: false,
+                status_name: "使用中".to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        let rows = render_rows(&app, 100, 24);
+
+        let row = rows
+            .iter()
+            .find(|row| row.contains("102"))
+            .unwrap_or_else(|| {
+
+                panic!(
+                    "应画出座位号：
+{}",
+                    rows.join(
+                        "
+"
+                    )
+                )
+            });
+
+        assert!(
+            row.contains("x102"),
+            "不可预约的座位应带非颜色标记：
+{row}"
+        );
+
+        assert!(
+            !row.contains("x101") && row.contains(" 101"),
+            "可预约的座位不应带该标记：
+{row}"
+        );
+
+        let legend = rows
+            .iter()
+            .find(|row| row.contains("不可预约"))
+            .expect("应有图例");
+
+        assert!(
+            legend.contains("x") && legend.contains("座号"),
+            "图例应用文字说明标记：
+{legend}"
+        );
+    }
+
     #[test]
 
     fn follow_scrolls_only_when_the_selection_leaves_the_window() {
@@ -6619,6 +6949,206 @@ mod tests {
         assert!(out.contains("取消"), "应列出取消键：\n{out}");
     }
 
+    /// Renders only the confirmation dialog, so the map or list behind it
+    /// cannot satisfy an assertion meant for the dialog.
+
+    fn render_dialog(app: &App) -> Vec<String> {
+
+        let backend = TestBackend::new(120, 34);
+
+        let mut terminal = Terminal::new(backend).expect("终端应可创建");
+
+        terminal
+            .draw(|frame| render_confirm_popup(frame, app))
+            .expect("应可渲染");
+
+        let buffer = terminal.backend().buffer().clone();
+
+        (0..buffer.area.height)
+            .map(|y| {
+
+                let mut row = String::new();
+
+                let mut x = 0;
+
+                while x < buffer.area.width {
+
+                    let symbol = buffer[(x, y)].symbol();
+
+                    row.push_str(symbol);
+
+                    x += display_width(symbol).max(1) as u16;
+                }
+
+                row
+            })
+            .collect()
+    }
+
+    fn free_seat(no: &str, x: f64) -> crate::libbook::Seat {
+
+        plan_seat(no, x, 10.0, true)
+    }
+
+    #[test]
+
+    fn seat_book_dialog_still_names_its_seat_after_a_late_seat_list() {
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Seat;
+
+        app.handle_async(
+            crate::app::AsyncEvent::SeatSeats(Ok(vec![
+                free_seat("101", 10.0),
+                free_seat("102", 12.0),
+            ])),
+            &tx,
+        );
+
+        app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &tx,
+        );
+
+        assert!(app.pending_write().is_some(), "回车应打开确认弹窗");
+
+        let before = render_dialog(&app).join("\n");
+
+        assert!(before.contains("座位 101"), "弹窗应写明座位：\n{before}");
+
+        // A late seat list (an earlier request for another area answering
+        // now) lands under the open dialog, without seat 101 in it at all.
+        app.handle_async(
+            crate::app::AsyncEvent::SeatSeats(Ok(vec![
+                free_seat("201", 10.0),
+                free_seat("202", 12.0),
+            ])),
+            &tx,
+        );
+
+        let after = render_dialog(&app).join("\n");
+
+        assert!(
+            after.contains("座位 101") && !after.contains("座位 201"),
+            "弹窗写明的座位不应随刷新改变：\n{after}"
+        );
+    }
+
+    #[test]
+
+    fn dialog_dismiss_keys_are_not_labelled_as_cancelling() {
+
+        // In 确认取消这条座位预约？ a key labelled 取消 reads as "do the cancel".
+        for pending in [
+            crate::app::PendingWrite::SeatCancel("7".into()),
+            crate::app::PendingWrite::VenueCancel(7),
+        ] {
+
+            let mut app = App::default();
+
+            app.screen = Screen::Workspace;
+
+            if matches!(pending, crate::app::PendingWrite::VenueCancel(_)) {
+
+                app.active_tab = WorkspaceTab::Venue;
+
+                app.venue.pending = Some(pending.clone());
+            } else {
+
+                app.active_tab = WorkspaceTab::Seat;
+
+                app.seat.pending = Some(pending.clone());
+            }
+
+            let rows = render_dialog(&app);
+
+            let keys = rows
+                .iter()
+                .find(|row| row.contains("y 确认"))
+                .unwrap_or_else(|| panic!("{pending:?} 应列出按键：\n{}", rows.join("\n")));
+
+            assert!(
+                !keys.contains("取消"),
+                "{pending:?} 的关闭键不应标为取消：\n{keys}"
+            );
+
+            assert!(
+                keys.contains("不做任何修改"),
+                "{pending:?} 应说明关闭不会修改：\n{keys}"
+            );
+        }
+    }
+
+    #[test]
+
+    fn clockin_dialog_names_the_item_it_will_submit_even_after_a_reload() {
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        app.screen = Screen::Workspace;
+
+        app.active_tab = WorkspaceTab::Clockin;
+
+        let item = |id: i64, name: &str| {
+
+            crate::ygdk::Item {
+                id,
+                name: name.to_string(),
+            }
+        };
+
+        app.clockin.overview = Some(crate::app::ClockinOverview {
+            classifies:    vec![crate::ygdk::Classify {
+                id: 1,
+                name: "体育锻炼".to_string(),
+                ..Default::default()
+            }],
+            selected:      0,
+            selected_item: 1,
+            count:         Default::default(),
+            items:         vec![item(10, "跑步"), item(11, "游泳")],
+        });
+
+        app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('s'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &tx,
+        );
+
+        assert!(app.pending_write().is_some(), "s 应打开确认弹窗");
+
+        // A category reload lands under the dialog and resets the item cursor.
+        app.handle_async(
+            crate::app::AsyncEvent::ClockinOverview(Ok(crate::app::ClockinOverview {
+                classifies:    Vec::new(),
+                selected:      0,
+                selected_item: 0,
+                count:         Default::default(),
+                items:         vec![item(10, "跑步"), item(11, "游泳")],
+            })),
+            &tx,
+        );
+
+        let out = render_dialog(&app).join("\n");
+
+        assert!(
+            out.contains("游泳") && !out.contains("跑步"),
+            "打卡弹窗应写明并锁定所选项目：\n{out}"
+        );
+    }
+
     #[test]
 
     fn evaluation_confirm_says_it_answers_in_your_name() {
@@ -6629,7 +7159,7 @@ mod tests {
 
         app.active_tab = WorkspaceTab::Eval;
 
-        app.eval.pending = Some(crate::app::PendingWrite::EvalSubmitAll);
+        app.eval.pending = Some(crate::app::PendingWrite::EvalSubmitAll(vec!["a".into()]));
 
         let out = render_text(120, 34, |frame| render(frame, &app));
 

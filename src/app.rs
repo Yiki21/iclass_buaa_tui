@@ -80,6 +80,11 @@ pub enum AsyncEvent {
     /// A seat cancellation finished. On success it carries the message and
     /// the booking list read back after the cancel.
     SeatCancelled(Result<(String, Vec<crate::libbook::Booking>), String>),
+    /// A seat booking finished, for the seat the dialog named.
+    SeatBooked {
+        seat_id: String,
+        result:  Result<String, String>,
+    },
     ClockinOverview(Result<ClockinOverview, String>),
     ClockinRecords(Result<Vec<crate::ygdk::Record>, String>),
     EvalTasks(Result<Vec<crate::evaluation::EvaluationTask>, String>),
@@ -1015,6 +1020,9 @@ pub struct SeatState {
     /// Showing the seats of the selected area; takes precedence over areas.
     pub show_seats:       bool,
     pub pending:          Option<PendingWrite>,
+    /// Outcome of the last booking, repeated when the seat reload it started
+    /// lands, so the reload's own message does not bury it.
+    pub write_note:       Option<(EventLevel, String)>,
 }
 
 /// Clock-in tab state.
@@ -1062,14 +1070,32 @@ pub enum PendingWrite {
     VenueReserve,
     /// Cancel one of the caller's room bookings.
     VenueCancel(i64),
-    /// Reserve the selected seat.
-    SeatBook,
+    /// Reserve the seat named in the dialog.
+    ///
+    /// Why pinned:
+    /// A seat list that arrives while the dialog is open rebuilds the map and
+    /// moves the cursor. Re-reading the cursor at submit time would book a
+    /// seat the dialog never named, so the target is frozen when asked.
+    SeatBook {
+        seat_id:       String,
+        seat_no:       String,
+        area_name:     String,
+        segment_id:    String,
+        segment_label: String,
+        date:          String,
+    },
     /// Cancel one of the caller's seat bookings.
     SeatCancel(String),
-    /// Submit a clock-in for the selected item.
-    ClockinSubmit,
-    /// Submit the evaluation for every unevaluated course.
-    EvalSubmitAll,
+    /// Submit a clock-in for the item named in the dialog, pinned like
+    /// `SeatBook` because a late category reload resets the item cursor.
+    ClockinSubmit {
+        classify_id:   i64,
+        classify_name: String,
+        item:          crate::ygdk::Item,
+    },
+    /// Submit the evaluation for the courses that were unevaluated when the
+    /// dialog opened, by task id.
+    EvalSubmitAll(Vec<String>),
     /// Submit the evaluation for the selected course.
     EvalSubmitOne(String),
 }
@@ -1082,13 +1108,13 @@ impl PendingWrite {
         match self {
             Self::VenueReserve => "确认预约这间研讨室？预约成功后会占用真实房间。",
             Self::VenueCancel(_) => "确认取消这条研讨室预约？",
-            Self::SeatBook => "确认预约这个座位？预约成功后会占用真实座位。",
+            Self::SeatBook { .. } => "确认预约这个座位？预约成功后会占用真实座位。",
             Self::SeatCancel(_) => "确认取消这条座位预约？",
-            Self::ClockinSubmit => {
+            Self::ClockinSubmit { .. } => {
                 "确认随机打卡？将为所选项目写入一条真实体育记录（近三天 08-22 \
                  点内随机一小时，地点操场）。"
             }
-            Self::EvalSubmitAll => "确认提交全部未评课程的评教？将以你的名义作答，且无法撤销。",
+            Self::EvalSubmitAll(_) => "确认提交全部未评课程的评教？将以你的名义作答，且无法撤销。",
             Self::EvalSubmitOne(_) => "确认提交这门课的评教？将以你的名义作答，且无法撤销。",
         }
     }
@@ -1101,12 +1127,31 @@ impl PendingWrite {
     pub fn detail(&self) -> &'static str {
 
         match self {
-            Self::VenueReserve | Self::SeatBook => "此操作不可撤销；如需撤回请在列表里取消。",
+            Self::VenueReserve | Self::SeatBook { .. } => {
+                "此操作不可撤销；如需撤回请在列表里取消。"
+            }
             Self::VenueCancel(_) | Self::SeatCancel(_) => "取消后该时段会释放给其他人。",
-            Self::ClockinSubmit => "打卡记录无法删除；照片为自动生成的纯色占位图。",
-            Self::EvalSubmitAll | Self::EvalSubmitOne(_) => {
+            Self::ClockinSubmit { .. } => "打卡记录无法删除；照片为自动生成的纯色占位图。",
+            Self::EvalSubmitAll(_) | Self::EvalSubmitOne(_) => {
                 "评教结果不可撤销；提交前请确认题目与选项。"
             }
+        }
+    }
+
+    /// Status shown when the dialog is dismissed without confirming.
+    ///
+    /// Why not "已取消":
+    /// In a dialog whose action is itself a cancellation, "已取消" reads as
+    /// the cancellation having happened. The message names what did not
+    /// happen and says nothing changed.
+
+    pub fn dismissed(&self) -> &'static str {
+
+        match self {
+            Self::VenueReserve | Self::SeatBook { .. } => "未提交预约，没有做任何修改",
+            Self::VenueCancel(_) | Self::SeatCancel(_) => "未取消预约，预约保持不变",
+            Self::ClockinSubmit { .. } => "未提交打卡，没有做任何修改",
+            Self::EvalSubmitAll(_) | Self::EvalSubmitOne(_) => "未提交评教，没有做任何修改",
         }
     }
 }
@@ -1546,9 +1591,13 @@ impl App {
                 KeyCode::Char('y') => self.confirm_pending_write(tx),
                 KeyCode::Enter | KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
 
+                    let message = self
+                        .pending_write()
+                        .map_or("没有做任何修改", PendingWrite::dismissed);
+
                     self.cancel_pending_write();
 
-                    self.info("已取消");
+                    self.info(message);
                 }
                 _ => {}
             }
@@ -2722,8 +2771,13 @@ impl App {
                 }
             }
             AsyncEvent::SeatDetail(result) => {
+
                 match result {
                     Ok(detail) => {
+
+                        // Another area was chosen; a booking note belongs to
+                        // the area it was made in.
+                        self.seat.write_note = None;
 
                         self.seat.detail = Some(detail);
 
@@ -2741,28 +2795,65 @@ impl App {
 
                         self.seat.grid = crate::libbook::grid::SeatGrid::build(&seats);
 
-                        // Start on the first free seat, so enter books
-                        // something rather than tripping on a taken one.
-                        self.seat.selected_seat = self
+                        // A reload of the same area (after a booking, or `r`)
+                        // keeps the cursor on the seat it was on.
+                        let kept = self
                             .seat
-                            .grid
-                            .reading_order()
-                            .find(|&index| seats[index].is_available)
-                            .or_else(|| self.seat.grid.reading_order().next())
-                            .unwrap_or(0);
+                            .seats
+                            .get(self.seat.selected_seat)
+                            .filter(|seat| !seat.id.is_empty())
+                            .and_then(|current| {
 
-                        self.seat.map_offset.set((0, 0));
+                                seats.iter().position(|seat| seat.id == current.id)
+                            });
+
+                        if let Some(index) = kept {
+
+                            self.seat.selected_seat = index;
+                        } else {
+
+                            // Start on the first free seat, so enter books
+                            // something rather than tripping on a taken one.
+                            self.seat.selected_seat = self
+                                .seat
+                                .grid
+                                .reading_order()
+                                .find(|&index| seats[index].is_available)
+                                .or_else(|| self.seat.grid.reading_order().next())
+                                .unwrap_or(0);
+
+                            self.seat.map_offset.set((0, 0));
+                        }
 
                         self.seat.seats = seats;
 
                         self.seat.show_seats = true;
 
-                        self.success(format!(
-                            "已载入 {} 个座位，其中 {available} 个可选",
-                            self.seat.seats.len()
-                        ));
+                        // After a booking, its outcome stays the headline;
+                        // the reload only confirms the map is current.
+                        match self.seat.write_note.take() {
+                            Some((level, note)) => {
+
+                                self.set_status_with_level(
+                                    level,
+                                    format!("{note}；座位图已刷新，{available} 个可选"),
+                                );
+                            }
+                            None => {
+
+                                self.success(format!(
+                                    "已载入 {} 个座位，其中 {available} 个可选",
+                                    self.seat.seats.len()
+                                ));
+                            }
+                        }
                     }
-                    Err(error) => self.error(format!("座位加载失败: {error}")),
+                    Err(error) => {
+
+                        self.seat.write_note = None;
+
+                        self.error(format!("座位加载失败: {error}"));
+                    }
                 }
             }
             AsyncEvent::SeatBookings(result) => {
@@ -2807,6 +2898,57 @@ impl App {
 
                         self.load_seat_bookings(tx);
                     }
+                }
+            }
+            AsyncEvent::SeatBooked { seat_id, result } => {
+
+                self.write_in_flight = false;
+
+                // The list may now hold the new booking either way.
+                self.seat.bookings_loaded = false;
+
+                let (level, message) = match result {
+                    Ok(message) => {
+
+                        // Mark the seat at once, so the map and the free
+                        // count stop offering it before the reload lands.
+                        if let Some(seat) =
+                            self.seat.seats.iter_mut().find(|seat| seat.id == seat_id)
+                        {
+
+                            seat.is_available = false;
+
+                            seat.status_name = "已预约".to_string();
+                        }
+
+                        (EventLevel::Success, message)
+                    }
+                    Err(error) => (EventLevel::Error, error),
+                };
+
+                self.set_status_with_level(level, message.clone());
+
+                // The write may have happened even on an error, so the map is
+                // read back while the user is still looking at that area.
+                let on_area =
+                    self.seat.show_seats && self.seat.seats.iter().any(|seat| seat.id == seat_id);
+
+                let can_reload = self
+                    .seat
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| !detail.time_slots.is_empty());
+
+                if on_area && can_reload {
+
+                    self.seat.write_note = Some((level, message));
+
+                    self.load_seat_seats(tx);
+                } else if self.seat.show_bookings && !self.seat.bookings_loading {
+
+                    // The bookings view is the one that shows this write, so
+                    // its cache is refreshed now rather than on the next `B`.
+                    self.load_seat_bookings(tx);
                 }
             }
             AsyncEvent::ClockinOverview(result) => {
@@ -3418,10 +3560,7 @@ impl App {
             // submission reviewable before it happens.
             KeyCode::Enter | KeyCode::Char('o') => self.load_eval_questionnaire(tx),
             KeyCode::Char('s') => self.request_eval_submit(),
-            KeyCode::Char('S') => {
-
-                self.eval.pending = Some(PendingWrite::EvalSubmitAll);
-            }
+            KeyCode::Char('S') => self.request_eval_submit_all(),
             _ => {}
         }
     }
@@ -3595,7 +3734,37 @@ impl App {
             return;
         }
 
-        self.seat.pending = Some(PendingWrite::SeatBook);
+        // Pin the seat now: a seat list that arrives while the dialog is open
+        // rebuilds the map and moves the cursor, and the write must land on
+        // the seat the dialog named.
+        let seat_id = seat.id.clone();
+
+        let seat_no = seat.no.clone();
+
+        let (area_name, segment_id, segment_label) = match self.seat.detail.as_ref() {
+            Some(detail) => {
+
+                let segment = detail.time_slots.first();
+
+                (
+                    detail.name.clone(),
+                    segment.map(|slot| slot.id.clone()).unwrap_or_default(),
+                    segment.map(|slot| slot.label.clone()).unwrap_or_default(),
+                )
+            }
+            None => (String::new(), String::new(), String::new()),
+        };
+
+        let date = self.seat.date.clone();
+
+        self.seat.pending = Some(PendingWrite::SeatBook {
+            seat_id,
+            seat_no,
+            area_name,
+            segment_id,
+            segment_label,
+            date,
+        });
     }
 
     /// Asks to cancel the booking selected in the bookings view.
@@ -3634,16 +3803,62 @@ impl App {
             return;
         };
 
-        if overview.items.is_empty() {
+        let Some(classify) = overview.classifies.get(overview.selected) else {
+
+            self.warn("没有可用的打卡类别");
+
+            return;
+        };
+
+        let Some(item) = overview.items.get(overview.selected_item).cloned() else {
 
             self.warn("该类别没有可打卡项目");
 
             return;
+        };
+
+        // Pin the category and item now: a category switch that lands while
+        // the dialog is open replaces `items`, and the record must be written
+        // for the item the dialog named.
+        self.clockin.pending = Some(PendingWrite::ClockinSubmit {
+            classify_id: classify.id,
+            classify_name: classify.name.clone(),
+            item,
+        });
+    }
+
+    /// Asks for confirmation before submitting every unevaluated evaluation.
+    ///
+    /// Why gather the ids now:
+    /// A refresh that lands while the dialog is open can add courses to the
+    /// list; the dialog names a count, and the submission must answer exactly
+    /// those courses.
+
+    fn request_eval_submit_all(&mut self) {
+
+        if self.eval.submitting {
+
+            self.warn("评教正在提交，请等待结果，勿重复操作");
+
+            return;
         }
 
-        // The dialog states the random window and generated image before
-        // anything is sent; a choice of photo or time stays with the CLI.
-        self.clockin.pending = Some(PendingWrite::ClockinSubmit);
+        let rwids: Vec<String> = self
+            .eval
+            .tasks
+            .iter()
+            .filter(|task| !task.evaluated)
+            .map(|task| task.rwid.clone())
+            .collect();
+
+        if rwids.is_empty() {
+
+            self.warn("没有待评教课程");
+
+            return;
+        }
+
+        self.eval.pending = Some(PendingWrite::EvalSubmitAll(rwids));
     }
 
     fn request_eval_submit(&mut self) {
@@ -3688,11 +3903,19 @@ impl App {
         match pending {
             PendingWrite::VenueReserve => self.submit_venue_reserve(tx),
             PendingWrite::VenueCancel(id) => self.submit_venue_cancel(id, tx),
-            PendingWrite::SeatBook => self.submit_seat_book(tx),
+            PendingWrite::SeatBook {
+                seat_id,
+                seat_no,
+                segment_id,
+                date,
+                ..
+            } => self.submit_seat_book(seat_id, seat_no, segment_id, date, tx),
             PendingWrite::SeatCancel(id) => self.submit_seat_cancel(id, tx),
-            PendingWrite::ClockinSubmit => self.submit_clockin(tx),
+            PendingWrite::ClockinSubmit {
+                classify_id, item, ..
+            } => self.submit_clockin(classify_id, item, tx),
             PendingWrite::EvalSubmitOne(rwid) => self.submit_eval(rwid, tx),
-            PendingWrite::EvalSubmitAll => self.submit_eval_all(tx),
+            PendingWrite::EvalSubmitAll(rwids) => self.submit_eval_all(rwids, tx),
         }
     }
 
@@ -4848,38 +5071,29 @@ impl App {
 
     /// Submits the seat reservation after confirmation.
 
-    fn submit_seat_book(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+    fn submit_seat_book(
+        &mut self,
+        seat_id: String,
+        seat_no: String,
+        segment_id: String,
+        date: String,
+        tx: &UnboundedSender<AsyncEvent>,
+    ) {
 
-        let Some(seat) = self.seat.seats.get(self.seat.selected_seat) else {
-
-            return;
-        };
-
-        let seat_id = seat.id.clone();
-
-        let seat_no = seat.no.clone();
-
-        let Some(detail) = self.seat.detail.clone() else {
-
-            return;
-        };
-
-        let Some(segment) = detail.time_slots.first() else {
+        if segment_id.is_empty() {
 
             self.warn("该阅览区没有可预约时段");
 
             return;
-        };
-
-        let segment_id = segment.id.clone();
-
-        let date = self.seat.date.clone();
+        }
 
         // Whatever the outcome, the list may now hold a new booking, so the
         // next `B` reads it again instead of showing the cached one.
         self.seat.bookings_loaded = false;
 
         let tx = tx.clone();
+
+        let booked = seat_id.clone();
 
         self.write_in_flight = self.spawn_authenticated_write(
             move |session| {
@@ -4912,7 +5126,13 @@ impl App {
                 }
             },
             tx,
-            AsyncEvent::Write,
+            move |result| {
+
+                AsyncEvent::SeatBooked {
+                    seat_id: booked.clone(),
+                    result,
+                }
+            },
         );
     }
 
@@ -5118,30 +5338,12 @@ impl App {
     /// photo. The confirmation dialog states all of this before anything is
     /// sent.
 
-    fn submit_clockin(&mut self, tx: &UnboundedSender<AsyncEvent>) {
-
-        let Some(overview) = self.clockin.overview.as_ref() else {
-
-            self.warn("请先按 r 载入打卡类别");
-
-            return;
-        };
-
-        let Some(classify) = overview.classifies.get(overview.selected) else {
-
-            self.warn("没有可用的打卡类别");
-
-            return;
-        };
-
-        let Some(item) = overview.items.get(overview.selected_item).cloned() else {
-
-            self.warn("该类别没有可打卡项目");
-
-            return;
-        };
-
-        let classify_id = classify.id;
+    fn submit_clockin(
+        &mut self,
+        classify_id: i64,
+        item: crate::ygdk::Item,
+        tx: &UnboundedSender<AsyncEvent>,
+    ) {
 
         let tx = tx.clone();
 
@@ -5287,7 +5489,7 @@ impl App {
 
     /// Submits every unevaluated course.
 
-    fn submit_eval_all(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+    fn submit_eval_all(&mut self, rwids: Vec<String>, tx: &UnboundedSender<AsyncEvent>) {
 
         if self.eval.submitting || self.session.is_none() {
 
@@ -5300,7 +5502,7 @@ impl App {
             .eval
             .tasks
             .iter()
-            .filter(|task| !task.evaluated)
+            .filter(|task| !task.evaluated && rwids.iter().any(|rwid| rwid == &task.rwid))
             .cloned()
             .collect();
 
@@ -7284,8 +7486,253 @@ mod tests {
 
         assert!(matches!(
             app.seat.pending,
-            Some(super::PendingWrite::SeatBook)
+            Some(super::PendingWrite::SeatBook { ref seat_no, .. }) if seat_no == "4"
         ));
+    }
+
+    #[test]
+
+    fn seat_book_dialog_keeps_the_seat_it_named_when_the_map_changes() {
+
+        use crossterm::event::KeyCode;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        app.screen = crate::app::Screen::Workspace;
+
+        app.active_tab = crate::app::WorkspaceTab::Seat;
+
+        // Two free seats; the cursor opens on 101, the first in reading order.
+        app.handle_async(
+            AsyncEvent::SeatSeats(Ok(vec![
+                seat("101", 10.0, 10.0, true),
+                seat("102", 12.0, 10.0, false),
+                seat("103", 14.0, 10.0, true),
+            ])),
+            &tx,
+        );
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].id, "id101");
+
+        app.seat.detail = Some(crate::libbook::AreaDetail {
+            id:              "area-9".to_string(),
+            name:            "一层西阅学空间".to_string(),
+            available_dates: Vec::new(),
+            time_slots:      vec![crate::libbook::TimeSlot {
+                id:    "seg-3".to_string(),
+                start: "2026-10-07 08:00:00".to_string(),
+                end:   "2026-10-07 23:00:00".to_string(),
+                label: "08:00-23:00".to_string(),
+            }],
+        });
+
+        app.seat.date = "2026-10-07".to_string();
+
+        app.handle_seat_key(key(KeyCode::Enter), &tx);
+
+        let named = matches!(
+            app.pending_write(),
+            Some(super::PendingWrite::SeatBook {
+                seat_id,
+                seat_no,
+                segment_id,
+                date,
+                ..
+            }) if seat_id == "id101"
+                && seat_no == "101"
+                && segment_id == "seg-3"
+                && date == "2026-10-07"
+        );
+
+        assert!(named, "弹窗应记下它写明的那个座位：{:?}", app.seat.pending);
+
+        // A late seat list (an earlier area request answering now) lands
+        // while the dialog is open and rebuilds the map under it; the cursor
+        // moves to that list's first free seat.
+        app.handle_async(
+            AsyncEvent::SeatSeats(Ok(vec![
+                seat("201", 10.0, 10.0, false),
+                seat("203", 14.0, 10.0, true),
+            ])),
+            &tx,
+        );
+
+        assert_eq!(app.seat.seats[app.seat.selected_seat].id, "id203");
+
+        // Confirming must write the seat the dialog named, not the cursor.
+        app.handle_key(key(KeyCode::Char('y')), &tx);
+
+        let mut submitted = None;
+
+        while let Ok(event) = rx.try_recv() {
+
+            if let AsyncEvent::Scoped { event, .. } = event {
+
+                if let AsyncEvent::SeatBooked { seat_id, .. } = *event {
+
+                    submitted = Some(seat_id);
+                }
+            }
+        }
+
+        assert_eq!(
+            submitted.as_deref(),
+            Some("id101"),
+            "提交的应是弹窗写明的座位"
+        );
+    }
+
+    #[test]
+
+    fn a_booked_seat_is_marked_taken_and_the_map_is_read_back() {
+
+        use crossterm::event::KeyCode;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::default();
+
+        app.handle_async(
+            AsyncEvent::SeatSeats(Ok(vec![
+                seat("101", 10.0, 10.0, true),
+                seat("102", 12.0, 10.0, true),
+            ])),
+            &tx,
+        );
+
+        app.seat.detail = Some(crate::libbook::AreaDetail {
+            id:              "area-9".to_string(),
+            name:            "一层西阅学空间".to_string(),
+            available_dates: Vec::new(),
+            time_slots:      vec![crate::libbook::TimeSlot {
+                id:    "seg-3".to_string(),
+                start: "2026-10-07 08:00:00".to_string(),
+                end:   "2026-10-07 23:00:00".to_string(),
+                label: "08:00-23:00".to_string(),
+            }],
+        });
+
+        app.seat.bookings_loaded = true;
+
+        while rx.try_recv().is_ok() {}
+
+        app.handle_async(
+            AsyncEvent::SeatBooked {
+                seat_id: "id101".to_string(),
+                result:  Ok("已预约座位 101".to_string()),
+            },
+            &tx,
+        );
+
+        let booked = &app.seat.seats[0];
+
+        assert!(!booked.is_available, "刚预约的座位不应再显示为可预约");
+
+        assert_eq!(
+            app.seat
+                .seats
+                .iter()
+                .filter(|seat| seat.is_available)
+                .count(),
+            1,
+            "空闲数应随预约减少"
+        );
+
+        assert!(!app.seat.bookings_loaded, "我的预约缓存应失效");
+
+        assert!(app.status.contains("已预约座位 101"), "{}", app.status);
+
+        // The same seat is no longer offered for booking.
+        app.seat.selected_seat = 0;
+
+        app.handle_seat_key(key(KeyCode::Enter), &tx);
+
+        assert!(app.seat.pending.is_none(), "不应再次弹出预约同一座位的确认");
+
+        // The area's seats are read back from the service.
+        let mut reloaded = false;
+
+        while let Ok(event) = rx.try_recv() {
+
+            if let AsyncEvent::Scoped { event, .. } = event {
+
+                reloaded |= matches!(*event, AsyncEvent::SeatSeats(_));
+            }
+        }
+
+        assert!(reloaded, "预约成功后应重新读取该阅览区的座位");
+    }
+
+    #[test]
+
+    fn dismissing_a_dialog_never_reads_as_the_action_done() {
+
+        use crossterm::event::KeyCode;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let cases = [
+            (
+                crate::app::WorkspaceTab::Seat,
+                super::PendingWrite::SeatCancel("7".into()),
+                KeyCode::Enter,
+            ),
+            (
+                crate::app::WorkspaceTab::Venue,
+                super::PendingWrite::VenueCancel(7),
+                KeyCode::Char('n'),
+            ),
+            (
+                crate::app::WorkspaceTab::Seat,
+                super::PendingWrite::SeatBook {
+                    seat_id:       "id101".into(),
+                    seat_no:       "101".into(),
+                    area_name:     String::new(),
+                    segment_id:    "seg".into(),
+                    segment_label: String::new(),
+                    date:          String::new(),
+                },
+                KeyCode::Esc,
+            ),
+            (
+                crate::app::WorkspaceTab::Venue,
+                super::PendingWrite::VenueReserve,
+                KeyCode::Char('q'),
+            ),
+        ];
+
+        for (tab, pending, dismiss) in cases {
+
+            let mut app = App::default();
+
+            app.screen = crate::app::Screen::Workspace;
+
+            app.active_tab = tab;
+
+            match tab {
+                crate::app::WorkspaceTab::Seat => app.seat.pending = Some(pending.clone()),
+                _ => app.venue.pending = Some(pending.clone()),
+            }
+
+            app.handle_key(key(dismiss), &tx);
+
+            assert!(app.pending_write().is_none(), "{pending:?} 应已关闭");
+
+            // "已取消" is also how a real cancellation reports success.
+            assert!(
+                !app.status.starts_with("已取消"),
+                "{pending:?} 关闭后提示读起来像已执行：{}",
+                app.status
+            );
+
+            assert!(
+                app.status.contains("未"),
+                "{pending:?} 关闭后应说明什么都没做：{}",
+                app.status
+            );
+        }
     }
 
     #[test]
