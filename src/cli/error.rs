@@ -87,10 +87,13 @@ pub struct ErrorPayload {
 impl ErrorReport {
     /// Builds a report from an `anyhow` error.
     ///
-    /// Why the operation is a parameter:
-    /// A write whose outcome is unknown must not advertise itself as retryable,
-    /// because retrying could repeat a side effect that already happened. The
-    /// caller knows whether it was writing; the error text does not.
+    /// Why the whole error, not its text:
+    /// The outer message is often a wrapper ("登录失败"), and the
+    /// actionable detail, a rate limit or a taken seat, lives in the cause chain
+    /// or in a typed `Failure` further down. `failure::classify` walks both;
+    /// classifying only the top message lost the diagnosis and fell back to
+    /// `unknown`. The operation is passed through because a write whose outcome
+    /// is unknown must not advertise itself as retryable.
 
     pub fn from_error(
         error: &anyhow::Error,
@@ -100,15 +103,15 @@ impl ErrorReport {
 
         let message = error.to_string();
 
-        let classified = classify_for(&message, operation);
+        let classified = failure::classify(error, operation);
 
         let causes = error.chain().skip(1).map(ToString::to_string).collect();
 
         Self {
             error: ErrorPayload { message, causes },
             command,
-            retryable: classified.retryable,
-            code: classified.code,
+            retryable: classified.retryable && !classified.kind.is_auth_expiry(),
+            code: classified.code(),
         }
     }
 }
@@ -147,6 +150,27 @@ mod tests {
             ErrorReport::from_error(&error, Some("seat-book".to_string()), Operation::Write);
 
         assert!(!report.retryable);
+    }
+
+    #[test]
+
+    fn the_code_comes_from_the_cause_chain_not_just_the_outer_message() {
+
+        use super::ErrorReport;
+        use crate::failure::Operation;
+
+        // Seen live: the outer context says only "登录失败", while the reason
+        // worth acting on is one cause deeper. Classifying the outer string
+        // alone reported `unknown`.
+        let error = anyhow::anyhow!("登录失败：尝试登录太过频繁，请稍后再试")
+            .context("登录失败：获取问卷数据");
+
+        let report =
+            ErrorReport::from_error(&error, Some("eval-submit".to_string()), Operation::Read);
+
+        assert_eq!(report.code, "rate_limited", "应从未层原因识别出限流");
+
+        assert!(report.retryable, "限流可以重试");
     }
 
     #[test]
