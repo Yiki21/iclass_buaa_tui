@@ -3,13 +3,22 @@
 //! Why:
 //! End-of-term evaluation is mandatory before grades are released, and doing it
 //! through the web UI for every course is tedious. This module reads the
-//! outstanding tasks and can submit them.
+//! outstanding courses and can submit them.
 //!
 //! How:
 //! The session is activated by visiting the evaluation CAS entry with the shared
-//! login. Listing tasks is read-only. Submitting builds one result object per
-//! evaluated party, answering each question with an option chosen from the
-//! questionnaire.
+//! login. The service is organised in three levels, and each needs the one
+//! above it:
+//!
+//! 1. an evaluation *round* (`listObtainPersonnelEvaluationTasks`, e.g.
+//!    "2026夏季学期学生评教"), which carries no course at all;
+//! 2. the *questionnaires* of that round (`getQuestionnaireListToTask`);
+//! 3. the *courses* answered with each questionnaire
+//!    (`getRequiredReviewsData`), one row per course and evaluated teacher.
+//!
+//! Only a level-3 row identifies something that can be evaluated, and its
+//! fields are exactly what the questionnaire endpoint needs, so each
+//! [`EvaluationTask`] keeps that row.
 //!
 //! # What submitting does
 //!
@@ -31,33 +40,94 @@ const PJXT_BASE: &str = "https://spoc.buaa.edu.cn/pjxt";
 
 const CAS_URL: &str = "https://spoc.buaa.edu.cn/pjxt/cas";
 
-/// One course awaiting evaluation.
+/// Score sent when the questionnaire does not publish option scores.
+///
+/// Why:
+/// It is what the reference client sends, and equals the sum of the default
+/// answers on the questionnaires observed so far.
+
+const FALLBACK_SCORE: f64 = 93.0;
+
+/// One course (and evaluated teacher) awaiting evaluation.
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 
 pub struct EvaluationTask {
-    /// Task id, required by every later call.
+    /// Stable handle for this course: `rwid:wjid:kcdm:bpdm`.
+    ///
+    /// Why:
+    /// One evaluation round (`rwid`) covers every course of the term, so the
+    /// round id alone cannot name a course.
+    pub id:          String,
+    /// Evaluation round id.
     pub rwid:        String,
     /// Questionnaire id.
     pub wjid:        String,
+    /// Questionnaire pattern id, needed to switch the questionnaire into its
+    /// answerable mode.
+    pub msid:        String,
     pub course:      String,
     pub course_code: String,
     pub teacher:     String,
     /// Whether this course has already been evaluated.
     pub evaluated:   bool,
+    /// The course row as the service returned it.
+    ///
+    /// Why:
+    /// The questionnaire endpoint answers "操作失败" unless it receives the
+    /// course's own fields (`sxz`, `rwh`, `bpdm`, ...), so they are carried
+    /// along rather than re-derived.
+    #[serde(default, skip_serializing)]
+    pub context:     Value,
+}
+
+/// One selectable answer.
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+
+pub struct QuestionOption {
+    pub id:    String,
+    /// Text shown to the student, e.g. "优秀".
+    pub label: String,
+    /// Score the option contributes, when the questionnaire publishes one.
+    pub score: Option<f64>,
 }
 
 /// One question inside a questionnaire.
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 
 pub struct Question {
-    pub id:      String,
-    pub text:    String,
-    /// Option ids, in the order the questionnaire offers them.
-    pub options: Vec<String>,
-    /// Whether the question is multiple choice.
-    pub choice:  bool,
+    pub id:       String,
+    pub text:     String,
+    /// Options, in the order the questionnaire offers them.
+    pub options:  Vec<QuestionOption>,
+    /// Whether the question is single choice. Other questions are free text
+    /// and are left blank.
+    pub choice:   bool,
+    /// Whether the service requires an answer.
+    pub required: bool,
+}
+
+impl Question {
+    /// Label of one of this question's options, or the id if it has none.
+
+    pub fn option_label(&self, option_id: &str) -> String {
+
+        self.options
+            .iter()
+            .find(|option| option.id == option_id)
+            .map(|option| {
+                if option.label.is_empty() {
+
+                    option.id.clone()
+                } else {
+
+                    option.label.clone()
+                }
+            })
+            .unwrap_or_else(|| option_id.to_string())
+    }
 }
 
 /// A questionnaire, flattened to its questions.
@@ -65,33 +135,75 @@ pub struct Question {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 
 pub struct Questionnaire {
-    pub questions: Vec<Question>,
+    pub questions:      Vec<Question>,
+    /// Result templates the service expects back, one per evaluated party.
+    #[serde(skip)]
+    pub(crate) parties: Vec<Value>,
+    /// Storage keys the service expects echoed in every result.
+    #[serde(skip)]
+    pub(crate) storage: Value,
 }
 
 impl Questionnaire {
-    /// Answers every question with its first option.
+    /// Answers every choice question favourably.
     ///
     /// Why:
-    /// The first option is conventionally the most favourable, matching what
-    /// the reference implementation sends.
+    /// The first option is the most favourable. The reference client gives
+    /// one question its second option instead, so the answers are not
+    /// uniform; that is mirrored here, but deterministically, so the preview
+    /// shows exactly what will be sent.
     ///
     /// How:
-    /// Returns question-id to option-id pairs. Non-choice questions and those
+    /// Returns question-id to option-id pairs. Free-text questions and those
     /// without options are omitted.
 
     pub fn default_answers(&self) -> Vec<(String, String)> {
 
+        let varied = self
+            .questions
+            .iter()
+            .position(|question| question.choice && question.options.len() > 1);
+
         self.questions
             .iter()
-            .filter(|question| question.choice)
-            .filter_map(|question| {
+            .enumerate()
+            .filter(|(_, question)| question.choice)
+            .filter_map(|(index, question)| {
 
-                question
-                    .options
-                    .first()
-                    .map(|option| (question.id.clone(), option.clone()))
+                let option = if Some(index) == varied {
+
+                    question.options.get(1)
+                } else {
+
+                    question.options.first()
+                }?;
+
+                Some((question.id.clone(), option.id.clone()))
             })
             .collect()
+    }
+
+    /// Total score of a set of answers, if every chosen option has a score.
+
+    pub fn score(&self, answers: &[(String, String)]) -> Option<f64> {
+
+        let mut total = 0.0;
+
+        for (question_id, option_id) in answers {
+
+            let score = self
+                .questions
+                .iter()
+                .find(|question| &question.id == question_id)?
+                .options
+                .iter()
+                .find(|option| &option.id == option_id)?
+                .score?;
+
+            total += score;
+        }
+
+        Some(total)
     }
 }
 
@@ -137,66 +249,172 @@ impl IClassApi {
         Ok(())
     }
 
-    /// Lists the courses awaiting evaluation.
+    /// GETs one pjxt endpoint and unwraps its envelope.
+
+    async fn pjxt_get(&self, path: &str, query: &[(&str, &str)], what: &str) -> Result<Value> {
+
+        let response = self
+            .client
+            .get(pjxt_url(self.use_vpn, &format!("{PJXT_BASE}{path}")))
+            .query(query)
+            .header("X-Requested-With", "XMLHttpRequest")
+            .send()
+            .await
+            .with_context(|| format!("{what}失败"))?;
+
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("读取{what}响应失败"))?;
+
+        unwrap_envelope(&body).with_context(|| format!("{what}失败"))
+    }
+
+    /// Switches a questionnaire into its answerable pattern.
+    ///
+    /// Why:
+    /// Without it the course list and the questionnaire come back empty or
+    /// rejected. The response carries nothing needed, so it is not checked.
+
+    async fn evaluation_revise_pattern(&self, rwid: &str, wjid: &str, msid: &str) {
+
+        let msid = if msid.is_empty() { "1" } else { msid };
+
+        let _ = self
+            .client
+            .post(pjxt_url(
+                self.use_vpn,
+                &format!("{PJXT_BASE}/evaluationMethodSix/reviseQuestionnairePattern"),
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .body(json!({ "rwid": rwid, "wjid": wjid, "msid": msid }).to_string())
+            .send()
+            .await;
+    }
+
+    /// Lists every course of the open evaluation rounds, pending first.
     ///
     /// How:
-    /// The endpoint needs the student id, which the session carries.
+    /// Walks round → questionnaire → course; see the module documentation.
 
     pub async fn evaluation_tasks(&self, user_id: &str) -> Result<Vec<EvaluationTask>> {
 
         self.evaluation_activate().await?;
 
-        let response = self
-            .client
-            .get(pjxt_url(
-                self.use_vpn,
-                &format!("{PJXT_BASE}/personnelEvaluation/listObtainPersonnelEvaluationTasks"),
-            ))
-            .query(&[("yhdm", user_id), ("pageNum", "1"), ("pageSize", "100")])
-            .header("X-Requested-With", "XMLHttpRequest")
-            .send()
-            .await
-            .context("获取待评教列表失败")?;
+        let rounds = self
+            .pjxt_get(
+                "/personnelEvaluation/listObtainPersonnelEvaluationTasks",
+                &[("yhdm", user_id), ("pageNum", "1"), ("pageSize", "100")],
+                "获取评教任务",
+            )
+            .await?;
 
-        let body = response.text().await.context("读取待评教列表失败")?;
-
-        let value = unwrap_envelope(&body)?;
-
-        let rows = value
+        let rounds = rounds
             .get("list")
-            .or_else(|| value.get("records"))
+            .or_else(|| rounds.get("records"))
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
 
-        Ok(rows.iter().filter_map(parse_task).collect())
+        let mut tasks: Vec<EvaluationTask> = Vec::new();
+
+        for round in &rounds {
+
+            let Some(rwid) = text_field(round, &["rwid"]) else {
+
+                continue;
+            };
+
+            let questionnaires = self
+                .pjxt_get(
+                    "/evaluationMethodSix/getQuestionnaireListToTask",
+                    &[("rwid", rwid.as_str())],
+                    "获取评教问卷列表",
+                )
+                .await?;
+
+            for questionnaire in questionnaires.as_array().into_iter().flatten() {
+
+                let Some(wjid) = text_field(questionnaire, &["wjid"]) else {
+
+                    continue;
+                };
+
+                let msid = text_field(questionnaire, &["msid"]).unwrap_or_else(|| "1".to_string());
+
+                self.evaluation_revise_pattern(&rwid, &wjid, &msid).await;
+
+                // The course list is empty unless the term is named; the
+                // round carries it.
+                let term = text_field(round, &["rwxnxq", "xnxq"]).unwrap_or_default();
+
+                let mut query = vec![("wjid", wjid.as_str())];
+
+                if !term.is_empty() {
+
+                    query.push(("xnxq", term.as_str()));
+                }
+
+                let courses = self
+                    .pjxt_get(
+                        "/evaluationMethodSix/getRequiredReviewsData",
+                        &query,
+                        "获取待评教课程",
+                    )
+                    .await?;
+
+                for row in courses.as_array().into_iter().flatten() {
+
+                    let Some(task) = parse_course(row, &rwid, &wjid, &msid) else {
+
+                        continue;
+                    };
+
+                    match tasks.iter_mut().find(|known| known.id == task.id) {
+                        Some(known) => known.evaluated |= task.evaluated,
+                        None => tasks.push(task),
+                    }
+                }
+            }
+        }
+
+        tasks.sort_by_key(|task| task.evaluated);
+
+        Ok(tasks)
     }
 
     /// Loads a course's questionnaire.
 
     pub async fn evaluation_questionnaire(&self, task: &EvaluationTask) -> Result<Questionnaire> {
 
-        let response = self
-            .client
-            .get(pjxt_url(
-                self.use_vpn,
-                &format!("{PJXT_BASE}/evaluationMethodSix/getQuestionnaireTopic"),
-            ))
-            .query(&[
-                ("id", ""),
-                ("rwid", task.rwid.as_str()),
-                ("wjid", task.wjid.as_str()),
-            ])
-            .header("X-Requested-With", "XMLHttpRequest")
-            .send()
-            .await
-            .context("获取评教问卷失败")?;
+        self.evaluation_activate().await?;
 
-        let body = response.text().await.context("读取评教问卷失败")?;
+        self.evaluation_revise_pattern(&task.rwid, &task.wjid, &task.msid)
+            .await;
 
-        let value = unwrap_envelope(&body)?;
+        let query = topic_query(task);
 
-        Ok(parse_questionnaire(&value))
+        let query: Vec<(&str, &str)> = query
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+
+        let value = self
+            .pjxt_get(
+                "/evaluationMethodSix/getQuestionnaireTopic",
+                &query,
+                "获取评教问卷",
+            )
+            .await?;
+
+        // The questionnaire arrives as a one-element list.
+        let topic = match value {
+            Value::Array(items) => items.into_iter().next().context("评教服务没有返回问卷")?,
+            other => other,
+        };
+
+        Ok(parse_questionnaire(&topic))
     }
 
     /// Submits the evaluation for one course.
@@ -206,43 +424,42 @@ impl IClassApi {
     /// confirmed explicitly; see the CLI, which refuses without `--yes`.
     ///
     /// How:
-    /// Every party listed for the course gets one result object, each answering
-    /// the questionnaire as prepared.
+    /// Every party listed by the questionnaire gets one result object, each
+    /// answering the questionnaire as given.
 
     pub async fn evaluation_submit(
         &self,
         task: &EvaluationTask,
+        questionnaire: &Questionnaire,
         answers: &[(String, String)],
     ) -> Result<EvaluationOutcome> {
-
-        self.evaluation_activate().await?;
 
         if answers.is_empty() {
 
             bail!("问卷没有可作答的题目，无法提交");
         }
 
-        // Switch the questionnaire into its reviewable pattern first; without
-        // it the submission is rejected.
-        let _ = self
-            .client
-            .post(pjxt_url(
-                self.use_vpn,
-                &format!("{PJXT_BASE}/evaluationMethodSix/reviseQuestionnairePattern"),
-            ))
-            .header("Content-Type", "application/json")
-            .body(
-                json!({
-                    "rwid": task.rwid,
-                    "wjid": task.wjid,
-                    "msid": "1",
-                })
-                .to_string(),
-            )
-            .send()
+        if questionnaire.parties.is_empty() {
+
+            bail!("问卷没有返回评价对象，无法提交");
+        }
+
+        if let Some(question) = questionnaire.questions.iter().find(|question| {
+
+            question.choice
+                && question.required
+                && !answers.iter().any(|(id, _)| *id == question.id)
+        }) {
+
+            bail!("必答题未作答: {}", question.text);
+        }
+
+        self.evaluation_activate().await?;
+
+        self.evaluation_revise_pattern(&task.rwid, &task.wjid, &task.msid)
             .await;
 
-        let results = build_payload(task, answers);
+        let results = build_payload(task, questionnaire, answers);
 
         let response = self
             .client
@@ -251,6 +468,7 @@ impl IClassApi {
                 &format!("{PJXT_BASE}/evaluationMethodSix/submitSaveEvaluation"),
             ))
             .header("Content-Type", "application/json")
+            .header("X-Requested-With", "XMLHttpRequest")
             .body(
                 json!({
                     "pjidlist": [],
@@ -285,47 +503,158 @@ impl IClassApi {
     }
 }
 
+/// Query for the questionnaire endpoint, built from the course row.
+///
+/// Why:
+/// The service resolves the questionnaire from these fields and answers
+/// "操作失败" when they are missing. Defaults are the values the web client
+/// sends when a field is absent.
+
+fn topic_query(task: &EvaluationTask) -> Vec<(&'static str, String)> {
+
+    let field = |key: &str, default: &str| {
+
+        text_field(&task.context, &[key]).unwrap_or_else(|| default.to_string())
+    };
+
+    vec![
+        ("id", String::new()),
+        ("rwid", task.rwid.clone()),
+        ("wjid", task.wjid.clone()),
+        ("zdmc", field("zdmc", "STID")),
+        ("ypjcs", field("ypjcs", "0")),
+        ("xypjcs", field("xypjcs", "1")),
+        ("sxz", field("sxz", "")),
+        ("pjrdm", field("pjrdm", "")),
+        ("pjrmc", field("pjrmc", "")),
+        ("bpdm", field("bpdm", "")),
+        ("bpmc", field("bpmc", "")),
+        ("kcdm", field("kcdm", &task.course_code)),
+        ("kcmc", field("kcmc", &task.course)),
+        ("rwh", field("rwh", "")),
+        ("xn", field("xn", "")),
+        ("xq", field("xq", "")),
+        ("xnxq", field("xnxq", "")),
+        ("pjlxid", field("pjlxid", "2")),
+        ("sfksqbpj", field("sfksqbpj", "1")),
+        ("yxsfktjst", field("yxsfktjst", "")),
+        ("yxdm", String::new()),
+    ]
+}
+
 /// Builds the result objects sent to the submission endpoint.
 ///
 /// Why:
 /// The service expects one object per evaluated party, each carrying the full
-/// questionnaire answer set. The shape here mirrors what the web client sends,
-/// including the fixed score and flags, because the service validates them.
+/// answer set, including blank entries for free-text questions. The shape
+/// mirrors what the web client sends, because the service validates it.
 
-fn build_payload(task: &EvaluationTask, answers: &[(String, String)]) -> Vec<Value> {
+fn build_payload(
+    task: &EvaluationTask,
+    questionnaire: &Questionnaire,
+    answers: &[(String, String)],
+) -> Vec<Value> {
 
-    let answers: Vec<Value> = answers
+    let score = questionnaire.score(answers).unwrap_or(FALLBACK_SCORE);
+
+    // Whole scores are sent as integers, as the web client does.
+    let score = if score.fract() == 0.0 {
+
+        json!(score as i64)
+    } else {
+
+        json!(score)
+    };
+
+    questionnaire
+        .parties
         .iter()
-        .map(|(question_id, option_id)| {
+        .map(|party| {
+
+            let field = |key: &str| party.get(key).cloned().unwrap_or(Value::Null);
+
+            let round = party
+                .get("wjssrwid")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or_else(|| json!(task.rwid));
+
+            let items: Vec<Value> = questionnaire
+                .questions
+                .iter()
+                .map(|question| {
+
+                    let chosen = answers
+                        .iter()
+                        .find(|(id, _)| *id == question.id)
+                        .map(|(_, option)| option.clone());
+
+                    if question.choice {
+
+                        json!({
+                            "sjly": "1",
+                            "stlx": "1",
+                            "wjid": task.wjid,
+                            "wjssrwid": round,
+                            "wjstctid": "",
+                            "wjstid": question.id,
+                            "xxdalist": chosen.into_iter().collect::<Vec<_>>(),
+                        })
+                    } else {
+
+                        json!({
+                            "sjly": "1",
+                            "stlx": "6",
+                            "wjid": task.wjid,
+                            "wjssrwid": round,
+                            "wjstctid": question
+                                .options
+                                .first()
+                                .map(|option| option.id.clone())
+                                .unwrap_or_default(),
+                            "wjstid": question.id,
+                            "xxdalist": [],
+                        })
+                    }
+                })
+                .collect();
+
+            let teacher_key = party
+                .get("pjrjsdm")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or_else(|| json!(""));
 
             json!({
-                "sjly": "1",
-                "stlx": "1",
+                "bprdm": field("bprdm"),
+                "bprmc": field("bprmc"),
+                "kcdm": field("kcdm"),
+                "kcmc": field("kcmc"),
+                "pjdf": score,
+                "pjfs": party.get("pjfs").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| json!("1")),
+                "pjid": field("pjid"),
+                "pjlx": field("pjlx"),
+                "pjmap": questionnaire.storage,
+                "pjrdm": field("pjrdm"),
+                "pjrjsdm": field("pjrjsdm"),
+                "pjrxm": field("pjrxm"),
+                "pjsx": 1,
+                "pjxxlist": items,
+                "rwh": field("rwh"),
+                "stzjid": "xx",
                 "wjid": task.wjid,
-                "wjstctid": "",
-                "wjstid": question_id,
-                "xxdalist": [option_id],
+                "wjssrwid": round,
+                "wtjjy": "",
+                "xhgs": null,
+                "xnxq": field("xnxq"),
+                "sfxxpj": party.get("sfxxpj").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| json!("1")),
+                "sqzt": null,
+                "yxfz": null,
+                "zsxz": teacher_key,
+                "sfnm": "1",
             })
         })
-        .collect();
-
-    vec![json!({
-        "kcdm": task.course_code,
-        "kcmc": task.course,
-        // The score the reference client sends for a favourable evaluation.
-        "pjdf": 93,
-        "pjfs": "1",
-        "pjlx": null,
-        "pjrjsdm": "",
-        "pjsx": 1,
-        "pjxxlist": answers,
-        "stzjid": "xx",
-        "wjid": task.wjid,
-        "wtjjy": "",
-        "xnxq": null,
-        "sfxxpj": "1",
-        "sfnm": "1",
-    })]
+        .collect()
 }
 
 fn pjxt_url(use_vpn: bool, raw: &str) -> String {
@@ -377,47 +706,43 @@ fn unwrap_envelope(body: &str) -> Result<Value> {
     Ok(value.get("result").cloned().unwrap_or(value))
 }
 
-fn parse_task(row: &Value) -> Option<EvaluationTask> {
+/// Parses one course row of `getRequiredReviewsData`.
+///
+/// How:
+/// The row's own `rwid`/`wjid` win; the ids it was requested with fill in when
+/// the row omits them. A row without a course or teacher code is still kept,
+/// since the id stays unique within its questionnaire.
 
-    let rwid = row
-        .get("rwid")
-        .or_else(|| row.get("wjssrwid"))
-        .and_then(flexible_string)
-        .filter(|value| !value.is_empty())?;
+fn parse_course(row: &Value, rwid: &str, wjid: &str, msid: &str) -> Option<EvaluationTask> {
 
-    let wjid = row
-        .get("wjid")
-        .and_then(flexible_string)
-        .unwrap_or_default();
+    let rwid = text_field(row, &["rwid"]).unwrap_or_else(|| rwid.to_string());
+
+    let wjid = text_field(row, &["wjid"]).unwrap_or_else(|| wjid.to_string());
+
+    if rwid.is_empty() || wjid.is_empty() {
+
+        return None;
+    }
+
+    let course_code = text_field(row, &["kcdm"]).unwrap_or_default();
+
+    let teacher_code = text_field(row, &["bpdm"]).unwrap_or_default();
+
+    // `ypjcs` counts submitted evaluations, `xypjcs` the number required.
+    let done = number_field(row, "ypjcs").unwrap_or(0);
+
+    let required = number_field(row, "xypjcs").unwrap_or(1).max(1);
 
     Some(EvaluationTask {
+        id: format!("{rwid}:{wjid}:{course_code}:{teacher_code}"),
+        msid: text_field(row, &["msid"]).unwrap_or_else(|| msid.to_string()),
+        course: text_field(row, &["kcmc"]).unwrap_or_else(|| "未知课程".to_string()),
+        teacher: text_field(row, &["bpmc"]).unwrap_or_default(),
+        evaluated: done >= required,
+        context: row.clone(),
         rwid,
         wjid,
-        course: row
-            .get("kcmc")
-            .or_else(|| row.get("courseName"))
-            .and_then(flexible_string)
-            .unwrap_or_else(|| "未知课程".to_string()),
-        course_code: row
-            .get("kcdm")
-            .and_then(flexible_string)
-            .unwrap_or_default(),
-        teacher: row
-            .get("jsmc")
-            .or_else(|| row.get("pjrmc"))
-            .and_then(flexible_string)
-            .unwrap_or_default(),
-        evaluated: row
-            .get("sfypj")
-            .or_else(|| row.get("isEvaluated"))
-            .and_then(|value| {
-
-                value
-                    .as_bool()
-                    .or_else(|| value.as_i64().map(|number| number == 1))
-                    .or_else(|| value.as_str().map(|text| text == "1" || text == "true"))
-            })
-            .unwrap_or(false),
+        course_code,
     })
 }
 
@@ -435,52 +760,42 @@ fn parse_questionnaire(value: &Value) -> Questionnaire {
         .or_else(|| value.get("wjxx"))
         .unwrap_or(value);
 
-    let mut questions = Vec::new();
-
-    if let Some(sections) = entity.get("wjzblist").and_then(Value::as_array) {
-
-        for section in sections {
-
-            let Some(rows) = section.get("tklist").and_then(Value::as_array) else {
-
-                continue;
-            };
-
-            for row in rows {
-
-                if let Some(question) = parse_question(row) {
-
-                    questions.push(question);
-                }
-            }
+    let rows: Vec<&Value> = match entity.get("wjzblist").and_then(Value::as_array) {
+        Some(sections) => {
+            sections
+                .iter()
+                .filter_map(|section| section.get("tklist").and_then(Value::as_array))
+                .flatten()
+                .collect()
         }
-    } else if let Some(rows) = entity.get("tklist").and_then(Value::as_array) {
-
-        for row in rows {
-
-            if let Some(question) = parse_question(row) {
-
-                questions.push(question);
-            }
+        None => {
+            entity
+                .get("tklist")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .collect()
         }
+    };
+
+    Questionnaire {
+        questions: rows.into_iter().filter_map(parse_question).collect(),
+        parties:   value
+            .get("pjxtPjjgPjjgckb")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        storage:   value.get("pjmap").cloned().unwrap_or(Value::Null),
     }
-
-    Questionnaire { questions }
 }
 
 fn parse_question(row: &Value) -> Option<Question> {
 
-    let id = row
-        .get("tmid")
-        .and_then(flexible_string)
-        .filter(|value| !value.is_empty())?;
+    let id = text_field(row, &["tmid"])?;
 
-    // `tmlx` is "1" for multiple choice; anything else is free text, which has
-    // no options to select.
-    let kind = row
-        .get("tmlx")
-        .and_then(flexible_string)
-        .unwrap_or_default();
+    // `tmlx` is "1" for single choice; "6" is free text, whose one option is
+    // only a slot for the typed answer.
+    let kind = text_field(row, &["tmlx"]).unwrap_or_default();
 
     let options = row
         .get("tmxxlist")
@@ -488,29 +803,56 @@ fn parse_question(row: &Value) -> Option<Question> {
         .map(|rows| {
 
             rows.iter()
-                .filter_map(|option| option.get("tmxxid").and_then(flexible_string))
+                .filter_map(|option| {
+
+                    Some(QuestionOption {
+                        id:    text_field(option, &["tmxxid"])?,
+                        label: text_field(option, &["xxmc", "tmxxmc"]).unwrap_or_default(),
+                        score: option.get("xxfz").and_then(|value| {
+
+                            value
+                                .as_f64()
+                                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                        }),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
 
     Some(Question {
         id,
-        text: row
-            .get("tmmc")
-            .or_else(|| row.get("tmnr"))
-            .and_then(flexible_string)
-            .unwrap_or_default(),
+        text: text_field(row, &["tgmc", "tmmc", "tmnr"]).unwrap_or_default(),
         choice: kind == "1",
+        required: text_field(row, &["sfbd"]).is_some_and(|value| value == "1"),
         options,
     })
 }
 
-fn flexible_string(value: &Value) -> Option<String> {
+/// First non-empty text among `keys`, accepting numbers as text.
+
+fn text_field(row: &Value, keys: &[&str]) -> Option<String> {
+
+    keys.iter()
+        .filter_map(|key| row.get(*key))
+        .filter_map(|value| {
+
+            match value {
+                Value::String(text) => Some(text.trim().to_string()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }
+        })
+        .find(|text| !text.is_empty())
+}
+
+fn number_field(row: &Value, key: &str) -> Option<i64> {
+
+    let value = row.get(key)?;
 
     value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
 #[cfg(test)]
@@ -518,143 +860,274 @@ fn flexible_string(value: &Value) -> Option<String> {
 mod tests {
 
     use super::{
-        Question, Questionnaire, build_payload, parse_questionnaire, parse_task, unwrap_envelope,
+        EvaluationTask, Question, QuestionOption, Questionnaire, build_payload, parse_course,
+        parse_questionnaire, topic_query, unwrap_envelope,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    #[test]
+    /// A course row as `getRequiredReviewsData` returned it (trimmed).
 
-    fn parses_a_nested_questionnaire() {
+    fn course_row() -> Value {
 
-        let response = json!({
+        json!({
+            "bpdm": "11436",
+            "bpmc": "石琳",
+            "kcdm": "B210031011",
+            "kcmc": "软件工程综合实践",
+            "pjlxid": "2",
+            "pjrdm": "23371544",
+            "pjrmc": "张义",
+            "rwh": "202520263B210031011003",
+            "rwid": "r1",
+            "sfksqbpj": "1",
+            "sxz": "SXZ",
+            "wjid": "w1",
+            "xn": null,
+            "xnxq": "2025-20263",
+            "xq": null,
+            "xypjcs": 1,
+            "ypjcs": 0,
+            "yxsfktjst": null,
+            "zdmc": "STID"
+        })
+    }
+
+    fn option(id: &str, label: &str, score: f64) -> Value {
+
+        json!({"tmxxid": id, "xxmc": label, "xxfz": score})
+    }
+
+    /// A questionnaire as `getQuestionnaireTopic` returned it (trimmed).
+
+    fn topic() -> Value {
+
+        let party = |pjid: &str, sfxxpj: &str| {
+
+            json!({
+                "bprdm": "11436", "bprmc": "石琳", "kcdm": "B210031011",
+                "kcmc": "软件工程综合实践", "pjfs": "1", "pjid": pjid, "pjlx": "2",
+                "pjrdm": "23371544", "pjrjsdm": "SXZ", "pjrxm": "张义",
+                "rwh": "202520263B210031011003", "sfxxpj": sfxxpj, "wjid": "w1",
+                "wjssrwid": "r1", "xnxq": "2025-20263"
+            })
+        };
+
+        json!([{
+            "pjmap": {"PJJGBM": "A", "PJJGXXBM": "B", "RWID": "r1"},
+            "pjxtPjjgPjjgckb": [party("p1", "1"), party("p2", "2")],
             "pjxtWjWjbReturnEntity": {
-                "wjzblist": [
-                    {
-                        "tkmc": "第一部分",
-                        "tklist": [
-                            {
-                                "tmid": "q1",
-                                "tmlx": "1",
-                                "tmmc": "教学态度",
-                                "tmxxlist": [
-                                    {"tmxxid": "o1", "tmxxmc": "非常满意"},
-                                    {"tmxxid": "o2", "tmxxmc": "满意"}
-                                ]
-                            },
-                            {
-                                "tmid": "q2",
-                                "tmlx": "6",
-                                "tmmc": "意见建议"
-                            }
-                        ]
-                    }
-                ]
+                "wjzblist": [{
+                    "zmc": "问卷1",
+                    "tklist": [
+                        {"tmid": "1", "tmlx": "1", "sfbd": "1", "tgmc": "授课热情投入", "tmmc": null,
+                         "tmxxlist": [option("11", "优秀", 9.5), option("12", "良好", 7.5)]},
+                        {"tmid": "2", "tmlx": "1", "sfbd": "1", "tgmc": "要求明确",
+                         "tmxxlist": [option("21", "优秀", 9.5), option("22", "良好", 7.5)]},
+                        {"tmid": "3", "tmlx": "1", "sfbd": "1", "tgmc": "总体评价",
+                         "tmxxlist": [option("31", "优秀", 47.5), option("32", "良好", 37.5)]},
+                        {"tmid": "4", "tmlx": "6", "sfbd": "0", "tgmc": "优秀之处",
+                         "tmxxlist": [{"tmxxid": "41", "xxmc": null, "xxfz": 0}]}
+                    ]
+                }]
             }
-        });
+        }])
+    }
 
-        let questionnaire = parse_questionnaire(&response);
+    fn task() -> EvaluationTask {
 
-        assert_eq!(questionnaire.questions.len(), 2);
+        parse_course(&course_row(), "r1", "w1", "1").expect("应能解析课程")
+    }
 
-        assert_eq!(questionnaire.questions[0].id, "q1");
+    fn questionnaire() -> Questionnaire {
 
-        assert!(questionnaire.questions[0].choice);
-
-        assert_eq!(questionnaire.questions[0].options, vec!["o1", "o2"]);
-
-        assert!(!questionnaire.questions[1].choice, "非选择题不应作答");
-
-        assert!(questionnaire.questions[1].options.is_empty());
+        parse_questionnaire(&topic()[0])
     }
 
     #[test]
 
-    fn default_answers_pick_the_first_option_of_choices_only() {
+    fn a_course_row_becomes_a_task_with_a_unique_id() {
+
+        let task = task();
+
+        assert_eq!(task.id, "r1:w1:B210031011:11436");
+
+        assert_eq!(task.course, "软件工程综合实践");
+
+        assert_eq!(task.teacher, "石琳");
+
+        assert_eq!(task.msid, "1");
+
+        assert!(!task.evaluated, "ypjcs=0 表示未评");
+
+        let mut done = course_row();
+
+        done["ypjcs"] = json!(1);
+
+        assert!(parse_course(&done, "r1", "w1", "1").unwrap().evaluated);
+    }
+
+    #[test]
+
+    fn the_course_row_is_kept_but_not_printed() {
+
+        let task = task();
+
+        assert_eq!(task.context["sxz"], json!("SXZ"));
+
+        let printed = serde_json::to_value(&task).unwrap();
+
+        assert!(printed.get("context").is_none(), "{printed}");
+    }
+
+    #[test]
+
+    fn the_topic_query_carries_the_course_fields() {
+
+        let query = topic_query(&task());
+
+        let get = |key: &str| {
+
+            query
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert_eq!(get("sxz"), Some("SXZ"));
+
+        assert_eq!(get("bpdm"), Some("11436"));
+
+        assert_eq!(get("rwh"), Some("202520263B210031011003"));
+
+        assert_eq!(get("ypjcs"), Some("0"));
+
+        assert_eq!(get("xn"), Some(""), "null 字段发空串");
+
+        assert_eq!(get("id"), Some(""));
+    }
+
+    #[test]
+
+    fn parses_the_questionnaire_the_service_returns() {
+
+        let questionnaire = questionnaire();
+
+        assert_eq!(questionnaire.questions.len(), 4);
+
+        let first = &questionnaire.questions[0];
+
+        assert_eq!(first.text, "授课热情投入", "题干在 tgmc 中");
+
+        assert!(first.choice && first.required);
+
+        assert_eq!(first.options[1].label, "良好");
+
+        assert_eq!(first.options[1].score, Some(7.5));
+
+        assert!(!questionnaire.questions[3].choice);
+
+        assert_eq!(questionnaire.parties.len(), 2);
+
+        assert_eq!(questionnaire.storage["RWID"], json!("r1"));
+    }
+
+    #[test]
+
+    fn default_answers_vary_exactly_one_choice() {
+
+        let answers = questionnaire().default_answers();
+
+        let pairs: Vec<(&str, &str)> = answers
+            .iter()
+            .map(|(question, option)| (question.as_str(), option.as_str()))
+            .collect();
+
+        assert_eq!(pairs, vec![("1", "12"), ("2", "21"), ("3", "31")]);
+    }
+
+    #[test]
+
+    fn a_choice_question_with_no_options_is_not_answered() {
 
         let questionnaire = Questionnaire {
-            questions: vec![
-                Question {
-                    id:      "q1".to_string(),
-                    text:    "教学".to_string(),
-                    options: vec!["o1".to_string(), "o2".to_string()],
-                    choice:  true,
-                },
-                Question {
-                    id:      "q2".to_string(),
-                    text:    "建议".to_string(),
-                    options: Vec::new(),
-                    choice:  false,
-                },
-                // A choice question with no options cannot be answered.
-                Question {
-                    id:      "q3".to_string(),
-                    text:    "空题".to_string(),
-                    options: Vec::new(),
-                    choice:  true,
-                },
-            ],
+            questions: vec![Question {
+                id: "q".to_string(),
+                choice: true,
+                ..Default::default()
+            }],
+            ..Default::default()
         };
+
+        assert!(questionnaire.default_answers().is_empty());
+    }
+
+    #[test]
+
+    fn the_payload_has_one_result_per_party_and_one_item_per_question() {
+
+        let questionnaire = questionnaire();
 
         let answers = questionnaire.default_answers();
 
-        assert_eq!(answers, vec![("q1".to_string(), "o1".to_string())]);
+        let payload = build_payload(&task(), &questionnaire, &answers);
+
+        assert_eq!(payload.len(), 2, "每个评价对象一条结果");
+
+        assert_eq!(payload[0]["pjid"], json!("p1"));
+
+        assert_eq!(payload[1]["sfxxpj"], json!("2"));
+
+        assert_eq!(payload[0]["pjmap"]["PJJGBM"], json!("A"));
+
+        // 7.5 + 9.5 + 47.5
+        assert_eq!(payload[0]["pjdf"], json!(64.5));
+
+        let items = payload[0]["pjxxlist"].as_array().unwrap();
+
+        assert_eq!(items.len(), 4, "主观题也要带上空答案");
+
+        assert_eq!(items[0]["xxdalist"], json!(["12"]));
+
+        assert_eq!(items[3]["stlx"], json!("6"));
+
+        assert_eq!(items[3]["wjstctid"], json!("41"));
+
+        assert_eq!(items[3]["xxdalist"], json!([]));
     }
 
     #[test]
 
-    fn payload_carries_one_result_per_question() {
+    fn whole_scores_are_sent_as_integers() {
 
-        let task = super::EvaluationTask {
-            rwid:        "r1".to_string(),
-            wjid:        "w1".to_string(),
-            course:      "高等数学".to_string(),
-            course_code: "MATH101".to_string(),
-            teacher:     "张老师".to_string(),
-            evaluated:   false,
+        let questionnaire = Questionnaire {
+            questions: vec![Question {
+                id: "q".to_string(),
+                choice: true,
+                options: vec![QuestionOption {
+                    id:    "o".to_string(),
+                    label: "优秀".to_string(),
+                    score: Some(93.0),
+                }],
+                ..Default::default()
+            }],
+            parties: vec![json!({"pjid": "p"})],
+            ..Default::default()
         };
 
-        let answers = vec![
-            ("q1".to_string(), "o1".to_string()),
-            ("q2".to_string(), "o2".to_string()),
-        ];
+        let payload = build_payload(&task(), &questionnaire, &questionnaire.default_answers());
 
-        let payload = build_payload(&task, &answers);
-
-        assert_eq!(payload.len(), 1, "每门课提交一条结果");
-
-        let entry = &payload[0];
-
-        assert_eq!(entry["kcmc"], json!("高等数学"));
-
-        assert_eq!(entry["wjid"], json!("w1"));
-
-        assert_eq!(entry["pjxxlist"].as_array().map(Vec::len), Some(2));
-
-        assert_eq!(entry["pjxxlist"][0]["wjstid"], json!("q1"));
-
-        assert_eq!(entry["pjxxlist"][0]["xxdalist"], json!(["o1"]));
+        assert_eq!(payload[0]["pjdf"], json!(93));
     }
 
     #[test]
 
-    fn parses_a_task_row() {
+    fn option_labels_are_shown_instead_of_ids() {
 
-        let task = parse_task(&json!({
-            "rwid": "r1",
-            "wjid": "w1",
-            "kcmc": "线性代数",
-            "kcdm": "MATH102",
-            "pjrmc": "李老师",
-            "sfypj": "1"
-        }))
-        .expect("应能解析评教任务");
+        let questionnaire = questionnaire();
 
-        assert_eq!(task.course, "线性代数");
+        assert_eq!(questionnaire.questions[0].option_label("12"), "良好");
 
-        assert!(task.evaluated, "sfypj=1 表示已评");
-
-        // A row without a task id cannot be acted on.
-        assert!(parse_task(&json!({"kcmc": "无 id"})).is_none());
+        assert_eq!(questionnaire.questions[0].option_label("??"), "??");
     }
 
     #[test]
@@ -668,6 +1141,12 @@ mod tests {
             .to_string();
 
         assert!(error.contains("服务器错误"), "应保留服务端消息: {error}");
+
+        let error = unwrap_envelope(r#"{"code":"500","msg":"操作失败"}"#)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("操作失败"), "{error}");
     }
 
     #[test]

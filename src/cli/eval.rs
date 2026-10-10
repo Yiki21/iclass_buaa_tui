@@ -40,10 +40,7 @@ pub(crate) async fn eval_command(args: EvalArgs) -> Result<()> {
 
     if let Some(task_id) = args.show.as_deref() {
 
-        let task = tasks
-            .iter()
-            .find(|task| task.rwid == task_id)
-            .ok_or_else(|| anyhow::anyhow!("没有评教任务 {task_id}"))?;
+        let task = find_task(&tasks, task_id)?;
 
         let questionnaire = api
             .evaluation_questionnaire(task)
@@ -57,7 +54,7 @@ pub(crate) async fn eval_command(args: EvalArgs) -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "task": task,
                     "questionnaire": questionnaire,
-                    "default_answers": questionnaire.default_answers(),
+                    "default_answers": answers_with_labels(&questionnaire),
                 }))?
             );
 
@@ -94,23 +91,22 @@ pub(crate) async fn eval_command(args: EvalArgs) -> Result<()> {
 
     println!();
 
-    println!("task\trwid\t课程\t教师\t状态");
+    println!("状态\t课程\t教师\ttask");
 
     for task in &tasks {
 
         println!(
-            "{}\t{}\t{}\t{}\t{}",
-            index_of(&tasks, task),
-            task.rwid,
+            "{}\t{}\t{}\t{}",
+            if task.evaluated { "已评" } else { "未评" },
             task.course,
             dash(&task.teacher),
-            if task.evaluated { "已评" } else { "未评" },
+            task.id,
         );
     }
 
     println!();
 
-    println!("用 --show <rwid> 查看某门课的问卷，以及将会提交的答案。");
+    println!("用 --show <task> 查看某门课的问卷，以及将会提交的答案。");
 
     Ok(())
 }
@@ -119,7 +115,7 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
 
     if args.tasks.is_empty() && !args.all {
 
-        bail!("请用 --task <rwid> 指定要评教的课程，或用 --all 评教全部未评课程");
+        bail!("请用 --task <task> 指定要评教的课程，或用 --all 评教全部未评课程");
     }
 
     let config = load_config(args.config.as_deref())?;
@@ -153,10 +149,7 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
 
         for id in &args.tasks {
 
-            let task = tasks
-                .iter()
-                .find(|task| &task.rwid == id)
-                .ok_or_else(|| anyhow::anyhow!("没有评教任务 {id}"))?;
+            let task = find_task(&tasks, id)?;
 
             chosen.push(task);
         }
@@ -238,9 +231,9 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
                 .map(|(task, questionnaire)| {
 
                     serde_json::json!({
-                        "rwid": task.rwid,
+                        "task": task.id,
                         "course": task.course,
-                        "answers": questionnaire.default_answers(),
+                        "answers": answers_with_labels(questionnaire),
                     })
                 })
                 .collect();
@@ -273,7 +266,7 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
 
         let answers = questionnaire.default_answers();
 
-        match api.evaluation_submit(task, &answers).await {
+        match api.evaluation_submit(task, questionnaire, &answers).await {
             Ok(outcome) if outcome.success => {
 
                 writeln!(human, "评教成功\t{}", task.course)?;
@@ -331,6 +324,69 @@ pub(crate) async fn eval_submit_command(args: EvalSubmitArgs) -> Result<()> {
     Ok(())
 }
 
+/// Finds the task a user named on the command line.
+///
+/// Why:
+/// The task id is the only unique handle: one evaluation round covers every
+/// course of the term, so a round id (`rwid`) alone cannot name a course.
+///
+/// How:
+/// Accepts the full task id, or a round id when exactly one course uses it.
+
+fn find_task<'a>(tasks: &'a [EvaluationTask], wanted: &str) -> Result<&'a EvaluationTask> {
+
+    if let Some(task) = tasks.iter().find(|task| task.id == wanted) {
+
+        return Ok(task);
+    }
+
+    let matches: Vec<&EvaluationTask> = tasks.iter().filter(|task| task.rwid == wanted).collect();
+
+    match matches.as_slice() {
+        [task] => Ok(task),
+        [] => bail!("没有评教任务 {wanted}"),
+        _ => {
+
+            bail!(
+                "{wanted} 是评教轮次，对应 {} 门课程，请用 task 列中的完整 id：{}",
+                matches.len(),
+                matches
+                    .iter()
+                    .map(|task| task.id.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+}
+
+/// The answers that would be sent, with the option text next to each id.
+///
+/// Why:
+/// An id alone does not tell the user what they are about to answer.
+
+fn answers_with_labels(questionnaire: &Questionnaire) -> Vec<serde_json::Value> {
+
+    questionnaire
+        .default_answers()
+        .into_iter()
+        .map(|(question_id, option_id)| {
+
+            let question = questionnaire
+                .questions
+                .iter()
+                .find(|candidate| candidate.id == question_id);
+
+            serde_json::json!({
+                "question": question_id,
+                "text": question.map(|question| question.text.clone()),
+                "option": option_id,
+                "label": question.map(|question| question.option_label(&option_id)),
+            })
+        })
+        .collect()
+}
+
 /// Prints a questionnaire and the answers that would be submitted.
 
 fn print_questionnaire(
@@ -342,7 +398,9 @@ fn print_questionnaire(
     // Writes through the caller's sink, so `--json` keeps stdout clean.
     writeln!(writer, "课程\t{}", task.course)?;
 
-    writeln!(writer, "任务\t{}", task.rwid)?;
+    writeln!(writer, "教师\t{}", dash(&task.teacher))?;
+
+    writeln!(writer, "任务\t{}", task.id)?;
 
     if !questionnaire.questions.is_empty() {
 
@@ -350,12 +408,14 @@ fn print_questionnaire(
 
         // Showing the questions is the point: it makes visible what is being
         // answered on the user's behalf.
+        let answers = questionnaire.default_answers();
+
         for (index, question) in questionnaire.questions.iter().enumerate() {
 
-            let answer = question
-                .options
-                .first()
-                .map(|option| format!("→ {option}"))
+            let answer = answers
+                .iter()
+                .find(|(id, _)| *id == question.id)
+                .map(|(_, option)| format!("→ {}", question.option_label(option)))
                 .unwrap_or_else(|| "（不作答）".to_string());
 
             writeln!(writer, "\t{}. {}\t{}", index + 1, question.text, answer)?;
@@ -363,16 +423,6 @@ fn print_questionnaire(
     }
 
     Ok(())
-}
-
-/// Position of a task in the list, used as a short handle.
-
-fn index_of(tasks: &[EvaluationTask], task: &EvaluationTask) -> usize {
-
-    tasks
-        .iter()
-        .position(|candidate| candidate.rwid == task.rwid)
-        .unwrap_or(0)
 }
 
 fn dash(value: &str) -> &str {
@@ -384,31 +434,48 @@ fn dash(value: &str) -> &str {
 
 mod tests {
 
-    use super::print_questionnaire;
+    use super::{find_task, print_questionnaire};
 
-    use crate::evaluation::{EvaluationTask, Question, Questionnaire};
+    use crate::evaluation::{EvaluationTask, Question, QuestionOption, Questionnaire};
 
-    fn task() -> EvaluationTask {
+    fn task(rwid: &str, course_code: &str) -> EvaluationTask {
 
         EvaluationTask {
-            rwid:        "1".to_string(),
-            wjid:        "2".to_string(),
-            course:      "操作系统".to_string(),
-            course_code: "B3".to_string(),
-            teacher:     "王老师".to_string(),
-            evaluated:   false,
+            id: format!("{rwid}:w:{course_code}:t"),
+            rwid: rwid.to_string(),
+            wjid: "w".to_string(),
+            course: "操作系统".to_string(),
+            course_code: course_code.to_string(),
+            teacher: "王老师".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn choice(id: &str, text: &str) -> Question {
+
+        let option = |id: &str, label: &str| {
+
+            QuestionOption {
+                id:    id.to_string(),
+                label: label.to_string(),
+                score: None,
+            }
+        };
+
+        Question {
+            id:       id.to_string(),
+            text:     text.to_string(),
+            options:  vec![option("o1", "很好"), option("o2", "一般")],
+            choice:   true,
+            required: true,
         }
     }
 
     fn questionnaire() -> Questionnaire {
 
         Questionnaire {
-            questions: vec![Question {
-                id:      "q1".to_string(),
-                text:    "课程内容如何？".to_string(),
-                options: vec!["很好".to_string(), "一般".to_string()],
-                choice:  true,
-            }],
+            questions: vec![choice("q1", "课程内容如何？"), choice("q2", "总体评价")],
+            ..Default::default()
         }
     }
 
@@ -420,7 +487,7 @@ mod tests {
         // points them, so stdout can stay one JSON document.
         let mut sink: Vec<u8> = Vec::new();
 
-        print_questionnaire(&mut sink, &task(), &questionnaire()).expect("写入问卷");
+        print_questionnaire(&mut sink, &task("r", "B3"), &questionnaire()).expect("写入问卷");
 
         let text = String::from_utf8(sink).expect("应该是 UTF-8");
 
@@ -428,6 +495,30 @@ mod tests {
 
         assert!(text.contains("课程内容如何？"), "缺少题干：{text}");
 
-        assert!(text.contains("→ 很好"), "缺少默认答案：{text}");
+        // The printed answers are the ones submitted, shown by label.
+        assert!(text.contains("课程内容如何？\t→ 一般"), "{text}");
+
+        assert!(text.contains("总体评价\t→ 很好"), "{text}");
+    }
+
+    #[test]
+
+    fn a_round_id_names_a_course_only_when_it_is_unambiguous() {
+
+        let one = vec![task("r", "B3")];
+
+        assert_eq!(find_task(&one, "r").unwrap().course_code, "B3");
+
+        assert_eq!(find_task(&one, "r:w:B3:t").unwrap().course_code, "B3");
+
+        let two = vec![task("r", "B3"), task("r", "B4")];
+
+        let error = find_task(&two, "r").unwrap_err().to_string();
+
+        assert!(error.contains("r:w:B4:t"), "应列出可选 id: {error}");
+
+        assert_eq!(find_task(&two, "r:w:B4:t").unwrap().course_code, "B4");
+
+        assert!(find_task(&two, "nope").is_err());
     }
 }

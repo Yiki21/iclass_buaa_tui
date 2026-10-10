@@ -165,7 +165,7 @@ fn wheel_moves_down_and_click_uses_the_scrolled_row_index() {
 fn evaluation_task(id: &str) -> crate::evaluation::EvaluationTask {
 
     crate::evaluation::EvaluationTask {
-        rwid: id.into(),
+        id: id.into(),
         course: id.into(),
         ..Default::default()
     }
@@ -263,12 +263,12 @@ fn failed_evaluation_stays_pending_and_batch_success_is_per_course() {
     app.handle_async(
         AsyncEvent::Evaluations(Ok(vec![
             EvaluationCompletion {
-                rwid:   "a".into(),
+                id:     "a".into(),
                 course: "a".into(),
                 result: Ok(()),
             },
             EvaluationCompletion {
-                rwid:   "b".into(),
+                id:     "b".into(),
                 course: "b".into(),
                 result: Err("response lost".into()),
             },

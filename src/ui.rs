@@ -197,9 +197,7 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
             item,
             ..
         } => Some(format!("  {classify_name}  {}", item.name)),
-        crate::app::PendingWrite::EvalSubmitAll(rwids) => {
-            Some(format!("  共 {} 门课程", rwids.len()))
-        }
+        crate::app::PendingWrite::EvalSubmitAll(ids) => Some(format!("  共 {} 门课程", ids.len())),
         _ => None,
     };
 
@@ -2526,7 +2524,7 @@ fn render_eval(frame: &mut Frame, area: Rect, app: &App) {
             .eval
             .tasks
             .iter()
-            .find(|task| Some(&task.rwid) == app.eval.questionnaire_task.as_ref())
+            .find(|task| Some(&task.id) == app.eval.questionnaire_task.as_ref())
             .map(|task| task.course.clone())
             .unwrap_or_default();
 
@@ -2556,7 +2554,7 @@ fn render_eval(frame: &mut Frame, area: Rect, app: &App) {
                 let answer = answers
                     .iter()
                     .find(|(id, _)| *id == question.id)
-                    .map(|(_, option)| option.as_str());
+                    .map(|(_, option)| question.option_label(option));
 
                 let text = if question.text.is_empty() {
 
@@ -2570,8 +2568,8 @@ fn render_eval(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(format!("  {}. ", index + 1), theme::muted_style()),
                     Span::styled(format!("{:<36}", truncate(&text, 36)), theme::text_style()),
                     Span::styled(
-                        match answer {
-                            Some(option) => format!("将选 {option}"),
+                        match answer.as_deref() {
+                            Some(label) => format!("将选 {label}"),
                             None => "不作答".to_string(),
                         },
                         if answer.is_some() {

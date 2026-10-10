@@ -28,15 +28,29 @@ iclass_buaa_tui clockin-submit --classify <id> --item <id> --photo <path> \
 
 Reads:
 
-- `eval --json`: tasks with `rwid`, `course`, `teacher`, `evaluated`.
-- `eval --show <rwid> --json`: the questionnaire and the answers that would be sent. The tool answers each question with its first option, which is conventionally the most favourable.
+- `eval --json`: the courses awaiting evaluation, each with `id`, `course`,
+  `teacher`, `evaluated`. **Use `id`, not `rwid`, to name a course**: one
+  evaluation round covers every course of the term, so `rwid` is the same for
+  all of them.
+- `eval --show <task> --json`: the questionnaire and the answers that would be
+  sent. A course is a `task`; pass its `id`, or its `rwid` when only one course
+  uses it.
 
 Submit:
 
 ```bash
-iclass_buaa_tui eval-submit --task <rwid> --json        # preview one
-iclass_buaa_tui eval-submit --task <rwid> --yes --json  # submit one
+iclass_buaa_tui eval-submit --task <task> --json        # preview one
+iclass_buaa_tui eval-submit --task <task> --yes --json  # submit one
 iclass_buaa_tui eval-submit --all --yes --json          # every unevaluated course
 ```
 
-Submitted answers are recorded as the user's own opinion of the teacher. Before `--yes`, tell the user which courses will be submitted and that every answer will be the first option; run `eval --show` if they want to see the questions. Use `--all` only when they asked for all of them.
+The tool answers every choice question with its first option, which is
+conventionally the most favourable; one question gets its second option, so the
+answers are not uniform. Free-text questions ("优秀之处" / "不足之处") are left
+blank. `eval-submit` prints the chosen option by its label ("优秀", "良好", ...),
+not by id, so the preview reads like the questionnaire.
+
+Submitted answers are recorded as the user's own opinion of the teacher. Before
+`--yes`, tell the user which courses will be submitted and that the answers are
+the tool's defaults; run `eval --show` so they can read the questions. Use
+`--all` only when they asked for all of them.

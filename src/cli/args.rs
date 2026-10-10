@@ -191,7 +191,8 @@ pub(crate) struct EvalArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
     pub(crate) config:      Option<PathBuf>,
-    /// Show the questionnaire of this task id and the answers that would be sent.
+    /// Show the questionnaire of this course and the answers that would be sent.
+    /// Accepts the task id `eval` prints; a round id works when one course uses it.
     #[arg(long)]
     pub(crate) show:        Option<String>,
     /// Print JSON instead of a human-readable table.
@@ -208,7 +209,7 @@ pub(crate) struct EvalSubmitArgs {
     /// Explicit config file path. Overrides XDG config lookup.
     #[arg(long)]
     pub(crate) config:      Option<PathBuf>,
-    /// Only submit for this task id. Repeated flags submit several.
+    /// Only submit for this course, by task id. Repeated flags submit several.
     #[arg(long = "task")]
     pub(crate) tasks:       Vec<String>,
     /// Submit for every unevaluated course.

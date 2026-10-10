@@ -97,7 +97,8 @@ pub enum AsyncEvent {
 #[derive(Clone, Debug)]
 
 pub struct EvaluationCompletion {
-    pub rwid:   String,
+    /// [`crate::evaluation::EvaluationTask::id`] of the course.
+    pub id:     String,
     pub course: String,
     pub result: Result<(), String>,
 }
@@ -3052,7 +3053,7 @@ impl App {
                     Err(error) => self.error(format!("待评教列表加载失败: {error}")),
                 }
             }
-            AsyncEvent::EvalQuestionnaire(rwid, result) => {
+            AsyncEvent::EvalQuestionnaire(task_id, result) => {
                 match result {
                     Ok(questionnaire) => {
 
@@ -3062,13 +3063,13 @@ impl App {
                             .eval
                             .tasks
                             .get(self.eval.selected)
-                            .is_none_or(|task| task.rwid != rwid)
+                            .is_none_or(|task| task.id != task_id)
                         {
 
                             return;
                         }
 
-                        self.eval.questionnaire_task = Some(rwid);
+                        self.eval.questionnaire_task = Some(task_id);
 
                         self.eval.questionnaire = Some(questionnaire);
 
@@ -3097,7 +3098,7 @@ impl App {
                                         .eval
                                         .tasks
                                         .iter_mut()
-                                        .find(|task| task.rwid == completion.rwid)
+                                        .find(|task| task.id == completion.id)
                                     {
 
                                         task.evaluated = true;
@@ -3847,22 +3848,22 @@ impl App {
             return;
         }
 
-        let rwids: Vec<String> = self
+        let ids: Vec<String> = self
             .eval
             .tasks
             .iter()
             .filter(|task| !task.evaluated)
-            .map(|task| task.rwid.clone())
+            .map(|task| task.id.clone())
             .collect();
 
-        if rwids.is_empty() {
+        if ids.is_empty() {
 
             self.warn("没有待评教课程");
 
             return;
         }
 
-        self.eval.pending = Some(PendingWrite::EvalSubmitAll(rwids));
+        self.eval.pending = Some(PendingWrite::EvalSubmitAll(ids));
     }
 
     fn request_eval_submit(&mut self) {
@@ -3881,9 +3882,9 @@ impl App {
             return;
         };
 
-        let rwid = task.rwid.clone();
+        let id = task.id.clone();
 
-        self.eval.pending = Some(PendingWrite::EvalSubmitOne(rwid));
+        self.eval.pending = Some(PendingWrite::EvalSubmitOne(id));
     }
 
     /// Confirms the pending write and starts it.
@@ -3918,8 +3919,8 @@ impl App {
             PendingWrite::ClockinSubmit {
                 classify_id, item, ..
             } => self.submit_clockin(classify_id, item, tx),
-            PendingWrite::EvalSubmitOne(rwid) => self.submit_eval(rwid, tx),
-            PendingWrite::EvalSubmitAll(rwids) => self.submit_eval_all(rwids, tx),
+            PendingWrite::EvalSubmitOne(id) => self.submit_eval(id, tx),
+            PendingWrite::EvalSubmitAll(ids) => self.submit_eval_all(ids, tx),
         }
     }
 
@@ -5447,7 +5448,7 @@ impl App {
 
         let tx = tx.clone();
 
-        let rwid = task.rwid.clone();
+        let task_id = task.id.clone();
 
         self.spawn_authenticated(
             move |session| {
@@ -5462,13 +5463,13 @@ impl App {
                 }
             },
             tx,
-            move |result| AsyncEvent::EvalQuestionnaire(rwid.clone(), result),
+            move |result| AsyncEvent::EvalQuestionnaire(task_id.clone(), result),
         );
     }
 
     /// Submits one course's evaluation after confirmation.
 
-    fn submit_eval(&mut self, rwid: String, tx: &UnboundedSender<AsyncEvent>) {
+    fn submit_eval(&mut self, id: String, tx: &UnboundedSender<AsyncEvent>) {
 
         if self.eval.submitting || self.session.is_none() {
 
@@ -5477,13 +5478,7 @@ impl App {
             return;
         }
 
-        let Some(task) = self
-            .eval
-            .tasks
-            .iter()
-            .find(|task| task.rwid == rwid)
-            .cloned()
-        else {
+        let Some(task) = self.eval.tasks.iter().find(|task| task.id == id).cloned() else {
 
             return;
         };
@@ -5493,7 +5488,7 @@ impl App {
 
     /// Submits every unevaluated course.
 
-    fn submit_eval_all(&mut self, rwids: Vec<String>, tx: &UnboundedSender<AsyncEvent>) {
+    fn submit_eval_all(&mut self, ids: Vec<String>, tx: &UnboundedSender<AsyncEvent>) {
 
         if self.eval.submitting || self.session.is_none() {
 
@@ -5506,7 +5501,7 @@ impl App {
             .eval
             .tasks
             .iter()
-            .filter(|task| !task.evaluated && rwids.iter().any(|rwid| rwid == &task.rwid))
+            .filter(|task| !task.evaluated && ids.iter().any(|id| id == &task.id))
             .cloned()
             .collect();
 
@@ -5548,7 +5543,11 @@ impl App {
 
                             let outcome = session
                                 .api
-                                .evaluation_submit(&task, &questionnaire.default_answers())
+                                .evaluation_submit(
+                                    &task,
+                                    &questionnaire,
+                                    &questionnaire.default_answers(),
+                                )
                                 .await
                                 .map_err(format_anyhow_error)?;
 
@@ -5563,7 +5562,7 @@ impl App {
                         .await;
 
                         results.push(EvaluationCompletion {
-                            rwid: task.rwid,
+                            id: task.id,
                             course: task.course,
                             result,
                         });

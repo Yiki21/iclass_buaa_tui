@@ -118,7 +118,9 @@ deadline; a clock-in record and a submitted evaluation cannot be undone.
 account. Their previews say so; `eval-submit` additionally answers a
 questionnaire on the user's behalf. Do not call either without an explicit human
 instruction for that exact submission, and for `eval-submit` read
-`eval --show <rwid>` first if you want to know what would be submitted.
+`eval --show <task>` first if you want to know what would be submitted. `eval`
+and `eval-submit` identify a course by the `task` id it prints, not by `rwid`:
+one evaluation round (`rwid`) covers every course of the term.
 
 ## Order of operations
 
