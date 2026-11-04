@@ -24,6 +24,11 @@ pub enum FailureKind {
     AuthExpired,
     Credentials,
     AccountLocked,
+    /// The SSO asked for an image captcha and nobody was there to type it.
+    ///
+    /// Retrying the same unattended call meets the same captcha, so this is
+    /// not retryable; a person has to run the command in a terminal once.
+    CaptchaRequired,
     RateLimited,
     ConnectTimeout,
     ReadTimeout,
@@ -47,6 +52,7 @@ impl FailureKind {
             Self::AuthExpired => "not_authenticated",
             Self::Credentials => "not_authenticated",
             Self::AccountLocked => "account_locked",
+            Self::CaptchaRequired => "captcha_required",
             Self::RateLimited => "rate_limited",
             Self::ConnectTimeout => "connect_timeout",
             Self::ReadTimeout => "read_timeout",
@@ -145,6 +151,11 @@ pub fn classify_text(text: &str, operation: Operation) -> Classification {
     } else if contains("timed out") || contains("timeout") || contains("超时") {
 
         FailureKind::UpstreamTimeout
+    } else if contains("统一认证要求验证码") || contains("登录需要验证码") {
+
+        // Only the unified-auth wording: the seminar-room slider captcha is
+        // solved automatically, and its failures are not a person's job.
+        FailureKind::CaptchaRequired
     } else if contains("423") || contains("locked") || contains("锁定") {
 
         FailureKind::AccountLocked
@@ -297,6 +308,26 @@ mod tests {
 
     #[test]
 
+    fn an_unanswered_captcha_is_its_own_code_and_never_retried() {
+
+        let classification = classify_text(
+            "统一认证要求验证码，验证码图片已保存到 /home/me/.local/state/iclass-buaa/captcha.png",
+            Operation::Read,
+        );
+
+        assert_eq!(classification.code(), "captcha_required");
+
+        assert!(!classification.retryable);
+
+        assert_ne!(
+            classify_text("验证码校验失败", Operation::Write).code(),
+            "captcha_required",
+            "研讨室滑块验证码由程序求解，不应要求用户输入"
+        );
+    }
+
+    #[test]
+
     fn cause_chain_transport_error_beats_login_context() {
 
         let error = anyhow!("登录请求失败").context("读取响应超时");
@@ -401,6 +432,7 @@ mod tests {
             FailureKind::AuthExpired,
             FailureKind::Credentials,
             FailureKind::AccountLocked,
+            FailureKind::CaptchaRequired,
             FailureKind::RateLimited,
             FailureKind::ConnectTimeout,
             FailureKind::ReadTimeout,
@@ -420,6 +452,7 @@ mod tests {
                 FailureKind::AuthExpired
                 | FailureKind::Credentials
                 | FailureKind::AccountLocked
+                | FailureKind::CaptchaRequired
                 | FailureKind::RateLimited
                 | FailureKind::ConnectTimeout
                 | FailureKind::ReadTimeout

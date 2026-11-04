@@ -548,3 +548,204 @@ fn help_popup_ignores_keys_it_does_not_own() {
 
     assert_eq!(app.help_scroll, 0);
 }
+
+/// A login challenge carrying a real picture, as the SSO sends it.
+
+fn captcha_challenge(message: Option<&str>) -> LoginCaptchaChallenge {
+
+    let mut image = Vec::new();
+
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(150, 60, |x, y| {
+
+        image::Luma([if (x / 10 + y / 10) % 2 == 0 { 0 } else { 255 }])
+    }))
+    .write_to(
+        &mut std::io::Cursor::new(&mut image),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+
+    LoginCaptchaChallenge {
+        login_url: "https://sso.buaa.edu.cn/login".into(),
+        action_url: "https://sso.buaa.edu.cn/login".into(),
+        form: Vec::new(),
+        captcha_id: "cap-1".into(),
+        captcha_path: Some("/state/iclass-buaa/captcha.png".into()),
+        image,
+        message: message.map(str::to_string),
+        page_hint: String::new(),
+        captcha_field_names: vec!["captcha".into()],
+    }
+}
+
+fn login_waiting_for_captcha() -> App {
+
+    let mut app = App::default();
+
+    app.login.vpn_password = "secret".into();
+
+    app.handle_async(
+        AsyncEvent::LoginCaptcha(Ok(PendingCaptchaLogin {
+            api:       IClassApi::new(false).unwrap(),
+            input:     app.login.to_input(),
+            challenge: captcha_challenge(None),
+        })),
+        &mpsc::unbounded_channel().0,
+    );
+
+    app
+}
+
+fn draw_sized(app: &App, width: u16, height: u16) -> String {
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+    terminal
+        .draw(|frame| crate::ui::render(frame, app))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+
+    (0..height)
+        .map(|y| {
+
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+
+fn a_captcha_challenge_focuses_the_field_and_takes_every_letter() {
+
+    let (tx, _) = mpsc::unbounded_channel();
+
+    let mut app = login_waiting_for_captcha();
+
+    assert_eq!(app.login.current_focus(), LoginFocus::Captcha);
+
+    // `v`, `D`, `q` and `?` are shortcuts elsewhere on the login screen; in a
+    // text field they are part of what is typed.
+    for ch in "22v37nDq?".chars() {
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &tx);
+    }
+
+    assert_eq!(app.login.captcha, "22v37nDq?");
+
+    assert!(!app.should_quit);
+
+    assert!(!app.show_help);
+
+    // On an option row the shortcuts still work.
+    app.login.focus_on(LoginFocus::RememberMe);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &tx);
+
+    assert!(app.should_quit);
+}
+
+#[test]
+
+fn the_login_card_draws_the_captcha_picture_and_names_the_saved_file() {
+
+    let app = login_waiting_for_captcha();
+
+    let screen = draw_sized(&app, 100, 40);
+
+    assert!(
+        screen.matches('▀').count() >= 60 * 10,
+        "验证码图片应以半块字符画在登录卡片里：\n{screen}"
+    );
+
+    assert!(screen.contains("ctrl+r"), "{screen}");
+
+    assert!(
+        screen.contains("/state/iclass-buaa/captcha.png"),
+        "{screen}"
+    );
+
+    // Too short for a legible picture: the card still fits and points at the
+    // file instead.
+    let cramped = draw_sized(&app, 100, 18);
+
+    assert!(!cramped.contains('▀'), "{cramped}");
+
+    assert!(cramped.contains("ctrl+o"), "{cramped}");
+}
+
+#[test]
+
+fn a_wrong_code_replaces_the_picture_and_says_why() {
+
+    let mut app = login_waiting_for_captcha();
+
+    app.login.captcha = "wrong".into();
+
+    app.handle_async(
+        AsyncEvent::LoginCaptcha(Ok(PendingCaptchaLogin {
+            api:       IClassApi::new(false).unwrap(),
+            input:     app.login.to_input(),
+            challenge: captcha_challenge(Some("验证码错误")),
+        })),
+        &mpsc::unbounded_channel().0,
+    );
+
+    assert!(app.login.captcha.is_empty());
+
+    assert!(app.login.captcha_required);
+
+    assert!(
+        draw_sized(&app, 100, 40)
+            .replace(' ', "")
+            .contains("验证码错误")
+    );
+}
+
+#[test]
+
+fn the_venue_captcha_prompt_owns_the_keyboard_until_dismissed() {
+
+    let (tx, _) = mpsc::unbounded_channel();
+
+    let mut app = App::default();
+
+    app.screen = Screen::Workspace;
+
+    app.active_tab = WorkspaceTab::Venue;
+
+    app.handle_async(
+        AsyncEvent::VenueCaptcha(Box::new(VenueCaptchaPrompt {
+            api:       IClassApi::new(false).unwrap(),
+            challenge: captcha_challenge(None),
+            code:      String::new(),
+            busy:      false,
+        })),
+        &tx,
+    );
+
+    // `e` would open the event log and `?` the help popup.
+    for ch in "e?ab".chars() {
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &tx);
+    }
+
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &tx);
+
+    assert_eq!(app.venue_captcha.as_ref().unwrap().code, "e?a");
+
+    assert!(!app.show_event_log && !app.show_help);
+
+    let screen = draw_sized(&app, 100, 40);
+
+    assert!(screen.replace(' ', "").contains("研讨室登录"), "{screen}");
+
+    assert!(screen.matches('▀').count() >= 60 * 10, "{screen}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+
+    assert!(app.venue_captcha.is_none());
+}

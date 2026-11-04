@@ -77,10 +77,142 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_task_detail_popup(frame, app);
     }
 
+    // The prompt owns the keyboard, so it is drawn over anything else open.
+    if app.venue_captcha.is_some() && !app.busy {
+
+        render_venue_captcha_popup(frame, app);
+    }
+
     if app.show_help {
 
         render_help_popup(frame, app);
     }
+}
+
+/// The captcha picture as half-block lines, at most `max_cols` × `max_rows`.
+
+fn captcha_picture(image: &[u8], max_cols: u16, max_rows: u16) -> Option<Vec<Line<'static>>> {
+
+    let blocks = crate::captcha::half_blocks(image, usize::from(max_cols), usize::from(max_rows))?;
+
+    Some(
+        blocks
+            .rows
+            .iter()
+            .map(|row| {
+
+                row.iter()
+                    .map(|&(top, bottom)| {
+
+                        Span::styled(
+                            "▀",
+                            Style::default()
+                                .fg(Color::Rgb(top, top, top))
+                                .bg(Color::Rgb(bottom, bottom, bottom)),
+                        )
+                    })
+                    .collect::<Line>()
+            })
+            .collect(),
+    )
+}
+
+/// Most rows the picture may take. 15 rows show the SSO's 150×60 picture at
+/// half size, where its characters are still easy to read.
+
+const CAPTCHA_MAX_ROWS: u16 = 15;
+
+/// Fewer rows than this and the glyphs are not legible; the saved file is
+/// the better option then.
+
+const CAPTCHA_MIN_ROWS: u16 = 8;
+
+fn render_venue_captcha_popup(frame: &mut Frame, app: &App) {
+
+    let Some(prompt) = &app.venue_captcha else {
+
+        return;
+    };
+
+    let screen = frame.area();
+
+    let width = 80.min(screen.width);
+
+    // Picture, blank, message, input, blank, path, keys, plus two borders.
+    let chrome = 7 + 2;
+
+    let picture_rows = CAPTCHA_MAX_ROWS.min(screen.height.saturating_sub(chrome));
+
+    let picture = (picture_rows >= CAPTCHA_MIN_ROWS)
+        .then(|| {
+
+            captcha_picture(
+                &prompt.challenge.image,
+                width.saturating_sub(4),
+                picture_rows,
+            )
+        })
+        .flatten()
+        .unwrap_or_default();
+
+    let height = (picture.len() as u16 + chrome).min(screen.height);
+
+    let area = Rect {
+        x: screen.x + (screen.width - width) / 2,
+        y: screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Span::styled(" 研讨室登录 · 验证码 ", theme::title_style()))
+        .border_style(Style::default().fg(theme::WARN));
+
+    let inner = block.inner(area);
+
+    frame.render_widget(block, area);
+
+    let mut lines = picture;
+
+    if lines.is_empty() {
+
+        lines.push(Line::styled(
+            "终端太小或图片无法解码，请 ctrl+o 打开图片",
+            Style::default().fg(theme::WARN),
+        ));
+    }
+
+    lines.push(Line::from(""));
+
+    lines.push(match &prompt.challenge.message {
+        Some(message) => Line::styled(message.clone(), Style::default().fg(theme::ERROR)),
+        None => Line::styled("统一认证要求验证码，照图输入：", theme::muted_style()),
+    });
+
+    lines.push(Line::from(vec![
+        Span::styled("验证码 › ", theme::label_style()),
+        Span::styled(prompt.code.clone(), theme::text_style()),
+        Span::styled(
+            if prompt.busy { "  处理中..." } else { "▏" },
+            theme::muted_style(),
+        ),
+    ]));
+
+    lines.push(Line::from(""));
+
+    lines.push(Line::styled(
+        format!("已保存: {}", prompt.challenge.path_hint()),
+        theme::muted_style(),
+    ));
+
+    lines.push(Line::styled(
+        "enter 提交 · ctrl+r 换一张 · ctrl+o 打开图片 · esc 取消",
+        theme::muted_style(),
+    ));
+
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 /// Renders the confirmation dialog for a pending write.
@@ -286,12 +418,42 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     let area = frame.area();
 
-    let card_width = 66.min(area.width);
+    let captcha = app
+        .pending_captcha_login
+        .as_ref()
+        .filter(|_| app.login.captcha_required)
+        .map(|pending| &pending.challenge);
+
+    // The picture needs more width than the fields to stay legible.
+    let card_width = if captcha.is_some() { 80 } else { 66 }.min(area.width);
 
     // Inner rows: title 1 + mode 1 + fields (3 each) + tail 2, plus 2 border rows.
     let field_count: u16 = if app.login.captcha_required { 4 } else { 3 };
 
-    let card_height = (1 + 1 + field_count * 3 + 2 + 2).min(area.height.saturating_sub(1));
+    let base_height = 1 + 1 + field_count * 3 + 2 + 2;
+
+    // The picture takes whatever height is left, up to its natural size, plus
+    // one row for the server's message or the key hint.
+    let picture = captcha
+        .and_then(|challenge| {
+
+            let rows = CAPTCHA_MAX_ROWS.min(area.height.saturating_sub(1 + base_height + 1));
+
+            (rows >= CAPTCHA_MIN_ROWS)
+                .then(|| captcha_picture(&challenge.image, card_width.saturating_sub(4), rows))
+                .flatten()
+        })
+        .unwrap_or_default();
+
+    let captcha_height = if captcha.is_some() {
+
+        picture.len() as u16 + 1
+    } else {
+
+        0
+    };
+
+    let card_height = (base_height + captcha_height).min(area.height.saturating_sub(1));
 
     let card = Rect {
         x:      area.x + (area.width.saturating_sub(card_width)) / 2,
@@ -312,13 +474,35 @@ fn render_login(frame: &mut Frame, app: &App) {
 
     frame.render_widget(block, card);
 
-    let [title, mode, fields, tail] = Layout::vertical([
+    let [title, mode, captcha_area, fields, tail] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(captcha_height),
         Constraint::Min(3),
         Constraint::Length(2),
     ])
     .areas(inner);
+
+    if let Some(challenge) = captcha {
+
+        let mut lines = picture;
+
+        lines.push(match &challenge.message {
+            Some(message) => Line::styled(message.clone(), Style::default().fg(theme::ERROR)),
+            None if lines.is_empty() => {
+                Line::styled(
+                    "终端太小，看不到验证码：ctrl+o 打开图片",
+                    Style::default().fg(theme::WARN),
+                )
+            }
+            None => Line::styled("ctrl+r 换一张 · ctrl+o 打开图片", theme::muted_style()),
+        });
+
+        frame.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            captcha_area,
+        );
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -435,8 +619,8 @@ fn render_login(frame: &mut Frame, app: &App) {
         .map(|pending| {
 
             format!(
-                "验证码图片: {} | enter 继续同一登录会话",
-                pending.challenge.captcha_path
+                "验证码已保存: {} · enter 提交",
+                pending.challenge.path_hint()
             )
         })
         .unwrap_or_else(|| "D 自检 · v 失败详情 · ? 帮助 · q 退出".to_string());
@@ -5514,8 +5698,11 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         Line::from("tab / shift+tab: 切换字段"),
         Line::from("space: 切换 VPN 模式或记住我"),
         Line::from("enter: 登录"),
-        Line::from("D: 执行 WebVPN / SSO / 签到 / 博雅自检"),
-        Line::from("v: 查看最近一次登录失败详情"),
+        Line::from("D: 执行 WebVPN / SSO / 签到 / 博雅自检（光标在选项行时）"),
+        Line::from("v: 查看最近一次登录失败详情（光标在选项行时）"),
+        Line::from("输入框内所有字母都按输入处理，不触发快捷键"),
+        Line::from("验证码: 图片画在登录卡片里；ctrl+r 换一张，ctrl+o 用看图软件打开"),
+        Line::from("验证码图片保存在状态目录的 captcha.png（Linux: ~/.local/state/iclass-buaa/）"),
         Line::from("y: 复制最近错误（事件日志打开时）"),
         Line::from("C: 清空事件日志（事件日志打开时）"),
         Line::from(""),

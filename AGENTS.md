@@ -74,6 +74,7 @@ With `--json`, a failure also writes a structured report to stderr:
 | `resource_unavailable` | seat/room taken by someone else, or not bookable | pick another |
 | `already_booked` | you already hold a booking in that slot | cancel the existing one, or pick another slot/date; do not retry |
 | `account_locked` | upstream locked the account | wait for the lock window to expire |
+| `captcha_required` | SSO asked for an image captcha and no terminal could answer it | ask the user to run the same command in an interactive terminal once (it shows the captcha and reads the code); the picture is saved under the state dir as `captcha.png`; do not retry unattended |
 | `rate_limited` | too many requests | back off |
 | `connect_timeout`, `read_timeout` | the request timed out connecting / reading | retry with backoff |
 | `upstream_timeout`, `network_error`, `upstream_error` | transient | retry with backoff |

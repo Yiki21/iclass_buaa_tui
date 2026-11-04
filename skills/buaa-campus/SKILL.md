@@ -41,6 +41,7 @@ Act on `code`:
 | `resource_unavailable` | the seat/room/course is taken by someone else or closed; offer an alternative |
 | `already_booked` | the user already holds a booking in that slot; offer to cancel it or pick another slot/date — do not retry |
 | `account_locked` | stop; the SSO lock clears on its own after a while |
+| `captcha_required` | stop; ask the user to run the same command in their own terminal, where it shows the captcha and reads the code — do not retry unattended |
 | `rate_limited` | back off at least a minute |
 | `connect_timeout`, `read_timeout` | retry with backoff; a write that timed out may have landed, so re-read before repeating it |
 | `upstream_timeout`, `network_error`, `upstream_error` | retry with backoff, at most 3 times |

@@ -57,6 +57,15 @@ pub enum AsyncEvent {
     },
     Login(Result<LoginSuccess, LoginFailure>),
     LoginCaptcha(Result<PendingCaptchaLogin, String>),
+    /// A new picture for the pending login captcha.
+    LoginCaptchaRefreshed(Result<LoginCaptchaChallenge, String>),
+    /// The seminar-room login stopped at a captcha; opens the prompt.
+    VenueCaptcha(Box<VenueCaptchaPrompt>),
+    /// A new picture for the seminar-room captcha.
+    VenueCaptchaRefreshed(Result<LoginCaptchaChallenge, String>),
+    /// A seminar-room captcha was submitted. `Ok(None)` means the session is
+    /// established and cached; `Ok(Some)` is a new challenge after a wrong code.
+    VenueCaptchaSubmitted(Result<Option<LoginCaptchaChallenge>, String>),
     Refresh(Result<Vec<CourseDetailItem>, String>),
     Sign(String, Result<SignOutcome, String>),
     BykcSync(Box<Result<BykcSyncSuccess, String>>),
@@ -140,6 +149,23 @@ pub struct PendingCaptchaLogin {
     pub api:       IClassApi,
     pub input:     LoginInput,
     pub challenge: LoginCaptchaChallenge,
+}
+
+/// The captcha prompt for the seminar-room login.
+///
+/// Why a separate prompt:
+/// The seminar-room service logs in on its own direct SSO session, after the
+/// main login is done, so the login form is long gone when it meets a
+/// captcha. The prompt keeps the client that holds that SSO conversation, so
+/// the code is submitted to the same session that asked for it.
+#[derive(Clone, Debug)]
+
+pub struct VenueCaptchaPrompt {
+    pub api:       IClassApi,
+    pub challenge: LoginCaptchaChallenge,
+    pub code:      String,
+    /// A submission or a refresh is in flight.
+    pub busy:      bool,
 }
 
 #[derive(Clone, Debug)]
@@ -549,6 +575,19 @@ struct RememberedLogin {
     vpn_password: String,
 }
 
+impl LoginFocus {
+    /// Whether the field takes typed text, in which case every printable key
+    /// belongs to it rather than to a shortcut.
+
+    pub fn takes_text(self) -> bool {
+
+        matches!(
+            self,
+            Self::StudentId | Self::VpnUsername | Self::VpnPassword | Self::Captcha
+        )
+    }
+}
+
 impl LoginForm {
     fn from_remembered(remembered: RememberedLogin) -> Self {
 
@@ -619,6 +658,20 @@ impl LoginForm {
         }
 
         self.focus = (self.focus + len - 1) % len;
+    }
+
+    /// Moves the focus to `target` when it is visible.
+
+    pub fn focus_on(&mut self, target: LoginFocus) {
+
+        if let Some(index) = self
+            .visible_focuses()
+            .iter()
+            .position(|focus| *focus == target)
+        {
+
+            self.focus = index;
+        }
     }
 
     pub fn reset_focus_bounds(&mut self) {
@@ -1255,6 +1308,7 @@ pub struct App {
     pub version_error:         Option<String>,
     pub login_diagnostic:      Option<LoginDiagnostic>,
     pub pending_captcha_login: Option<PendingCaptchaLogin>,
+    pub venue_captcha:         Option<VenueCaptchaPrompt>,
     pub show_login_details:    bool,
     pub doctor_report:         Option<DoctorReport>,
     pub show_doctor_details:   bool,
@@ -1323,6 +1377,7 @@ impl Default for App {
             version_error:         None,
             login_diagnostic:      None,
             pending_captcha_login: None,
+            venue_captcha:         None,
             show_login_details:    false,
             doctor_report:         None,
             show_doctor_details:   false,
@@ -1518,6 +1573,13 @@ impl App {
     /// Global single-letter shortcuts must not steal characters from the login
     /// form or the course search box, or typing a course name would trigger them.
 
+    /// The login form has a text field focused, so printable keys are input.
+
+    fn login_field_takes_text(&self) -> bool {
+
+        self.screen == Screen::Login && !self.busy && self.login.current_focus().takes_text()
+    }
+
     pub fn is_text_input_active(&self) -> bool {
 
         (self.screen == Screen::Login && !self.busy)
@@ -1626,6 +1688,13 @@ impl App {
             return;
         }
 
+        if self.venue_captcha.is_some() {
+
+            self.handle_venue_captcha_key(key, tx);
+
+            return;
+        }
+
         if self.venue.form.is_some() {
 
             self.handle_venue_form_key(key, tx);
@@ -1693,7 +1762,7 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Char('?') {
+        if key.code == KeyCode::Char('?') && !self.login_field_takes_text() {
 
             self.show_help = true;
 
@@ -2398,23 +2467,104 @@ impl App {
                 match result {
                     Ok(pending) => {
 
-                        self.pending_captcha_login = Some(pending.clone());
+                        let message = pending.challenge.message.clone();
+
+                        self.pending_captcha_login = Some(pending);
 
                         self.login.captcha_required = true;
 
                         self.login.captcha.clear();
 
-                        self.login.reset_focus_bounds();
+                        self.login.focus_on(LoginFocus::Captcha);
 
-                        self.warn(format!(
-                            "检测到验证码，请查看 {} 并输入后按 enter 继续",
-                            pending.challenge.captcha_path
-                        ));
+                        match message {
+                            Some(message) => {
+                                self.warn(format!("{message}；已换新验证码，请重新输入"))
+                            }
+                            None => {
+                                self.warn(
+                                    "统一认证要求验证码：照图输入后按 enter（ctrl+r \
+                                     换一张，ctrl+o 用看图软件打开）",
+                                )
+                            }
+                        }
                     }
                     Err(error) => {
 
                         self.error(format!("验证码准备失败: {error}"));
                     }
+                }
+            }
+            AsyncEvent::LoginCaptchaRefreshed(result) => {
+                match result {
+                    Ok(challenge) => {
+                        if let Some(pending) = &mut self.pending_captcha_login {
+
+                            pending.challenge = challenge;
+
+                            self.login.captcha.clear();
+
+                            self.info("已换一张验证码");
+                        }
+                    }
+                    Err(error) => self.error(format!("换验证码失败: {error}")),
+                }
+            }
+            AsyncEvent::VenueCaptcha(prompt) => {
+
+                self.venue_captcha = Some(*prompt);
+
+                self.warn("研讨室登录要求验证码：照图输入后按 enter，esc 取消");
+            }
+            AsyncEvent::VenueCaptchaRefreshed(result) => {
+
+                if let Some(prompt) = &mut self.venue_captcha {
+
+                    prompt.busy = false;
+
+                    match result {
+                        Ok(challenge) => {
+
+                            prompt.challenge = challenge;
+
+                            prompt.code.clear();
+                        }
+                        Err(error) => self.error(format!("换验证码失败: {error}")),
+                    }
+                }
+            }
+            AsyncEvent::VenueCaptchaSubmitted(result) => {
+
+                let Some(prompt) = &mut self.venue_captcha else {
+
+                    return;
+                };
+
+                prompt.busy = false;
+
+                match result {
+                    Ok(None) => {
+
+                        self.venue_captcha = None;
+
+                        self.success("研讨室登录成功，正在载入研讨室列表");
+
+                        self.refresh_venue(tx);
+                    }
+                    Ok(Some(challenge)) => {
+
+                        let message = challenge
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "验证码错误".to_string());
+
+                        prompt.challenge = challenge;
+
+                        prompt.code.clear();
+
+                        self.warn(format!("{message}；已换新验证码，请重新输入"));
+                    }
+                    Err(error) => self.error(format!("研讨室验证码登录失败: {error}")),
                 }
             }
             AsyncEvent::Refresh(result) => {
@@ -3220,18 +3370,35 @@ impl App {
             return;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+
+            match key.code {
+                KeyCode::Char('r') => self.refresh_login_captcha(tx),
+                KeyCode::Char('o') => self.open_login_captcha(),
+                _ => {}
+            }
+
+            return;
+        }
+
+        // In a text field every printable key is input. A captcha such as
+        // `22v37n` or a password containing `q` must be typeable, so the
+        // letter shortcuts only apply on the option rows.
+        let typing = self.login.current_focus().takes_text();
+
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') if !typing => self.should_quit = true,
             KeyCode::Tab | KeyCode::Down => self.login.next_focus(),
             KeyCode::BackTab | KeyCode::Up => self.login.prev_focus(),
             KeyCode::Enter => self.submit_login(tx),
-            KeyCode::Char('v') => {
+            KeyCode::Char('v') if !typing => {
                 if self.login_diagnostic.is_some() {
 
                     self.show_login_details = true;
                 }
             }
-            KeyCode::Char('D') => self.run_doctor(tx),
+            KeyCode::Char('D') if !typing => self.run_doctor(tx),
             KeyCode::Char(' ') if self.login.current_focus() == LoginFocus::UseVpn => {
 
                 self.login.use_vpn = !self.login.use_vpn;
@@ -4325,6 +4492,162 @@ impl App {
         spawn_login(input, self.task_sender(tx));
     }
 
+    /// Fetches a new picture for the pending login captcha.
+
+    fn refresh_login_captcha(&mut self, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(pending) = self.pending_captcha_login.clone() else {
+
+            return;
+        };
+
+        self.info("正在换一张验证码...");
+
+        self.task_sender(tx).spawn(|tx| {
+
+            async move {
+
+                let mut challenge = pending.challenge;
+
+                let result = pending
+                    .api
+                    .refresh_captcha(&mut challenge)
+                    .await
+                    .map(|()| challenge)
+                    .map_err(format_anyhow_error);
+
+                let _ = tx.send(AsyncEvent::LoginCaptchaRefreshed(result));
+            }
+        });
+    }
+
+    fn open_login_captcha(&mut self) {
+
+        let Some(pending) = &self.pending_captcha_login else {
+
+            return;
+        };
+
+        let path = pending.challenge.captcha_path.clone();
+
+        self.open_captcha_file(path);
+    }
+
+    fn open_captcha_file(&mut self, path: Option<String>) {
+
+        let Some(path) = path else {
+
+            self.warn("验证码图片未能保存到磁盘，只能照界面上的图输入");
+
+            return;
+        };
+
+        match open_path_with_system(Path::new(&path)) {
+            Ok(()) => self.info(format!("已用系统看图软件打开 {path}")),
+            Err(error) => self.error(format!("{error}；图片位置: {path}")),
+        }
+    }
+
+    /// Keys for the seminar-room captcha prompt, which owns the keyboard.
+
+    fn handle_venue_captcha_key(&mut self, key: KeyEvent, tx: &UnboundedSender<AsyncEvent>) {
+
+        let Some(prompt) = self.venue_captcha.as_mut() else {
+
+            return;
+        };
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+
+            match key.code {
+                KeyCode::Char('r') if !prompt.busy => {
+
+                    prompt.busy = true;
+
+                    let api = prompt.api.clone();
+
+                    let mut challenge = prompt.challenge.clone();
+
+                    self.task_sender(tx).spawn(|tx| {
+
+                        async move {
+
+                            let result = api
+                                .refresh_captcha(&mut challenge)
+                                .await
+                                .map(|()| challenge)
+                                .map_err(format_anyhow_error);
+
+                            let _ = tx.send(AsyncEvent::VenueCaptchaRefreshed(result));
+                        }
+                    });
+                }
+                KeyCode::Char('o') => {
+
+                    let path = prompt.challenge.captcha_path.clone();
+
+                    self.open_captcha_file(path);
+                }
+                _ => {}
+            }
+
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+
+                self.venue_captcha = None;
+
+                self.info("已取消研讨室验证码登录；再次载入研讨室时会重新登录");
+            }
+            KeyCode::Backspace => {
+
+                prompt.code.pop();
+            }
+            KeyCode::Enter if !prompt.busy => {
+
+                if prompt.code.trim().is_empty() {
+
+                    self.warn("请输入验证码后按 enter");
+
+                    return;
+                }
+
+                prompt.busy = true;
+
+                let api = prompt.api.clone();
+
+                let challenge = prompt.challenge.clone();
+
+                let code = prompt.code.clone();
+
+                let cache = self.venue_api.clone();
+
+                self.task_sender(tx).spawn(|tx| {
+
+                    async move {
+
+                        let result = match api.continue_sso_captcha(&challenge, &code).await {
+                            Ok(None) => {
+
+                                *cache.lock().await = Some(api);
+
+                                Ok(None)
+                            }
+                            Ok(Some(challenge)) => Ok(Some(challenge)),
+                            Err(diagnostic) => Err(diagnostic.summary),
+                        };
+
+                        let _ = tx.send(AsyncEvent::VenueCaptchaSubmitted(result));
+                    }
+                });
+            }
+            KeyCode::Char(ch) if !prompt.busy => prompt.code.push(ch),
+            _ => {}
+        }
+    }
+
     fn run_doctor(&mut self, tx: &UnboundedSender<AsyncEvent>) {
 
         self.busy = true;
@@ -4735,11 +5058,25 @@ impl App {
 
                     if cached.is_none() {
 
-                        *cached = Some(
-                            IClassApi::for_venue(&input)
-                                .await
-                                .map_err(format_anyhow_error)?,
-                        );
+                        let api = IClassApi::new(false).map_err(format_anyhow_error)?;
+
+                        match api.start_sso_only(&input).await {
+                            Ok(None) => *cached = Some(api),
+                            Ok(Some(challenge)) => {
+
+                                let _ = tx.send(AsyncEvent::VenueCaptcha(Box::new(
+                                    VenueCaptchaPrompt {
+                                        api,
+                                        challenge,
+                                        code: String::new(),
+                                        busy: false,
+                                    },
+                                )));
+
+                                return Err("研讨室登录需要验证码，请在弹窗中输入".to_string());
+                            }
+                            Err(diagnostic) => return Err(diagnostic.summary),
+                        }
                     }
 
                     cached.clone().ok_or_else(|| "研讨室会话未建立".to_string())
@@ -6026,6 +6363,8 @@ impl App {
 
         self.pending_captcha_login = None;
 
+        self.venue_captcha = None;
+
         self.login.captcha.clear();
 
         self.login.captcha_required = false;
@@ -6668,7 +7007,16 @@ fn spawn_continue_captcha_login(pending: PendingCaptchaLogin, captcha: String, t
                 .continue_captcha_login(&pending.input, &pending.challenge, &captcha)
                 .await
             {
-                Ok(session) => {
+                Ok(LoginStart::Captcha(challenge)) => {
+
+                    let _ = tx.send(AsyncEvent::LoginCaptcha(Ok(PendingCaptchaLogin {
+                        challenge,
+                        ..pending
+                    })));
+
+                    return;
+                }
+                Ok(LoginStart::Complete(session)) => {
 
                     let courses = pending.api.get_merged_course_details(&session, 7).await;
 

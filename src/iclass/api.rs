@@ -10,7 +10,7 @@ use reqwest::header::{
 };
 use scraper::{Html, Selector};
 use serde_json::Value;
-use std::{collections::HashSet, fs, net::ToSocketAddrs, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::HashSet, net::ToSocketAddrs, sync::Arc, time::Instant};
 use tokio::sync::Semaphore;
 
 use crate::bykc::BykcApi;
@@ -72,6 +72,39 @@ struct LoginFlowResult {
     body:        String,
     http_status: reqwest::StatusCode,
 }
+
+/// Where following a credential submission ended.
+
+enum LoginFlowStep {
+    Finished(LoginFlowResult),
+    /// The SSO answered with its login form again, now asking for a captcha.
+    ///
+    /// Why this is not an error:
+    /// The SSO usually shows no captcha on the first page and only asks for
+    /// one after the password was posted. Treating that page as a failure
+    /// meant a captcha could never be entered, so it is handed back to be
+    /// turned into a challenge.
+    CaptchaPage {
+        final_url: String,
+        body:      String,
+        message:   Option<String>,
+    },
+}
+
+/// What a credential or captcha submission led to.
+
+enum SubmitOutcome {
+    Done,
+    Captcha(LoginFormState, Option<String>),
+}
+
+/// How many captcha submissions the CLI prompt accepts before giving up.
+
+const MAX_CAPTCHA_ROUNDS: usize = 5;
+
+/// How many fresh pictures one CLI captcha round may ask for.
+
+const MAX_CAPTCHA_REFRESHES: usize = 10;
 
 impl IClassApi {
     /// Creates shared-cookie iClass clients. The normal client follows redirects,
@@ -159,6 +192,17 @@ impl IClassApi {
 
     pub(crate) async fn for_venue_fixture(input: &LoginInput, origin: &str) -> Result<Self> {
 
+        let api = Self::sso_fixture(origin)?;
+
+        Self::authenticate_venue_client(api, input).await
+    }
+
+    /// A direct client whose SSO and seminar-room endpoints point at a local
+    /// fixture server.
+    #[cfg(test)]
+
+    pub(crate) fn sso_fixture(origin: &str) -> Result<Self> {
+
         let mut api = Self::new(false)?;
 
         api.client = super::http::client_builder()
@@ -176,7 +220,7 @@ impl IClassApi {
 
         api.venue_base_override = Some(format!("{origin}/venue-zhjs-server/"));
 
-        Self::authenticate_venue_client(api, input).await
+        Ok(api)
     }
 
     /// Logs in and captures the server clock offset needed by later sign requests.
@@ -302,33 +346,168 @@ impl IClassApi {
             .await
             .map_err(|error| diagnose_login_error("sso_login_page", error, None, None, None))?;
 
-        if let Some(captcha_id) = form_state.captcha_id.clone() {
+        if form_state.captcha_id.is_some() {
 
-            let captcha_path = self
-                .download_captcha_image(&captcha_id)
-                .await
-                .map_err(|error| diagnose_login_error("sso_captcha", error, None, None, None))?;
-
-            return Ok(SsoPhase::Captcha(LoginCaptchaChallenge {
-                login_url: form_state.login_url,
-                action_url: form_state.action_url,
-                form: form_state.form,
-                captcha_id,
-                captcha_path: captcha_path.display().to_string(),
-                page_hint: form_state.page_hint,
-                captcha_field_names: form_state.captcha_field_names,
-            }));
+            return self.captcha_phase(form_state, None).await;
         }
 
-        self.finish_sso_login_submission(
-            &form_state.login_url,
-            &form_state.action_url,
-            &form_state.form,
-        )
-        .await
-        .map_err(|error| diagnose_login_error("sso_login_submit", error, None, None, None))?;
+        let outcome = self
+            .finish_sso_login_submission(
+                &form_state.login_url,
+                &form_state.action_url,
+                &form_state.form,
+            )
+            .await
+            .map_err(|error| diagnose_login_error("sso_login_submit", error, None, None, None))?;
 
-        Ok(SsoPhase::SessionEstablished)
+        match outcome {
+            SubmitOutcome::Done => Ok(SsoPhase::SessionEstablished),
+            SubmitOutcome::Captcha(state, message) => self.captcha_phase(state, message).await,
+        }
+    }
+
+    /// Turns a login form that asks for a captcha into a challenge, fetching
+    /// the picture for it.
+
+    async fn captcha_phase(
+        &self,
+        form_state: LoginFormState,
+        message: Option<String>,
+    ) -> std::result::Result<SsoPhase, LoginDiagnostic> {
+
+        let Some(captcha_id) = form_state.captcha_id.clone() else {
+
+            return Err(diagnose_login_error(
+                "sso_captcha",
+                anyhow!("统一认证要求验证码，但页面中没有验证码编号"),
+                Some(form_state.login_url),
+                None,
+                Some(form_state.page_hint),
+            ));
+        };
+
+        let image = self
+            .fetch_captcha_image(&captcha_id)
+            .await
+            .map_err(|error| diagnose_login_error("sso_captcha", error, None, None, None))?;
+
+        Ok(SsoPhase::Captcha(LoginCaptchaChallenge {
+            login_url: form_state.login_url,
+            action_url: form_state.action_url,
+            form: form_state.form,
+            captcha_id,
+            captcha_path: save_captcha_image(&image),
+            image,
+            message,
+            page_hint: form_state.page_hint,
+            captcha_field_names: form_state.captcha_field_names,
+        }))
+    }
+
+    /// Submits a typed captcha for a challenge.
+    ///
+    /// A wrong or expired code makes the SSO show its form again with a new
+    /// picture; that comes back as another challenge rather than an error, so
+    /// the caller can simply ask again.
+
+    async fn submit_captcha(
+        &self,
+        challenge: &LoginCaptchaChallenge,
+        captcha: &str,
+    ) -> std::result::Result<SsoPhase, LoginDiagnostic> {
+
+        let captcha = crate::captcha::normalize(captcha);
+
+        if captcha.is_empty() {
+
+            return Err(LoginDiagnostic {
+                kind:        LoginFailureKind::Validation,
+                stage:       "sso_captcha".to_string(),
+                summary:     "验证码不能为空".to_string(),
+                error_chain: vec!["验证码不能为空".to_string()],
+                final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
+                http_status: None,
+                page_hint:   Some(challenge.page_hint.clone()),
+                suggestions: vec!["输入验证码后重试".to_string()],
+            });
+        }
+
+        let form = append_captcha_fields(&challenge.form, &challenge.captcha_field_names, &captcha);
+
+        let outcome = self
+            .finish_sso_login_submission(&challenge.login_url, &challenge.action_url, &form)
+            .await
+            .map_err(|error| {
+
+                diagnose_login_error(
+                    "sso_captcha_submit",
+                    error,
+                    Some(challenge.login_url.clone()),
+                    None,
+                    Some(challenge.page_hint.clone()),
+                )
+            })?;
+
+        match outcome {
+            SubmitOutcome::Done => Ok(SsoPhase::SessionEstablished),
+            SubmitOutcome::Captcha(state, message) => {
+
+                let message =
+                    message.or_else(|| Some("验证码错误或已过期，请重新输入".to_string()));
+
+                self.captcha_phase(state, message).await
+            }
+        }
+    }
+
+    /// Fetches a new picture for the same challenge.
+    ///
+    /// The SSO page does the same when its picture is clicked: it requests the
+    /// same captcha id again, and the server then expects the new picture's
+    /// code.
+
+    pub async fn refresh_captcha(&self, challenge: &mut LoginCaptchaChallenge) -> Result<()> {
+
+        let image = self.fetch_captcha_image(&challenge.captcha_id).await?;
+
+        challenge.captcha_path = save_captcha_image(&image);
+
+        challenge.image = image;
+
+        challenge.message = None;
+
+        Ok(())
+    }
+
+    /// Asks the installed terminal prompt for a code, fetching new pictures
+    /// on request. `None` when no prompt is installed or the user gave up.
+
+    async fn ask_captcha(&self, challenge: &mut LoginCaptchaChallenge) -> Option<String> {
+
+        let prompt = crate::captcha::installed_prompt()?;
+
+        for _ in 0..MAX_CAPTCHA_REFRESHES {
+
+            let shown = challenge.clone();
+
+            let answer = tokio::task::spawn_blocking(move || prompt(&shown))
+                .await
+                .ok()?;
+
+            match answer {
+                crate::captcha::Answer::Code(code) => return Some(code),
+                crate::captcha::Answer::Cancel => return None,
+                crate::captcha::Answer::Refresh => {
+
+                    if let Err(error) = self.refresh_captcha(challenge).await {
+
+                        challenge.message = Some(format!("换一张失败: {error:#}"));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub async fn login_with_diagnostic(
@@ -336,26 +515,28 @@ impl IClassApi {
         input: &LoginInput,
     ) -> std::result::Result<Session, LoginDiagnostic> {
 
-        match self.start_login(input).await? {
+        let mut step = self.start_login(input).await?;
+
+        for _ in 0..MAX_CAPTCHA_ROUNDS {
+
+            let mut challenge = match step {
+                LoginStart::Complete(session) => return Ok(session),
+                LoginStart::Captcha(challenge) => challenge,
+            };
+
+            let Some(code) = self.ask_captcha(&mut challenge).await else {
+
+                return Err(captcha_required_diagnostic(&challenge));
+            };
+
+            step = self
+                .continue_captcha_login(input, &challenge, &code)
+                .await?;
+        }
+
+        match step {
             LoginStart::Complete(session) => Ok(session),
-            LoginStart::Captcha(challenge) => {
-                Err(LoginDiagnostic {
-                    kind:        LoginFailureKind::Captcha,
-                    stage:       "vpn_captcha".to_string(),
-                    summary:     "当前 VPN 登录需要验证码，请在 TUI 中输入验证码后继续，CLI \
-                                  请改用浏览器登录"
-                        .to_string(),
-                    error_chain: vec!["当前 VPN 登录需要验证码".to_string()],
-                    final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
-                    http_status: None,
-                    page_hint:   Some(challenge.page_hint),
-                    suggestions: vec![
-                        format!("验证码图片路径: {}", challenge.captcha_path),
-                        "TUI 中可继续输入验证码".to_string(),
-                        "CLI 不支持验证码；浏览器或其他进程的会话不会共享".to_string(),
-                    ],
-                })
-            }
+            LoginStart::Captcha(challenge) => Err(captcha_required_diagnostic(&challenge)),
         }
     }
 
@@ -378,65 +559,76 @@ impl IClassApi {
         input: &LoginInput,
     ) -> std::result::Result<(), LoginDiagnostic> {
 
-        match self.authenticate_sso(input).await? {
-            SsoPhase::SessionEstablished => Ok(()),
+        let mut pending = self.start_sso_only(input).await?;
 
-            SsoPhase::Captcha(challenge) => {
-                Err(LoginDiagnostic {
-                    kind:        LoginFailureKind::Captcha,
-                    stage:       "sso_captcha".to_string(),
-                    summary:     "统一认证要求验证码，当前研讨室会话未建立；\
-                                  其他进程的登录不会共享会话"
-                        .to_string(),
-                    error_chain: vec!["统一认证要求验证码".to_string()],
-                    final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
-                    http_status: None,
-                    page_hint:   Some(challenge.page_hint),
-                    suggestions: vec![format!("验证码图片路径: {}", challenge.captcha_path)],
-                })
-            }
+        for _ in 0..MAX_CAPTCHA_ROUNDS {
+
+            let Some(mut challenge) = pending else {
+
+                return Ok(());
+            };
+
+            let Some(code) = self.ask_captcha(&mut challenge).await else {
+
+                return Err(captcha_required_diagnostic(&challenge));
+            };
+
+            pending = self.continue_sso_captcha(&challenge, &code).await?;
+        }
+
+        match pending {
+            None => Ok(()),
+            Some(challenge) => Err(captcha_required_diagnostic(&challenge)),
         }
     }
+
+    /// Runs the unified-auth phase alone, handing back a captcha challenge
+    /// instead of failing on it. `None` means the session is established.
+
+    pub async fn start_sso_only(
+        &self,
+        input: &LoginInput,
+    ) -> std::result::Result<Option<LoginCaptchaChallenge>, LoginDiagnostic> {
+
+        match self.authenticate_sso(input).await? {
+            SsoPhase::SessionEstablished => Ok(None),
+            SsoPhase::Captcha(challenge) => Ok(Some(challenge)),
+        }
+    }
+
+    /// Submits a captcha for [`Self::start_sso_only`]. A wrong code comes back
+    /// as a new challenge.
+
+    pub async fn continue_sso_captcha(
+        &self,
+        challenge: &LoginCaptchaChallenge,
+        captcha: &str,
+    ) -> std::result::Result<Option<LoginCaptchaChallenge>, LoginDiagnostic> {
+
+        match self.submit_captcha(challenge, captcha).await? {
+            SsoPhase::SessionEstablished => Ok(None),
+            SsoPhase::Captcha(challenge) => Ok(Some(challenge)),
+        }
+    }
+
+    /// Submits a captcha and, once the SSO accepts it, finishes the iClass
+    /// login. A wrong code comes back as a new challenge.
 
     pub async fn continue_captcha_login(
         &self,
         input: &LoginInput,
         challenge: &LoginCaptchaChallenge,
         captcha: &str,
-    ) -> std::result::Result<Session, LoginDiagnostic> {
+    ) -> std::result::Result<LoginStart, LoginDiagnostic> {
 
-        let captcha = captcha.trim();
-
-        if captcha.is_empty() {
-
-            return Err(LoginDiagnostic {
-                kind:        LoginFailureKind::Validation,
-                stage:       "vpn_captcha".to_string(),
-                summary:     "验证码不能为空".to_string(),
-                error_chain: vec!["验证码不能为空".to_string()],
-                final_url:   Some(super::http::diagnostic_url(&challenge.login_url)),
-                http_status: None,
-                page_hint:   Some(challenge.page_hint.clone()),
-                suggestions: vec!["输入验证码后重试".to_string()],
-            });
+        match self.submit_captcha(challenge, captcha).await? {
+            SsoPhase::SessionEstablished => {
+                self.finish_login_session(input)
+                    .await
+                    .map(LoginStart::Complete)
+            }
+            SsoPhase::Captcha(challenge) => Ok(LoginStart::Captcha(challenge)),
         }
-
-        let form = append_captcha_fields(&challenge.form, &challenge.captcha_field_names, captcha);
-
-        self.finish_sso_login_submission(&challenge.login_url, &challenge.action_url, &form)
-            .await
-            .map_err(|error| {
-
-                diagnose_login_error(
-                    "vpn_captcha_submit",
-                    error,
-                    Some(challenge.login_url.clone()),
-                    None,
-                    Some(challenge.page_hint.clone()),
-                )
-            })?;
-
-        self.finish_login_session(input).await
     }
 
     pub async fn doctor(&self) -> DoctorReport {
@@ -860,28 +1052,7 @@ impl IClassApi {
             );
         }
 
-        let document = Html::parse_document(&body);
-
-        let action_url = resolve_login_form_action(&login_url, &document)
-            .with_context(|| format!("解析 SSO 登录表单提交地址失败，最终 URL: {login_url}"))?;
-
-        let form = build_cas_login_form(&document, username, password, None).ok_or_else(|| {
-
-            anyhow!(
-                "无法从 SSO 登录页面解析登录表单，最终 URL: {}, 页面线索: {}",
-                login_url,
-                summarize_login_page(&body)
-            )
-        })?;
-
-        Ok(LoginFormState {
-            login_url,
-            action_url,
-            form,
-            captcha_id: detect_captcha_id(&body),
-            page_hint: summarize_login_page(&body),
-            captcha_field_names: collect_captcha_field_names(&document),
-        })
+        parse_login_form_state(login_url, &body, username, password)
     }
 
     async fn finish_sso_login_submission(
@@ -889,7 +1060,7 @@ impl IClassApi {
         login_url: &str,
         action_url: &str,
         form: &[(String, String)],
-    ) -> Result<()> {
+    ) -> Result<SubmitOutcome> {
 
         let response = self
             .no_redirect_client
@@ -900,7 +1071,28 @@ impl IClassApi {
             .await
             .with_context(|| format!("VPN 登录请求失败，提交地址: {action_url}"))?;
 
-        let login_flow = self.follow_sso_login_flow(response).await?;
+        let login_flow = match self.follow_sso_login_flow(response).await? {
+            LoginFlowStep::Finished(flow) => flow,
+            LoginFlowStep::CaptchaPage {
+                final_url,
+                body,
+                message,
+            } => {
+
+                let field = |name: &str| {
+
+                    form.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.as_str())
+                        .unwrap_or_default()
+                };
+
+                let state =
+                    parse_login_form_state(final_url, &body, field("username"), field("password"))?;
+
+                return Ok(SubmitOutcome::Captcha(state, message));
+            }
+        };
 
         if !login_flow.http_status.is_success() {
 
@@ -913,16 +1105,16 @@ impl IClassApi {
 
         if looks_like_login_form_page(&login_flow.body) {
 
-            return vpn_login_error(&login_flow.final_url, &login_flow.body);
+            vpn_login_error(&login_flow.final_url, &login_flow.body)?;
         }
 
-        Ok(())
+        Ok(SubmitOutcome::Done)
     }
 
     async fn follow_sso_login_flow(
         &self,
         initial_response: reqwest::Response,
-    ) -> Result<LoginFlowResult> {
+    ) -> Result<LoginFlowStep> {
 
         let mut current_response = initial_response;
 
@@ -1002,6 +1194,28 @@ impl IClassApi {
                 bail!("登录失败：{message}");
             }
 
+            if looks_like_login_form_page(&body) && detect_captcha_id(&body).is_some() {
+
+                let message = find_login_error(&body);
+
+                // A wrong password also brings the captcha up for the next
+                // attempt. Asking for a captcha then would only hide the
+                // real problem, so that one stays a credentials error.
+                if let Some(message) = message
+                    .as_deref()
+                    .filter(|message| looks_like_bad_vpn_credentials(message))
+                {
+
+                    bail!("登录失败：{message}");
+                }
+
+                return Ok(LoginFlowStep::CaptchaPage {
+                    final_url,
+                    body,
+                    message,
+                });
+            }
+
             if http_status == reqwest::StatusCode::UNAUTHORIZED {
 
                 bail!("登录失败：账号或密码错误，或密码过弱需先修改后再登录");
@@ -1017,11 +1231,11 @@ impl IClassApi {
                 bail!("登录失败：账号或密码错误");
             }
 
-            return Ok(LoginFlowResult {
+            return Ok(LoginFlowStep::Finished(LoginFlowResult {
                 final_url,
                 body,
                 http_status,
-            });
+            }));
         }
 
         bail!("SSO 登录重定向超过 16 次仍未完成")
@@ -1193,9 +1407,14 @@ impl IClassApi {
         bail!("iClass MyCenter 跳转超过 8 次仍未返回 loginName");
     }
 
-    async fn download_captcha_image(&self, captcha_id: &str) -> Result<PathBuf> {
+    async fn fetch_captcha_image(&self, captcha_id: &str) -> Result<Vec<u8>> {
 
-        let raw_url = format!("https://sso.buaa.edu.cn/captcha?captchaId={captcha_id}");
+        // The page appends a timestamp the same way, so no cache in between
+        // hands back the previous picture.
+        let raw_url = format!(
+            "https://sso.buaa.edu.cn/captcha?captchaId={captcha_id}&t={}",
+            Utc::now().timestamp_millis()
+        );
 
         let url = if self.use_vpn {
 
@@ -1205,30 +1424,35 @@ impl IClassApi {
             raw_url
         };
 
-        let bytes = self
+        #[cfg(test)]
+        let url = match &self.sso_entry_override {
+            Some(entry) => {
+
+                format!(
+                    "{}/captcha?captchaId={captcha_id}",
+                    entry.trim_end_matches("/login")
+                )
+            }
+            None => url,
+        };
+
+        let response = self
             .client
             .get(url)
             .send()
             .await
-            .context("获取验证码图片失败")?
-            .bytes()
-            .await
-            .context("读取验证码图片失败")?;
+            .context("获取验证码图片失败")?;
 
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join("auth-captchas")
-            .join(format!("iclass-buaa-tui-captcha-{captcha_id}.jpg"));
+        let status = response.status();
 
-        if let Some(parent) = path.parent() {
+        if !status.is_success() {
 
-            fs::create_dir_all(parent).context("创建项目内验证码缓存目录失败")?;
+            bail!("获取验证码图片失败，HTTP 状态: {status}");
         }
 
-        fs::write(&path, bytes)
-            .with_context(|| format!("写入验证码图片失败: {}", path.display()))?;
+        let bytes = response.bytes().await.context("读取验证码图片失败")?;
 
-        Ok(path)
+        Ok(bytes.to_vec())
     }
 
     /// Fetches user info and derives `server_time_offset_ms` from the HTTP `Date` header.
@@ -2206,6 +2430,89 @@ fn find_login_error(body: &str) -> Option<String> {
     None
 }
 
+/// Reads the SSO login form out of a page, filling in the credentials.
+
+fn parse_login_form_state(
+    login_url: String,
+    body: &str,
+    username: &str,
+    password: &str,
+) -> Result<LoginFormState> {
+
+    let document = Html::parse_document(body);
+
+    let action_url = resolve_login_form_action(&login_url, &document)
+        .with_context(|| format!("解析 SSO 登录表单提交地址失败，最终 URL: {login_url}"))?;
+
+    let form = build_cas_login_form(&document, username, password, None).ok_or_else(|| {
+
+        anyhow!(
+            "无法从 SSO 登录页面解析登录表单，最终 URL: {}, 页面线索: {}",
+            login_url,
+            summarize_login_page(body)
+        )
+    })?;
+
+    Ok(LoginFormState {
+        login_url,
+        action_url,
+        form,
+        captcha_id: detect_captcha_id(body),
+        page_hint: summarize_login_page(body),
+        captcha_field_names: collect_captcha_field_names(&document),
+    })
+}
+
+/// Saves the picture where the user can open it. A failure is logged and
+/// otherwise ignored: the picture is still drawn in the terminal.
+
+fn save_captcha_image(image: &[u8]) -> Option<String> {
+
+    match crate::captcha::save(image) {
+        Ok(path) => Some(path.display().to_string()),
+        Err(error) => {
+
+            crate::logging::event(
+                crate::logging::LogLevel::Warn,
+                "login",
+                "captcha image not saved",
+                serde_json::json!({ "error": format!("{error:#}") }),
+            );
+
+            None
+        }
+    }
+}
+
+/// The error for a captcha nobody could answer in this process.
+
+fn captcha_required_diagnostic(challenge: &LoginCaptchaChallenge) -> LoginDiagnostic {
+
+    let mut error_chain = vec!["统一认证要求验证码".to_string()];
+
+    if let Some(message) = &challenge.message {
+
+        error_chain.push(message.clone());
+    }
+
+    LoginDiagnostic {
+        kind: LoginFailureKind::Captcha,
+        stage: "sso_captcha".to_string(),
+        summary: format!(
+            "统一认证要求验证码，验证码图片已保存到 {}",
+            challenge.path_hint()
+        ),
+        error_chain,
+        final_url: Some(super::http::diagnostic_url(&challenge.login_url)),
+        http_status: None,
+        page_hint: Some(challenge.page_hint.clone()),
+        suggestions: vec![
+            "在交互式终端里直接运行该命令，即可看到验证码并输入".to_string(),
+            "或在 TUI 登录界面输入验证码；不同进程之间不共享登录会话".to_string(),
+        ],
+    }
+}
+
 fn looks_like_login_form_page(body: &str) -> bool {
 
     extract_execution_value(body).is_some()
@@ -2830,6 +3137,197 @@ mod tests {
         assert_eq!(detect_captcha_id(json_config).as_deref(), Some("captcha_2"));
 
         assert_eq!(detect_captcha_id(image_tag).as_deref(), Some("captcha-3"));
+    }
+
+    #[tokio::test]
+
+    async fn a_captcha_demanded_after_the_password_post_becomes_a_challenge() {
+
+        use crate::model::LoginInput;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // What the SSO does in practice: no captcha on the first page, then the
+        // form comes back asking for one once the password has been posted.
+        fn captcha_page(error: &str) -> String {
+
+            format!(
+                r#"<form id="loginForm" action="login" method="post"><input type="hidden" name="execution" value="round-2"><input name="username"><input name="password" type="password"><input name="captcha"><input type="submit" name="submit"></form><div id="errorDiv" class="alert alert-danger"><p>{error}</p></div><script>config.captcha = {{ type: 'image', id: 'cap-1' }};</script>"#
+            )
+        }
+
+        fn respond(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+
+            let mut response = format!(
+                "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+
+            response.extend_from_slice(body);
+
+            response
+        }
+
+        let mut png = Vec::new();
+
+        image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(30, 12, |x, _| {
+
+            image::Luma([if x % 2 == 0 { 0 } else { 255 }])
+        }))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+
+            loop {
+
+                let Ok((mut stream, _)) = listener.accept().await else {
+
+                    return;
+                };
+
+                let png = png.clone();
+
+                tokio::spawn(async move {
+
+                    // Read the whole request: a POST body can arrive after
+                    // the headers, in a separate segment.
+                    let mut request = Vec::new();
+
+                    let mut chunk = [0_u8; 4096];
+
+                    loop {
+
+                        let size = stream.read(&mut chunk).await.unwrap_or(0);
+
+                        if size == 0 {
+
+                            break;
+                        }
+
+                        request.extend_from_slice(&chunk[..size]);
+
+                        let text = String::from_utf8_lossy(&request);
+
+                        let Some(head_end) = text.find("\r\n\r\n") else {
+
+                            continue;
+                        };
+
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|line| {
+
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+
+                        if request.len() >= head_end + 4 + length {
+
+                            break;
+                        }
+                    }
+
+                    let text = String::from_utf8_lossy(&request).to_string();
+
+                    let response = if text.starts_with("GET /login") {
+
+                        respond(
+                            "200 OK",
+                            "Content-Type: text/html\r\n",
+                            br#"<form id="loginForm" action="login" method="post"><input type="hidden" name="execution" value="round-1"><input name="username"><input name="password" type="password"><input type="submit" name="submit"></form>"#,
+                        )
+                    } else if text.starts_with("GET /captcha?captchaId=cap-1") {
+
+                        respond("200 OK", "Content-Type: image/png\r\n", &png)
+                    } else if text.starts_with("POST /login") {
+
+                        let body = text.split("\r\n\r\n").nth(1).unwrap_or_default();
+
+                        if body.contains("captcha=22v37n")
+                            && body.contains("execution=round-2")
+                            && body.contains("username=23371544")
+                            && body.contains("password=secret")
+                        {
+
+                            respond(
+                                "302 Found",
+                                "Location: /sso/callback\r\nSet-Cookie: SSO=ok; Path=/\r\n",
+                                b"",
+                            )
+                        } else if body.contains("captcha=") {
+
+                            respond(
+                                "200 OK",
+                                "Content-Type: text/html\r\n",
+                                captcha_page("验证码错误").as_bytes(),
+                            )
+                        } else {
+
+                            respond(
+                                "200 OK",
+                                "Content-Type: text/html\r\n",
+                                captcha_page("请输入验证码").as_bytes(),
+                            )
+                        }
+                    } else if text.starts_with("GET /sso/callback") {
+
+                        respond("200 OK", "", b"")
+                    } else {
+
+                        respond("404 Not Found", "", b"")
+                    };
+
+                    let _ = stream.write_all(&response).await;
+                });
+            }
+        });
+
+        let input = LoginInput {
+            student_id: "23371544".into(),
+            vpn_password: "secret".into(),
+            ..Default::default()
+        };
+
+        let api = super::IClassApi::sso_fixture(&origin).unwrap();
+
+        let first = api
+            .start_sso_only(&input)
+            .await
+            .expect("验证码页不应被当成登录失败")
+            .expect("密码提交后出现的验证码应成为验证码挑战");
+
+        assert_eq!(first.captcha_id, "cap-1");
+
+        assert_eq!(first.message.as_deref(), Some("请输入验证码"));
+
+        assert!(
+            crate::captcha::half_blocks(&first.image, 40, 10).is_some(),
+            "挑战应带上可绘制的验证码图片"
+        );
+
+        let second = api
+            .continue_sso_captcha(&first, "wrong")
+            .await
+            .unwrap()
+            .expect("错误验证码应换一张再问，而不是报错");
+
+        assert_eq!(second.message.as_deref(), Some("验证码错误"));
+
+        // Typed in capitals: the SSO page lowercases before submitting, and
+        // the fixture only accepts the lowercase form.
+        let done = api.continue_sso_captcha(&second, " 22V37N ").await.unwrap();
+
+        server.abort();
+
+        assert!(done.is_none(), "正确验证码后应建立 SSO 会话");
     }
 
     #[tokio::test]

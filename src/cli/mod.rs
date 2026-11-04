@@ -47,6 +47,13 @@ pub async fn run_cli() -> Result<()> {
         serde_json::json!({ "log_file": log_path }),
     );
 
+    // A person at a terminal can answer a captcha; anyone else gets an error
+    // naming the saved picture instead of a prompt that would hang.
+    if crate::captcha::terminal_is_interactive() {
+
+        crate::captcha::install_prompt(crate::captcha::terminal_prompt);
+    }
+
     let json_requested = env::args().any(|argument| argument == "--json");
 
     let command = Some(command_name(&cli.command));

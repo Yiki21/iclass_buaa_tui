@@ -3,6 +3,7 @@
 mod academic;
 mod app;
 mod bykc;
+mod captcha;
 mod cgyy;
 mod cli;
 mod constants;

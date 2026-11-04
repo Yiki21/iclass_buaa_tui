@@ -73,9 +73,28 @@ pub struct LoginCaptchaChallenge {
     pub action_url:          String,
     pub form:                Vec<(String, String)>,
     pub captcha_id:          String,
-    pub captcha_path:        String,
+    /// Where the picture was saved, when saving succeeded. Saving is best
+    /// effort: the picture is also drawn in the terminal from `image`.
+    pub captcha_path:        Option<String>,
+    /// The picture itself, so the TUI and CLI can draw it without a file.
+    #[serde(skip)]
+    pub image:               Vec<u8>,
+    /// What the SSO said about the previous submission, e.g. a wrong code.
+    pub message:             Option<String>,
     pub page_hint:           String,
     pub captcha_field_names: Vec<String>,
+}
+
+impl LoginCaptchaChallenge {
+    /// The saved path for messages, or a note that only the inline picture
+    /// exists.
+
+    pub fn path_hint(&self) -> String {
+
+        self.captcha_path
+            .clone()
+            .unwrap_or_else(|| "（图片未能保存到磁盘）".to_string())
+    }
 }
 
 #[derive(Clone, Debug)]
