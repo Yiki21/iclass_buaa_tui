@@ -1261,6 +1261,20 @@ pub struct App {
     pub show_event_log:        bool,
     /// First visible line of the event log popup.
     pub event_log_offset:      usize,
+    /// First visible line of the help popup.
+    ///
+    /// Why:
+    /// The help text is longer than the popup on any ordinary terminal, so
+    /// without an offset the tail of it is unreachable. Interaction matches the
+    /// event log: the popup owns the keyboard while it is open.
+    pub help_scroll:           usize,
+    /// Largest offset the help popup can use at the last rendered size.
+    ///
+    /// Why:
+    /// The bound depends on how the text wraps, which only the renderer knows,
+    /// so it publishes the number here for the key handler to clamp against.
+    /// Written during render, read on the next key; both run on the same task.
+    pub help_max_scroll:       std::cell::Cell<usize>,
     next_qr_refresh_at:        Option<Instant>,
 }
 
@@ -1314,6 +1328,8 @@ impl Default for App {
             show_doctor_details:   false,
             show_event_log:        false,
             event_log_offset:      0,
+            help_scroll:           0,
+            help_max_scroll:       std::cell::Cell::new(0),
             next_qr_refresh_at:    None,
         }
     }
@@ -1633,7 +1649,14 @@ impl App {
                 KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => {
 
                     self.show_help = false;
+
+                    self.help_scroll = 0;
                 }
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_help(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_help(1),
+                KeyCode::PageUp => self.scroll_help(-8),
+                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_help(8),
+                KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
                 _ => {}
             }
 
@@ -1673,6 +1696,8 @@ impl App {
         if key.code == KeyCode::Char('?') {
 
             self.show_help = true;
+
+            self.help_scroll = 0;
 
             return;
         }
@@ -2101,9 +2126,11 @@ impl App {
 
         if self.show_help {
 
-            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-
-                self.show_help = false;
+            match event.kind {
+                MouseEventKind::ScrollDown => self.scroll_help(3),
+                MouseEventKind::ScrollUp => self.scroll_help(-3),
+                MouseEventKind::Down(MouseButton::Left) => self.show_help = false,
+                _ => {}
             }
 
             return;
@@ -2222,6 +2249,15 @@ impl App {
     fn scroll_event_log(&mut self, delta: isize) {
 
         self.event_log_offset = clamp_step(self.event_log_offset, self.event_log.len(), delta);
+    }
+
+    /// Moves the help popup, clamped to the wrap-aware bound the renderer found.
+
+    fn scroll_help(&mut self, delta: isize) {
+
+        let max = self.help_max_scroll.get() as isize;
+
+        self.help_scroll = (self.help_scroll as isize + delta).clamp(0, max) as usize;
     }
 
     pub fn handle_tick(&mut self) {

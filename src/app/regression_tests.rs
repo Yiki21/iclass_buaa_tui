@@ -471,3 +471,80 @@ fn venue_form_edits_fields_without_triggering_global_shortcuts_or_submitting() {
 
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+
+fn help_popup_scrolls_within_the_bound_the_renderer_published() {
+
+    let (tx, _) = mpsc::unbounded_channel();
+
+    let mut app = App::default();
+
+    app.screen = Screen::Workspace;
+
+    // The renderer owns the real bound; the key handler clamps against it.
+    app.help_max_scroll.set(3);
+
+    let key = |code: KeyCode| KeyEvent::new(code, KeyModifiers::NONE);
+
+    app.handle_key(key(KeyCode::Char('?')), &tx);
+
+    assert!(app.show_help);
+
+    assert_eq!(app.help_scroll, 0);
+
+    for (code, expected) in [
+        (KeyCode::Down, 1),
+        (KeyCode::Char('j'), 2),
+        (KeyCode::PageDown, 3),
+        (KeyCode::PageDown, 3),
+    ] {
+
+        app.handle_key(key(code), &tx);
+
+        assert_eq!(app.help_scroll, expected, "{code:?} 后偏移不对");
+    }
+
+    // Scrolling is not a quit: `q` closes the popup, not the program.
+    app.handle_key(key(KeyCode::Char('q')), &tx);
+
+    assert!(!app.show_help);
+
+    assert!(!app.should_quit);
+
+    // Reopening starts at the top rather than at the previous offset.
+    app.handle_key(key(KeyCode::Char('?')), &tx);
+
+    assert_eq!(app.help_scroll, 0);
+}
+
+#[test]
+
+fn help_popup_ignores_keys_it_does_not_own() {
+
+    let (tx, _) = mpsc::unbounded_channel();
+
+    let mut app = App::default();
+
+    app.screen = Screen::Workspace;
+
+    app.active_tab = WorkspaceTab::Schedule;
+
+    app.help_max_scroll.set(5);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), &tx);
+
+    app.help_scroll = 2;
+
+    // `r` refreshes the course list when the popup is closed; with the popup
+    // open it must be swallowed, leaving the offset alone.
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &tx);
+
+    assert_eq!(app.help_scroll, 2);
+
+    assert!(app.show_help);
+
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
+
+    assert_eq!(app.help_scroll, 0);
+}

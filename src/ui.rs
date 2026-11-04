@@ -5421,13 +5421,77 @@ fn render_event_log_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(popup, area);
 }
 
+/// Rows the help text occupies once wrapped to `width`.
+///
+/// `Paragraph::line_count` needs ratatui's unstable
+/// `rendered-line-info` feature, so the same arithmetic is done here: every
+/// logical line takes at least one row, and any line wider than the field
+/// spills onto `ceil(width / inner_width)` rows. `Line::width` measures
+/// display width, which is what wrapping counts, so the CJK labels are not
+/// undercounted the way `str::len` would undercount them.
+
+fn wrapped_rows(lines: &[Line<'static>], inner_width: u16) -> usize {
+
+    let width = usize::from(inner_width.max(1));
+
+    lines
+        .iter()
+        .map(|line| line.width().div_ceil(width).max(1))
+        .sum()
+}
+
 fn render_help_popup(frame: &mut Frame, app: &App) {
 
     let area = centered_rect(70, 70, frame.area());
 
     frame.render_widget(Clear, area);
 
-    let lines = vec![
+    let lines = help_lines(app);
+
+    // The popup is fixed at 70% of the terminal, but the text is longer than
+    // that on any ordinary size. The bound depends on wrapping, which is only
+    // known here, so it is published for the key handler to clamp against.
+    let inner_width = area.width.saturating_sub(2).max(1);
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let max_scroll = wrapped_rows(&lines, inner_width).saturating_sub(inner_height);
+
+    app.help_max_scroll.set(max_scroll);
+
+    let offset = app.help_scroll.min(max_scroll).min(u16::MAX as usize) as u16;
+
+    let max_scroll = max_scroll.min(u16::MAX as usize) as u16;
+
+    // The closing hint lives in the bottom border rather than the body, since
+    // the body scrolls and it would otherwise be clipped away.
+    let title = if max_scroll == 0 {
+
+        "帮助".to_string()
+    } else {
+
+        format!("帮助 · {offset}/{max_scroll}")
+    };
+
+    let popup = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .title_bottom(Line::from(" ? / q / esc 关闭 ")),
+        )
+        .wrap(Wrap { trim: true })
+        .scroll((offset, 0));
+
+    frame.render_widget(popup, area);
+}
+
+/// The help text. Split out from the renderer so the line count the scroll
+/// bound depends on is measured from the same source that is displayed.
+
+fn help_lines(app: &App) -> Vec<Line<'static>> {
+
+    vec![
         Line::from(Span::styled(
             "全局",
             Style::default()
@@ -5437,6 +5501,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         Line::from("tab / shift+tab: 切换 iClass / BYKC"),
         Line::from("e: 打开或关闭事件日志"),
         Line::from("?: 打开或关闭帮助"),
+        Line::from("帮助内: j/k ↑/↓ PgUp/PgDn 滚动，g/Home 回顶部"),
         Line::from("Shift+X: 退出登录"),
         Line::from("q / esc: 退出程序"),
         Line::from(""),
@@ -5498,14 +5563,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
                 .unwrap_or_else(|| "未初始化".to_string())
         )),
         Line::from(format!("当前标签: {:?}", app.active_tab)),
-        Line::from("按 ?、q 或 esc 关闭帮助"),
-    ];
-
-    let popup = Paragraph::new(lines)
-        .block(Block::default().title("帮助").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(popup, area);
+    ]
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -7532,5 +7590,62 @@ mod tests {
             past_end.contains("esc/o/enter关闭"),
             "滚动超出末尾后页脚提示应仍在：\n{past_end}"
         );
+    }
+
+    #[test]
+
+    fn help_popup_reaches_its_last_line_only_after_scrolling() {
+
+        let mut app = App::default();
+
+        // The help text is taller than a 70% popup on an ordinary terminal,
+        // which is exactly the case that used to clip the tail away.
+        let top = render_text(80, 24, |frame| render_help_popup(frame, &app));
+
+        let max = app.help_max_scroll.get();
+
+        assert!(max > 0, "帮助文本应超出一屏，实际 max_scroll=0：\n{top}");
+
+        assert!(top.contains("全局"), "顶部应显示第一节：\n{top}");
+
+        assert!(
+            !top.contains("当前标签"),
+            "末行本应需要滚动才能看到：\n{top}"
+        );
+
+        app.help_scroll = max;
+
+        let bottom = render_text(80, 24, |frame| render_help_popup(frame, &app));
+
+        assert!(
+            bottom.contains("当前标签"),
+            "滚到底部后应显示末行，max_scroll={max}：\n{bottom}"
+        );
+
+        assert!(
+            !bottom.contains("全局"),
+            "滚到底部后顶部应移出视野：\n{bottom}"
+        );
+
+        // The closing hint lives in the border, so it survives any scroll.
+        assert!(
+            bottom.contains("关闭"),
+            "关闭提示不应随正文滚动消失：\n{bottom}"
+        );
+    }
+
+    #[test]
+
+    fn wrapped_rows_counts_display_width_not_bytes() {
+
+        // Six CJK glyphs are 12 columns, so an 11-wide field needs two rows;
+        // counting bytes would have claimed three.
+        let lines = vec![Line::from("帮助帮助帮助")];
+
+        assert_eq!(wrapped_rows(&lines, 11), 2);
+
+        assert_eq!(wrapped_rows(&lines, 12), 1);
+
+        assert_eq!(wrapped_rows(&[Line::from("")], 20), 1);
     }
 }
