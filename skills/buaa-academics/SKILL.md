@@ -1,6 +1,6 @@
 ---
 name: buaa-academics
-description: Read-only BUAA academic data via `iclass_buaa_tui`: 课表 (today, schedule export/diff), 考试, 成绩/GPA, 空教室, 作业. Load after `buaa-campus` when the user asks what classes, exams, grades, free classrooms, or assignments they have.
+description: Read-only BUAA academic data via `iclass_buaa_tui` — 课表 (today, schedule export/diff), 考试, 成绩/GPA, 空教室, 作业. Load after `buaa-campus` when the user asks what classes, exams, grades, free classrooms, or assignments they have.
 ---
 
 # Academics (all read-only)

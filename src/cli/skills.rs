@@ -352,23 +352,120 @@ mod tests {
         assert_eq!(on_disk, bundled, "skills/ 与 FILES 不一致");
     }
 
+    /// The frontmatter lines of a SKILL.md, between the two `---` fences.
+
+    fn frontmatter_lines(contents: &str) -> Vec<&str> {
+
+        let body = contents
+            .strip_prefix("---\n")
+            .expect("SKILL.md 第一行应为 ---");
+
+        let end = body.find("\n---\n").expect("frontmatter 应以 --- 结束");
+
+        body[..end].lines().collect()
+    }
+
+    /// Whether `value` parses as a YAML plain scalar equal to itself.
+    ///
+    /// Why:
+    /// `frontmatter` reads lines, so it accepted a description containing
+    /// `: `, which every YAML parser rejects ("mapping values are not allowed
+    /// here"); agents that load skills then skip that skill entirely. The
+    /// crate has no YAML parser, so the plain-scalar rules are checked here.
+
+    fn is_plain_yaml_scalar(value: &str) -> bool {
+
+        let starts_with_indicator = value.starts_with([
+            '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%',
+            '@', '`',
+        ]);
+
+        !value.is_empty()
+            && !starts_with_indicator
+            && !value.contains(": ")
+            && !value.contains(" #")
+            && !value.ends_with(':')
+            && value.trim() == value
+    }
+
     #[test]
 
-    fn every_skill_has_a_name_matching_its_directory_and_a_description() {
+    fn every_skill_follows_the_agent_skills_specification() {
+
+        // https://agentskills.io/specification
+        const FIELDS: [&str; 6] = [
+            "name",
+            "description",
+            "license",
+            "compatibility",
+            "metadata",
+            "allowed-tools",
+        ];
 
         for file in skill_entries() {
 
             let dir = file.path.trim_end_matches("/SKILL.md");
 
-            assert_eq!(frontmatter(file.contents, "name").as_deref(), Some(dir));
+            for line in frontmatter_lines(file.contents) {
+
+                let (key, value) = line
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("{dir}: frontmatter 行不是 key: value: {line}"));
+
+                assert!(FIELDS.contains(&key), "{dir}: 规范外的字段 {key}");
+
+                let value = value.strip_prefix(' ').unwrap_or(value);
+
+                assert!(
+                    is_plain_yaml_scalar(value),
+                    "{dir}: {key} 不是合法的 YAML 纯量（含 `: `、` #` 或以保留字符开头）: {value}"
+                );
+            }
+
+            let name = frontmatter(file.contents, "name").unwrap_or_default();
+
+            assert_eq!(name, dir, "name 应与目录名一致");
+
+            assert!(
+                (1..=64).contains(&name.len())
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    && !name.starts_with('-')
+                    && !name.ends_with('-')
+                    && !name.contains("--"),
+                "{dir}: name 只能是小写字母、数字和单个连字符，最长 64 个字符"
+            );
 
             let description = frontmatter(file.contents, "description").unwrap_or_default();
 
             assert!(
-                !description.is_empty() && description.len() <= 1024,
-                "{dir} description"
+                (1..=1024).contains(&description.chars().count()),
+                "{dir}: description 应为 1–1024 个字符"
+            );
+
+            assert!(
+                file.contents.lines().count() < 500,
+                "{dir}: SKILL.md 应少于 500 行，细节移到 references/"
             );
         }
+    }
+
+    #[test]
+
+    fn the_yaml_check_rejects_what_yaml_parsers_reject() {
+
+        assert!(!is_plain_yaml_scalar(
+            "Read-only data via `iclass_buaa_tui`: 课表"
+        ));
+
+        assert!(!is_plain_yaml_scalar("`iclass_buaa_tui` first"));
+
+        assert!(!is_plain_yaml_scalar("ends with a comment #1"));
+
+        assert!(is_plain_yaml_scalar(
+            "Read-only data via `iclass_buaa_tui` — 课表, 考试. Load after `buaa-campus`."
+        ));
     }
 
     #[test]

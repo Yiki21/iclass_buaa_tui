@@ -9,6 +9,7 @@
 - 验证码图片保存到状态目录的 `captcha.png`（Linux 为 `~/.local/state/iclass-buaa/`，Windows 为 `%LOCALAPPDATA%\iclass-buaa\`），路径固定，扩展名与实际格式一致。此前保存在编译时的源码目录 `.tmp/` 下，并用 `.jpg` 扩展名保存 PNG；安装版找不到这张图。
 - 研讨室会单独进行一次 SSO 登录，遇到验证码时会弹出带图片的验证码窗口。通过后缓存会话，并自动载入研讨室列表。此前只会报错。
 - CLI 在交互式终端运行时，遇到验证码会把图片画到 stderr，并读取输入（输入 `r` 换一张，直接回车取消）；stdout 保持不变，不影响 `--json`。非交互调用（代理、定时任务）不会卡住，而是报错并给出图片路径。
+- `buaa-academics` skill 的 frontmatter 不是合法 YAML：description 里的 `` `iclass_buaa_tui`: `` 构成了 YAML 不允许出现在纯量中的 `: `，严格解析 YAML 的 agent 会直接跳过这个 skill。已改写；新增测试按 [Agent Skills 规范](https://agentskills.io/specification) 检查每个 skill 的字段名、`name` 格式、description 长度、YAML 纯量合法性和行数。`skills install` 的产物已用官方 `skills-ref validate` 全部验证通过。
 - 帮助界面支持滚动：`j`/`k`、↑/↓、PgUp/PgDn、`g`/Home 以及滚轮都能上下移动，标题显示当前位置，关闭提示移到底部边框，不再因正文过长而看不到末尾几节。
 - 评教问卷页支持 `b` / `B` 返回课程列表，保留原选中项；返回或刷新后，迟到的问卷响应不会重新打开详情。详情页不再通过上下键切换后台选中的课程。
 - 修正 0.11.0 的评教组包：`pjxtPjjgPjjgckb` 中学校和学院记录分别对应 `wjzblist` 与 `yxwjzblist`，空的学院问卷不提交，不再向两条记录复制同一套学校答案。分数按各自题目计算，并遵循官网的计分区段、平均分和满分规则。
