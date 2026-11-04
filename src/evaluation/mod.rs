@@ -40,13 +40,27 @@ const PJXT_BASE: &str = "https://spoc.buaa.edu.cn/pjxt";
 
 const CAS_URL: &str = "https://spoc.buaa.edu.cn/pjxt/cas";
 
-/// Score sent when the questionnaire does not publish option scores.
-///
-/// Why:
-/// It is what the reference client sends, and equals the sum of the default
-/// answers on the questionnaires observed so far.
+/// School and college questions have separate result templates, not separate
+/// evaluated people. Empty sources must not be submitted.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 
-const FALLBACK_SCORE: f64 = 93.0;
+pub enum QuestionSource {
+    #[default]
+    #[serde(rename = "1")]
+    School,
+    #[serde(rename = "2")]
+    College,
+}
+
+impl QuestionSource {
+    fn code(self) -> &'static str {
+
+        match self {
+            Self::School => "1",
+            Self::College => "2",
+        }
+    }
+}
 
 /// One course (and evaluated teacher) awaiting evaluation.
 
@@ -63,8 +77,7 @@ pub struct EvaluationTask {
     pub rwid:        String,
     /// Questionnaire id.
     pub wjid:        String,
-    /// Questionnaire pattern id, needed to switch the questionnaire into its
-    /// answerable mode.
+    /// Current questionnaire pattern; empty means it has not been selected.
     pub msid:        String,
     pub course:      String,
     pub course_code: String,
@@ -107,6 +120,8 @@ pub struct Question {
     pub choice:   bool,
     /// Whether the service requires an answer.
     pub required: bool,
+    #[serde(default)]
+    pub source:   QuestionSource,
 }
 
 impl Question {
@@ -135,13 +150,22 @@ impl Question {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 
 pub struct Questionnaire {
-    pub questions:      Vec<Question>,
-    /// Result templates the service expects back, one per evaluated party.
+    pub questions: Vec<Question>,
+    /// Result templates for school and college questions, keyed by `sfxxpj`.
     #[serde(skip)]
     pub(crate) parties: Vec<Value>,
     /// Storage keys the service expects echoed in every result.
     #[serde(skip)]
     pub(crate) storage: Value,
+    /// School sections excluded from scoring, and the optional section average.
+    #[serde(skip)]
+    pub(crate) unscored_school_questions: Vec<String>,
+    #[serde(skip)]
+    pub(crate) school_score_divisor: Option<usize>,
+    #[serde(skip)]
+    pub(crate) full_score_at_95: bool,
+    #[serde(skip)]
+    pub(crate) unsupported: Option<String>,
 }
 
 impl Questionnaire {
@@ -181,29 +205,6 @@ impl Questionnaire {
                 Some((question.id.clone(), option.id.clone()))
             })
             .collect()
-    }
-
-    /// Total score of a set of answers, if every chosen option has a score.
-
-    pub fn score(&self, answers: &[(String, String)]) -> Option<f64> {
-
-        let mut total = 0.0;
-
-        for (question_id, option_id) in answers {
-
-            let score = self
-                .questions
-                .iter()
-                .find(|question| &question.id == question_id)?
-                .options
-                .iter()
-                .find(|option| &option.id == option_id)?
-                .score?;
-
-            total += score;
-        }
-
-        Some(total)
     }
 }
 
@@ -262,6 +263,10 @@ impl IClassApi {
             .await
             .with_context(|| format!("{what}失败"))?;
 
+        let response = response
+            .error_for_status()
+            .with_context(|| format!("{what}失败"))?;
+
         let body = response
             .text()
             .await
@@ -270,27 +275,44 @@ impl IClassApi {
         unwrap_envelope(&body).with_context(|| format!("{what}失败"))
     }
 
-    /// Switches a questionnaire into its answerable pattern.
-    ///
-    /// Why:
-    /// Without it the course list and the questionnaire come back empty or
-    /// rejected. The response carries nothing needed, so it is not checked.
+    /// Called only after the user confirms a submission. Re-read the pattern:
+    /// the cached list can be stale, including during a batch of submissions.
 
-    async fn evaluation_revise_pattern(&self, rwid: &str, wjid: &str, msid: &str) {
+    async fn evaluation_prepare_pattern(&self, task: &EvaluationTask) -> Result<()> {
 
-        let msid = if msid.is_empty() { "1" } else { msid };
+        let questionnaires = self
+            .pjxt_get(
+                "/evaluationMethodSix/getQuestionnaireListToTask",
+                &[("rwid", &task.rwid)],
+                "核对评教模式",
+            )
+            .await?;
 
-        let _ = self
+        if !pattern_needs_confirmation(&questionnaires, &task.wjid)? {
+
+            return Ok(());
+        }
+
+        let response = self
             .client
             .post(pjxt_url(
                 self.use_vpn,
-                &format!("{PJXT_BASE}/evaluationMethodSix/reviseQuestionnairePattern"),
+                &format!("{PJXT_BASE}/evaluationMethodSix/confirmQuestionnairePattern"),
             ))
             .header("Content-Type", "application/json")
             .header("X-Requested-With", "XMLHttpRequest")
-            .body(json!({ "rwid": rwid, "wjid": wjid, "msid": msid }).to_string())
+            .body(json!({ "rwid": task.rwid, "wjid": task.wjid, "msid": "1" }).to_string())
             .send()
-            .await;
+            .await
+            .context("初始化评教模式失败")?
+            .error_for_status()
+            .context("初始化评教模式失败")?;
+
+        let body = response.text().await.context("读取评教模式响应失败")?;
+
+        unwrap_envelope(&body).context("初始化评教模式失败")?;
+
+        Ok(())
     }
 
     /// Lists every course of the open evaluation rounds, pending first.
@@ -341,9 +363,7 @@ impl IClassApi {
                     continue;
                 };
 
-                let msid = text_field(questionnaire, &["msid"]).unwrap_or_else(|| "1".to_string());
-
-                self.evaluation_revise_pattern(&rwid, &wjid, &msid).await;
+                let msid = text_field(questionnaire, &["msid"]).unwrap_or_default();
 
                 // The course list is empty unless the term is named; the
                 // round carries it.
@@ -390,9 +410,6 @@ impl IClassApi {
 
         self.evaluation_activate().await?;
 
-        self.evaluation_revise_pattern(&task.rwid, &task.wjid, &task.msid)
-            .await;
-
         let query = topic_query(task);
 
         let query: Vec<(&str, &str)> = query
@@ -410,7 +427,18 @@ impl IClassApi {
 
         // The questionnaire arrives as a one-element list.
         let topic = match value {
-            Value::Array(items) => items.into_iter().next().context("评教服务没有返回问卷")?,
+            Value::Array(mut items) => {
+
+                if items.len() != 1 {
+
+                    bail!(
+                        "预期一份课程问卷，服务返回 {} 份，请到官网查看",
+                        items.len()
+                    );
+                }
+
+                items.remove(0)
+            }
             other => other,
         };
 
@@ -424,8 +452,8 @@ impl IClassApi {
     /// confirmed explicitly; see the CLI, which refuses without `--yes`.
     ///
     /// How:
-    /// Every party listed by the questionnaire gets one result object, each
-    /// answering the questionnaire as given.
+    /// School and college questions are submitted separately. A successful
+    /// response is confirmed by reading this course's completion count.
 
     pub async fn evaluation_submit(
         &self,
@@ -454,12 +482,22 @@ impl IClassApi {
             bail!("必答题未作答: {}", question.text);
         }
 
+        build_payload(task, questionnaire, answers)?;
+
         self.evaluation_activate().await?;
 
-        self.evaluation_revise_pattern(&task.rwid, &task.wjid, &task.msid)
-            .await;
+        self.evaluation_prepare_pattern(task).await?;
 
-        let results = build_payload(task, questionnaire, answers);
+        // Selecting a pattern can allocate new result IDs. Retain the user's
+        // previewed answers, but send the current server-issued templates.
+        let current_questionnaire = self.evaluation_questionnaire(task).await?;
+
+        if current_questionnaire.questions != questionnaire.questions {
+
+            bail!("问卷题目或选项已变化，请重新预览并确认提交");
+        }
+
+        let results = build_payload(task, &current_questionnaire, answers)?;
 
         let response = self
             .client
@@ -479,27 +517,99 @@ impl IClassApi {
             )
             .send()
             .await
-            .context("提交评教失败")?;
+            .context("评教请求未取得响应，结果未知，请刷新核对后再操作")?
+            .error_for_status()
+            .context("评教服务返回 HTTP 错误，结果未知，请刷新核对后再操作")?;
 
         let body = response.text().await.context("读取评教提交响应失败")?;
 
-        match unwrap_envelope(&body) {
-            Ok(_) => {
-                Ok(EvaluationOutcome {
-                    course:  task.course.clone(),
-                    success: true,
-                    message: "评教成功".to_string(),
-                })
-            }
+        // Never resend a write, including when the response says "你已评价".
+        // The same readback distinguishes a completed course from a conflict.
+        let accepted = unwrap_envelope(&body);
 
-            Err(error) => {
-                Ok(EvaluationOutcome {
-                    course:  task.course.clone(),
-                    success: false,
-                    message: format!("提交失败: {error}"),
-                })
-            }
+        let term = text_field(&task.context, &["xnxq"]).unwrap_or_default();
+
+        let mut query = vec![("wjid", task.wjid.as_str())];
+
+        if !term.is_empty() {
+
+            query.push(("xnxq", term.as_str()));
         }
+
+        let current = self
+            .pjxt_get(
+                "/evaluationMethodSix/getRequiredReviewsData",
+                &query,
+                "回查评教完成状态",
+            )
+            .await;
+
+        Ok(verified_outcome(task, accepted, current))
+    }
+}
+
+fn pattern_needs_confirmation(questionnaires: &Value, wjid: &str) -> Result<bool> {
+
+    let questionnaire = questionnaires
+        .as_array()
+        .context("评教问卷列表格式错误")?
+        .iter()
+        .find(|row| text_field(row, &["wjid"]).as_deref() == Some(wjid))
+        .context("评教问卷已不在任务列表中，请刷新")?;
+
+    match text_field(questionnaire, &["msid"]).as_deref() {
+        None => Ok(true),
+        Some("1") => Ok(false),
+        Some("2") => bail!("问卷已选择评教模式二，请到官网完成；切换模式会丢失已有满意度数据"),
+        Some(mode) => bail!("不支持的评教模式 {mode}，请到官网查看"),
+    }
+}
+
+fn verified_outcome(
+    task: &EvaluationTask,
+    accepted: Result<Value>,
+    current: Result<Value>,
+) -> EvaluationOutcome {
+
+    let status = current.and_then(|value| {
+
+        let rows = value.as_array().context("课程列表格式错误")?;
+
+        rows.iter()
+            .filter_map(|row| parse_course(row, &task.rwid, &task.wjid, &task.msid))
+            .find(|course| course.id == task.id)
+            .map(|course| course.evaluated)
+            .context("回查列表未找到这门课")
+    });
+
+    let rejection = accepted
+        .as_ref()
+        .err()
+        .map(|error| format!("服务返回：{error}；"))
+        .unwrap_or_default();
+
+    let (success, message) = match status {
+        Ok(true) => (true, format!("{rejection}已回查确认这门课评教完成")),
+        Ok(false) => {
+            (
+                false,
+                format!("{rejection}回查仍为未完成，未确认评教成功；请到官网核对后再操作"),
+            )
+        }
+        Err(error) => {
+            (
+                false,
+                format!(
+                    "{rejection}无法确认评教完成：{error:#}；请刷新或到官网核对，勿直接重复提交"
+                ),
+            )
+        }
+    };
+
+    EvaluationOutcome {
+        course: task.course.clone(),
+        success,
+        message,
     }
 }
 
@@ -538,94 +648,168 @@ fn topic_query(task: &EvaluationTask) -> Vec<(&'static str, String)> {
         ("pjlxid", field("pjlxid", "2")),
         ("sfksqbpj", field("sfksqbpj", "1")),
         ("yxsfktjst", field("yxsfktjst", "")),
-        ("yxdm", String::new()),
+        ("yxdm", field("ctyxdm", "")),
     ]
 }
 
 /// Builds the result objects sent to the submission endpoint.
 ///
 /// Why:
-/// The service expects one object per evaluated party, each carrying the full
-/// answer set, including blank entries for free-text questions. The shape
-/// mirrors what the web client sends, because the service validates it.
+/// The official topic page emits `wjzblist` with template 1, and `yxwjzblist`
+/// with template 2 only when that source has questions.
 
 fn build_payload(
     task: &EvaluationTask,
     questionnaire: &Questionnaire,
     answers: &[(String, String)],
-) -> Vec<Value> {
+) -> Result<Vec<Value>> {
 
-    let score = questionnaire.score(answers).unwrap_or(FALLBACK_SCORE);
+    if let Some(reason) = &questionnaire.unsupported {
 
-    // Whole scores are sent as integers, as the web client does.
-    let score = if score.fract() == 0.0 {
+        bail!("{reason}，请到官网完成评教");
+    }
 
-        json!(score as i64)
-    } else {
+    if questionnaire.questions.is_empty() {
 
-        json!(score)
-    };
+        bail!("问卷没有题目，无法提交");
+    }
 
-    questionnaire
-        .parties
-        .iter()
-        .map(|party| {
+    let mut payload = Vec::new();
 
-            let field = |key: &str| party.get(key).cloned().unwrap_or(Value::Null);
+    for source in [QuestionSource::School, QuestionSource::College] {
 
-            let round = party
-                .get("wjssrwid")
-                .filter(|value| !value.is_null())
-                .cloned()
-                .unwrap_or_else(|| json!(task.rwid));
+        let questions: Vec<_> = questionnaire
+            .questions
+            .iter()
+            .filter(|question| question.source == source)
+            .collect();
 
-            let items: Vec<Value> = questionnaire
-                .questions
-                .iter()
-                .map(|question| {
+        if questions.is_empty() {
 
-                    let chosen = answers
-                        .iter()
-                        .find(|(id, _)| *id == question.id)
-                        .map(|(_, option)| option.clone());
+            continue;
+        }
 
-                    if question.choice {
+        let parties: Vec<_> = questionnaire
+            .parties
+            .iter()
+            .filter(|party| text_field(party, &["sfxxpj"]).as_deref() == Some(source.code()))
+            .collect();
 
-                        json!({
-                            "sjly": "1",
-                            "stlx": "1",
-                            "wjid": task.wjid,
-                            "wjssrwid": round,
-                            "wjstctid": "",
-                            "wjstid": question.id,
-                            "xxdalist": chosen.into_iter().collect::<Vec<_>>(),
-                        })
-                    } else {
+        if parties.len() != 1 {
 
-                        json!({
-                            "sjly": "1",
-                            "stlx": "6",
-                            "wjid": task.wjid,
-                            "wjssrwid": round,
-                            "wjstctid": question
-                                .options
-                                .first()
-                                .map(|option| option.id.clone())
-                                .unwrap_or_default(),
-                            "wjstid": question.id,
-                            "xxdalist": [],
-                        })
-                    }
-                })
-                .collect();
+            bail!(
+                "题目来源 {} 的评价记录数量异常：{}，无法提交",
+                source.code(),
+                parties.len()
+            );
+        }
 
-            let teacher_key = party
-                .get("pjrjsdm")
-                .filter(|value| !value.is_null())
-                .cloned()
-                .unwrap_or_else(|| json!(""));
+        let party = parties[0];
 
-            json!({
+        let mut total = 0.0;
+
+        for question in &questions {
+
+            let answer = answers.iter().find(|(id, _)| *id == question.id);
+
+            if let Some((_, option_id)) = answer {
+
+                let option = question
+                    .options
+                    .iter()
+                    .find(|option| option.id == *option_id)
+                    .with_context(|| format!("题目选项无效：{}", question.text))?;
+
+                if source != QuestionSource::School
+                    || !questionnaire
+                        .unscored_school_questions
+                        .contains(&question.id)
+                {
+
+                    total += option
+                        .score
+                        .with_context(|| format!("题目缺少选项分值：{}", question.text))?;
+                }
+            } else if question.required {
+
+                bail!("必答题未作答：{}", question.text);
+            }
+        }
+
+        if source == QuestionSource::School
+            && let Some(divisor) = questionnaire.school_score_divisor
+        {
+
+            total = (total / divisor.max(1) as f64 * 100.0).round() / 100.0;
+        }
+
+        if questionnaire.full_score_at_95 && total >= 95.0 {
+
+            total = 100.0;
+        }
+
+        let score = if total.fract() == 0.0 {
+
+            json!(total as i64)
+        } else {
+
+            json!(total)
+        };
+
+        let field = |key: &str| party.get(key).cloned().unwrap_or(Value::Null);
+
+        let round = party
+            .get("wjssrwid")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!(task.rwid));
+
+        let items: Vec<Value> = questions
+            .iter()
+            .map(|question| {
+
+                let chosen = answers
+                    .iter()
+                    .find(|(id, _)| *id == question.id)
+                    .map(|(_, option)| option.clone());
+
+                if question.choice {
+
+                    json!({
+                        "sjly": source.code(),
+                        "stlx": "1",
+                        "wjid": task.wjid,
+                        "wjssrwid": round,
+                        "wjstctid": "",
+                        "wjstid": question.id,
+                        "xxdalist": chosen.into_iter().collect::<Vec<_>>(),
+                    })
+                } else {
+
+                    json!({
+                        "sjly": source.code(),
+                        "stlx": "6",
+                        "wjid": task.wjid,
+                        "wjssrwid": round,
+                        "wjstctid": question
+                            .options
+                            .first()
+                            .map(|option| option.id.clone())
+                            .unwrap_or_default(),
+                        "wjstid": question.id,
+                        "xxdalist": [],
+                    })
+                }
+            })
+            .collect();
+
+        let teacher_key = party
+            .get("pjrjsdm")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!(""));
+
+        payload.push(json!({
                 "bprdm": field("bprdm"),
                 "bprmc": field("bprmc"),
                 "kcdm": field("kcdm"),
@@ -641,20 +825,22 @@ fn build_payload(
                 "pjsx": 1,
                 "pjxxlist": items,
                 "rwh": field("rwh"),
-                "stzjid": "xx",
+                "stzjid": field("stzjid"),
                 "wjid": task.wjid,
                 "wjssrwid": round,
                 "wtjjy": "",
-                "xhgs": null,
+                "xhgs": field("xhgs"),
                 "xnxq": field("xnxq"),
-                "sfxxpj": party.get("sfxxpj").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| json!("1")),
-                "sqzt": null,
-                "yxfz": null,
+                "sfxxpj": source.code(),
+                "sqzt": field("sqzt"),
+                "yxfz": field("yxfz"),
+                "sdrs": field("sdrs"),
                 "zsxz": teacher_key,
                 "sfnm": "1",
-            })
-        })
-        .collect()
+            }));
+    }
+
+    Ok(payload)
 }
 
 fn pjxt_url(use_vpn: bool, raw: &str) -> String {
@@ -679,28 +865,20 @@ fn unwrap_envelope(body: &str) -> Result<Value> {
         format!("评教服务返回了非 JSON 响应: {preview}")
     })?;
 
-    if let Some(code) = value.get("code") {
+    // This service's official pages accept only code 200, unlike other campus
+    // APIs where 0 or 1 can mean success. Missing/unknown codes are not success.
+    if text_field(&value, &["code"]).as_deref() != Some("200") {
 
-        let succeeded = code
-            .as_i64()
-            .map(|number| matches!(number, 0 | 1 | 200))
-            .or_else(|| {
+        let message = value
+            .get("message")
+            .or_else(|| value.get("msg"))
+            .and_then(Value::as_str)
+            .unwrap_or("评教服务返回错误");
 
-                code.as_str()
-                    .map(|text| matches!(text, "0" | "1" | "200" | "success"))
-            })
-            .unwrap_or(true);
-
-        if !succeeded {
-
-            let message = value
-                .get("message")
-                .or_else(|| value.get("msg"))
-                .and_then(Value::as_str)
-                .unwrap_or("评教服务返回错误");
-
-            bail!("{message}");
-        }
+        bail!(
+            "{message} (code={})",
+            value.get("code").unwrap_or(&Value::Null)
+        );
     }
 
     Ok(value.get("result").cloned().unwrap_or(value))
@@ -778,18 +956,86 @@ fn parse_questionnaire(value: &Value) -> Questionnaire {
         }
     };
 
+    let college_rows: Vec<_> = entity
+        .get("yxwjzblist")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|section| section.get("tklist").and_then(Value::as_array))
+        .flatten()
+        .collect();
+
+    let unsupported_question = rows
+        .iter()
+        .chain(&college_rows)
+        .any(|row| !matches!(text_field(row, &["tmlx"]).as_deref(), Some("1" | "6")));
+
+    let mut questions: Vec<_> = rows
+        .into_iter()
+        .filter_map(|row| parse_question(row, QuestionSource::School))
+        .collect();
+
+    questions.extend(
+        college_rows
+            .into_iter()
+            .filter_map(|row| parse_question(row, QuestionSource::College)),
+    );
+
+    let sections: Vec<_> = entity
+        .get("wjzblist")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect();
+
+    let unscored_school_questions = sections
+        .iter()
+        .filter(|section| text_field(section, &["sfcyjs"]).as_deref() == Some("0"))
+        .filter_map(|section| section.get("tklist").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|row| text_field(row, &["tmid"]))
+        .collect();
+
+    let school_score_divisor =
+        (text_field(entity, &["sfatmsf"]).as_deref() == Some("1")).then(|| {
+
+            sections
+                .iter()
+                .filter(|section| text_field(section, &["sfcyjs"]).as_deref() == Some("1"))
+                .count()
+                .max(1)
+        });
+
+    let unsupported = if unsupported_question {
+
+        Some("问卷包含暂不支持的题型".into())
+    } else if text_field(entity, &["wjfs"]).is_some_and(|kind| kind != "1") {
+
+        Some("暂不支持该问卷的评分方式".into())
+    } else if text_field(entity, &["sfyyxf"]).as_deref() == Some("1") {
+
+        Some("问卷要求额外填写印象分".into())
+    } else {
+
+        None
+    };
+
     Questionnaire {
-        questions: rows.into_iter().filter_map(parse_question).collect(),
-        parties:   value
+        questions,
+        parties: value
             .get("pjxtPjjgPjjgckb")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
-        storage:   value.get("pjmap").cloned().unwrap_or(Value::Null),
+        storage: value.get("pjmap").cloned().unwrap_or(Value::Null),
+        unscored_school_questions,
+        school_score_divisor,
+        full_score_at_95: text_field(entity, &["sfqyzgf"]).as_deref() == Some("1"),
+        unsupported,
     }
 }
 
-fn parse_question(row: &Value) -> Option<Question> {
+fn parse_question(row: &Value, source: QuestionSource) -> Option<Question> {
 
     let id = text_field(row, &["tmid"])?;
 
@@ -826,6 +1072,7 @@ fn parse_question(row: &Value) -> Option<Question> {
         choice: kind == "1",
         required: text_field(row, &["sfbd"]).is_some_and(|value| value == "1"),
         options,
+        source,
     })
 }
 
@@ -861,7 +1108,8 @@ mod tests {
 
     use super::{
         EvaluationTask, Question, QuestionOption, Questionnaire, build_payload, parse_course,
-        parse_questionnaire, topic_query, unwrap_envelope,
+        parse_questionnaire, pattern_needs_confirmation, topic_query, unwrap_envelope,
+        verified_outcome,
     };
     use serde_json::{Value, json};
 
@@ -916,6 +1164,7 @@ mod tests {
             "pjmap": {"PJJGBM": "A", "PJJGXXBM": "B", "RWID": "r1"},
             "pjxtPjjgPjjgckb": [party("p1", "1"), party("p2", "2")],
             "pjxtWjWjbReturnEntity": {
+                "yxwjzblist": [],
                 "wjzblist": [{
                     "zmc": "问卷1",
                     "tklist": [
@@ -1063,19 +1312,23 @@ mod tests {
 
     #[test]
 
-    fn the_payload_has_one_result_per_party_and_one_item_per_question() {
+    fn school_only_questionnaire_does_not_submit_the_empty_college_record() {
 
         let questionnaire = questionnaire();
 
         let answers = questionnaire.default_answers();
 
-        let payload = build_payload(&task(), &questionnaire, &answers);
+        let payload = build_payload(&task(), &questionnaire, &answers).unwrap();
 
-        assert_eq!(payload.len(), 2, "每个评价对象一条结果");
+        assert_eq!(
+            payload.len(),
+            1,
+            "官网只提交有题目的来源，学院模板不代表第二个评价对象"
+        );
 
         assert_eq!(payload[0]["pjid"], json!("p1"));
 
-        assert_eq!(payload[1]["sfxxpj"], json!("2"));
+        assert_eq!(payload[0]["sfxxpj"], json!("1"));
 
         assert_eq!(payload[0]["pjmap"]["PJJGBM"], json!("A"));
 
@@ -1097,6 +1350,43 @@ mod tests {
 
     #[test]
 
+    fn school_and_college_answers_are_not_copied_between_sources() {
+
+        let mut value = topic()[0].clone();
+
+        value["pjxtWjWjbReturnEntity"]["yxwjzblist"] = json!([{
+            "tklist": [{"tmid": "college-q", "tmlx": "1", "sfbd": "1", "tgmc": "学院题目",
+                "tmxxlist": [option("college-o", "优秀", 20.0)]}]
+        }]);
+
+        let questionnaire = parse_questionnaire(&value);
+
+        assert_eq!(questionnaire.questions.len(), 5);
+
+        let payload =
+            build_payload(&task(), &questionnaire, &questionnaire.default_answers()).unwrap();
+
+        assert_eq!(payload.len(), 2);
+
+        assert_eq!(payload[0]["pjxxlist"].as_array().unwrap().len(), 4);
+
+        assert_eq!(payload[1]["pjxxlist"].as_array().unwrap().len(), 1);
+
+        assert_eq!(payload[1]["pjid"], json!("p2"));
+
+        assert_eq!(payload[1]["sfxxpj"], json!("2"));
+
+        assert_eq!(payload[1]["pjxxlist"][0]["sjly"], json!("2"));
+
+        assert_eq!(payload[1]["pjxxlist"][0]["wjstid"], json!("college-q"));
+
+        assert_eq!(payload[1]["pjdf"], json!(20));
+
+        assert_eq!(payload[0]["pjdf"], json!(64.5));
+    }
+
+    #[test]
+
     fn whole_scores_are_sent_as_integers() {
 
         let questionnaire = Questionnaire {
@@ -1110,11 +1400,12 @@ mod tests {
                 }],
                 ..Default::default()
             }],
-            parties: vec![json!({"pjid": "p"})],
+            parties: vec![json!({"pjid": "p", "sfxxpj": "1"})],
             ..Default::default()
         };
 
-        let payload = build_payload(&task(), &questionnaire, &questionnaire.default_answers());
+        let payload =
+            build_payload(&task(), &questionnaire, &questionnaire.default_answers()).unwrap();
 
         assert_eq!(payload[0]["pjdf"], json!(93));
     }
@@ -1134,7 +1425,7 @@ mod tests {
 
     fn envelope_failures_are_surfaced() {
 
-        assert!(unwrap_envelope(r#"{"code":0,"result":{"a":1}}"#).is_ok());
+        assert!(unwrap_envelope(r#"{"code":200,"result":{"a":1}}"#).is_ok());
 
         let error = unwrap_envelope(r#"{"code":500,"message":"服务器错误"}"#)
             .unwrap_err()
@@ -1153,8 +1444,171 @@ mod tests {
 
     fn envelope_result_is_unwrapped() {
 
-        let value = unwrap_envelope(r#"{"code":0,"result":{"list":[1,2]}}"#).expect("应能解析");
+        let value = unwrap_envelope(r#"{"code":"200","result":{"list":[1,2]}}"#).expect("应能解析");
 
         assert_eq!(value["list"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+
+    fn unexpected_codes_never_claim_success() {
+
+        for body in [
+            r#"{"code":1,"msg":"你已评价"}"#,
+            r#"{"code":0}"#,
+            r#"{"code":null}"#,
+            r#"{"code":true}"#,
+            r#"{"result":{}}"#,
+        ] {
+
+            assert!(unwrap_envelope(body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+
+    fn first_pattern_is_confirmed_without_resetting_an_existing_pattern() {
+
+        assert!(pattern_needs_confirmation(&json!([{"wjid":"w1", "msid":null}]), "w1").unwrap());
+
+        assert!(!pattern_needs_confirmation(&json!([{"wjid":"w1", "msid":"1"}]), "w1").unwrap());
+
+        assert!(
+            pattern_needs_confirmation(&json!([{"wjid":"w1", "msid":"2"}]), "w1")
+                .unwrap_err()
+                .to_string()
+                .contains("丢失")
+        );
+
+        assert!(pattern_needs_confirmation(&json!([]), "w1").is_err());
+    }
+
+    #[test]
+
+    fn response_success_is_not_completion_when_the_course_is_still_pending() {
+
+        let outcome = verified_outcome(&task(), Ok(json!({})), Ok(json!([course_row()])));
+
+        assert!(!outcome.success);
+
+        assert!(outcome.message.contains("回查仍为未完成"));
+
+        let rejected = verified_outcome(&task(), Err(anyhow::anyhow!("你已评价")), Ok(json!([])));
+
+        assert!(!rejected.success);
+    }
+
+    #[test]
+
+    fn only_the_same_course_with_completed_count_confirms_submission() {
+
+        let mut row = course_row();
+
+        row["ypjcs"] = json!(1);
+
+        assert!(verified_outcome(&task(), Ok(json!({})), Ok(json!([row.clone()]))).success);
+
+        assert!(
+            verified_outcome(
+                &task(),
+                Err(anyhow::anyhow!("你已评价")),
+                Ok(json!([row.clone()]))
+            )
+            .success
+        );
+
+        row["bpdm"] = json!("someone-else");
+
+        assert!(!verified_outcome(&task(), Ok(json!({})), Ok(json!([row]))).success);
+
+        assert!(
+            !verified_outcome(
+                &task(),
+                Ok(json!({})),
+                Err(anyhow::anyhow!("network error"))
+            )
+            .success
+        );
+    }
+
+    #[test]
+
+    fn invalid_or_unscored_answers_do_not_produce_a_submission() {
+
+        let mut questionnaire = questionnaire();
+
+        assert!(build_payload(&task(), &questionnaire, &[("1".into(), "invalid".into())]).is_err());
+
+        questionnaire.questions[0].options[1].score = None;
+
+        assert!(build_payload(&task(), &questionnaire, &questionnaire.default_answers()).is_err());
+
+        questionnaire.questions[0].options[1].score = Some(7.5);
+
+        questionnaire.parties.clear();
+
+        assert!(build_payload(&task(), &questionnaire, &questionnaire.default_answers()).is_err());
+    }
+
+    #[test]
+
+    fn scoring_obeys_section_weights_and_the_sites_full_score_rule() {
+
+        let mut value = topic()[0].clone();
+
+        let entity = &mut value["pjxtWjWjbReturnEntity"];
+
+        entity["sfatmsf"] = json!("1");
+
+        entity["wjzblist"][0]["sfcyjs"] = json!("1");
+
+        entity["wjzblist"].as_array_mut().unwrap().push(json!({
+            "sfcyjs":"1", "tklist":[{"tmid":"extra", "tmlx":"1", "sfbd":"1",
+                "tmxxlist":[option("extra-o", "优秀", 35.5)]}]
+        }));
+
+        entity["wjzblist"].as_array_mut().unwrap().push(json!({
+            "sfcyjs":"0", "tklist":[{"tmid":"excluded", "tmlx":"1", "sfbd":"1",
+                "tmxxlist":[option("excluded-o", "优秀", 100.0)]}]
+        }));
+
+        let questionnaire = parse_questionnaire(&value);
+
+        let payload =
+            build_payload(&task(), &questionnaire, &questionnaire.default_answers()).unwrap();
+
+        assert_eq!(payload[0]["pjdf"], json!(50));
+
+        assert_eq!(payload[0]["pjxxlist"].as_array().unwrap().len(), 6);
+
+        value["pjxtWjWjbReturnEntity"]["sfatmsf"] = json!("0");
+
+        value["pjxtWjWjbReturnEntity"]["sfqyzgf"] = json!("1");
+
+        value["pjxtWjWjbReturnEntity"]["wjzblist"][1]["tklist"][0]["tmxxlist"][0]["xxfz"] =
+            json!(31.0);
+
+        let questionnaire = parse_questionnaire(&value);
+
+        let payload =
+            build_payload(&task(), &questionnaire, &questionnaire.default_answers()).unwrap();
+
+        assert_eq!(payload[0]["pjdf"], json!(100));
+    }
+
+    #[test]
+
+    fn unsupported_question_types_are_not_submitted_as_blank_free_text() {
+
+        let mut value = topic()[0].clone();
+
+        value["pjxtWjWjbReturnEntity"]["wjzblist"][0]["tklist"][0]["tmlx"] = json!("2");
+
+        let questionnaire = parse_questionnaire(&value);
+
+        let error =
+            build_payload(&task(), &questionnaire, &questionnaire.default_answers()).unwrap_err();
+
+        assert!(error.to_string().contains("题型"));
     }
 }

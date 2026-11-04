@@ -218,12 +218,14 @@ fn late_questionnaire_is_not_attached_to_another_course() {
 
     app.eval.selected = 1;
 
+    app.eval.questionnaire_task = Some("b".into());
+
     app.handle_async(
         AsyncEvent::EvalQuestionnaire("a".into(), Ok(Default::default())),
         &tx,
     );
 
-    assert!(app.eval.questionnaire_task.is_none());
+    assert_eq!(app.eval.questionnaire_task.as_deref(), Some("b"));
 
     assert!(!app.eval.show_questionnaire);
 
@@ -233,6 +235,53 @@ fn late_questionnaire_is_not_attached_to_another_course() {
     );
 
     assert_eq!(app.eval.questionnaire_task.as_deref(), Some("b"));
+}
+
+#[test]
+
+fn evaluation_back_returns_to_courses_and_ignores_late_questionnaires() {
+
+    let (tx, _) = mpsc::unbounded_channel();
+
+    let mut app = App::default();
+
+    app.screen = Screen::Workspace;
+
+    app.active_tab = WorkspaceTab::Eval;
+
+    app.eval.tasks = vec![evaluation_task("a"), evaluation_task("b")];
+
+    app.eval.selected = 1;
+
+    app.eval.questionnaire_task = Some("b".into());
+
+    app.handle_async(
+        AsyncEvent::EvalQuestionnaire("b".into(), Ok(Default::default())),
+        &tx,
+    );
+
+    assert!(app.eval.show_questionnaire);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &tx);
+
+    assert!(!app.eval.show_questionnaire);
+
+    assert!(app.eval.questionnaire.is_none());
+
+    assert!(app.eval.questionnaire_task.is_none());
+
+    assert_eq!(app.eval.selected, 1);
+
+    assert!(!app.should_quit);
+
+    app.handle_async(
+        AsyncEvent::EvalQuestionnaire("b".into(), Ok(Default::default())),
+        &tx,
+    );
+
+    assert!(!app.eval.show_questionnaire);
+
+    assert!(app.eval.questionnaire.is_none());
 }
 
 #[test]

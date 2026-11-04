@@ -1508,7 +1508,13 @@ fn eval_status_line(app: &App) -> Line<'static> {
     ];
 
     spans.push(Span::styled(
-        "  enter 看问卷  s 评这门  S 全部（提交需确认）",
+        if app.eval.show_questionnaire {
+
+            "  b 返回课程列表  s 评这门（提交需确认）  r 刷新"
+        } else {
+
+            "  enter 看问卷  s 评这门  S 全部（提交需确认）  r 刷新"
+        },
         theme::muted_style(),
     ));
 

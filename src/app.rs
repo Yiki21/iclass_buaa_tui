@@ -3054,6 +3054,12 @@ impl App {
                 }
             }
             AsyncEvent::EvalQuestionnaire(task_id, result) => {
+
+                if self.eval.questionnaire_task.as_deref() != Some(task_id.as_str()) {
+
+                    return;
+                }
+
                 match result {
                     Ok(questionnaire) => {
 
@@ -3112,9 +3118,17 @@ impl App {
                             }
                         }
 
-                        self.info(format!(
-                            "已确认提交 {succeeded} 门评教；未成功的课程仍保留在待评列表"
-                        ));
+                        if succeeded == 0 {
+
+                            self.warn(
+                                "未确认任何课程评教完成；请查看错误信息，课程仍保留在待评列表",
+                            );
+                        } else {
+
+                            self.info(format!(
+                                "已回查确认 {succeeded} 门评教完成；其余课程仍保留在待评列表"
+                            ));
+                        }
                     }
                     Err(error) => self.error(format!("评教提交失败: {error}")),
                 }
@@ -3548,13 +3562,21 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+
+                self.eval.show_questionnaire = false;
+
+                self.eval.questionnaire = None;
+
+                self.eval.questionnaire_task = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') if !self.eval.show_questionnaire => {
 
                 let len = self.eval.tasks.len();
 
                 self.eval.selected = clamp_step(self.eval.selected, len, -1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') if !self.eval.show_questionnaire => {
 
                 let len = self.eval.tasks.len();
 
@@ -5409,6 +5431,12 @@ impl App {
 
         self.eval.loading = true;
 
+        self.eval.show_questionnaire = false;
+
+        self.eval.questionnaire = None;
+
+        self.eval.questionnaire_task = None;
+
         let user_id = self
             .schedule
             .account
@@ -5449,6 +5477,8 @@ impl App {
         let tx = tx.clone();
 
         let task_id = task.id.clone();
+
+        self.eval.questionnaire_task = Some(task_id.clone());
 
         self.spawn_authenticated(
             move |session| {

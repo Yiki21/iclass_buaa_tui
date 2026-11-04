@@ -463,11 +463,12 @@ mod tests {
         };
 
         Question {
-            id:       id.to_string(),
-            text:     text.to_string(),
-            options:  vec![option("o1", "很好"), option("o2", "一般")],
-            choice:   true,
+            id: id.to_string(),
+            text: text.to_string(),
+            options: vec![option("o1", "很好"), option("o2", "一般")],
+            choice: true,
             required: true,
+            ..Default::default()
         }
     }
 
